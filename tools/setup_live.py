@@ -83,7 +83,12 @@ def main() -> int:
         from wrapper_core import ed25519
         seed, pub = ed25519.keypair_from_seed(_s.token_bytes(32))
         put_secret(api, base, "REGISTRY_SIGNING_SEED", seed.hex())
-        print(f"Public key (pin it in wrapper_core/trust.py PINNED_REGISTRY_KEYS, then release): {pub.hex()}")
+        code, _ = api.call("POST", f"{base}/actions/variables", {"name": "AUTOSTATION_REGISTRY_PUBKEY", "value": pub.hex()})
+        if code == 409:
+            code, _ = api.call("PATCH", f"{base}/actions/variables/AUTOSTATION_REGISTRY_PUBKEY", {"name": "AUTOSTATION_REGISTRY_PUBKEY", "value": pub.hex()})
+        hr.report("variable AUTOSTATION_REGISTRY_PUBKEY", code, {})
+        print(f"Public key {pub.hex()}: the next site build signs the registry, and the next installer build pins it. "
+              "Machines installed earlier keep accepting the registry until reinstalled (they hold no key).")
 
     sys.argv = [sys.argv[0], "--owner", a.owner, "--repo", a.repo]
     return hr.main()

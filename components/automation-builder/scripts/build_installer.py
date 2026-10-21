@@ -75,6 +75,7 @@ class Config:
     icon: str = ""
     wrapper_core_zip: str = ""
     framework_zip: str = ""       # optional: execution-framework (Node + node_modules) bundled in the installer
+    registry_pubkeys: str = ""    # comma-separated hex Ed25519 keys pinned into platform.json (manifest signature verification)
     git_zip: str = ""             # optional: MinGit (git + ssh) bundled so the ssh log transport needs no pre-installed git
     automation_zip: str = ""      # optional: payload bundled INSIDE the installer (offline-capable first install)
     python_embed_zip: str = ""
@@ -126,11 +127,19 @@ def load_config(src: Path | dict, base_dir: Path | None = None) -> Config:
     return Config(automation=name, version=version, registry_url=registry, log_remote=log_remote, ring=ring,
                   llm_endpoint=llm, llm_model=_clean("llm_model", raw.get("llm_model", ""), allow_empty=True),
                   publisher=_clean("publisher", raw.get("publisher", "AUTOMAGIX")), icon=raw.get("icon", "") or "",
-                  wrapper_core_zip=raw.get("wrapper_core_zip", "") or "", automation_zip=raw.get("automation_zip", "") or "", framework_zip=raw.get("framework_zip", "") or "", git_zip=raw.get("git_zip", "") or "", python_embed_zip=raw.get("python_embed_zip", "") or "",
+                  wrapper_core_zip=raw.get("wrapper_core_zip", "") or "", automation_zip=raw.get("automation_zip", "") or "", framework_zip=raw.get("framework_zip", "") or "", git_zip=raw.get("git_zip", "") or "", registry_pubkeys=_pubkeys(raw.get("registry_pubkeys", "")), python_embed_zip=raw.get("python_embed_zip", "") or "",
                   known_hosts_file=raw.get("known_hosts_file", "") or "", base_dir=base)
 
 
 # --- NSIS rendering -----------------------------------------------------------------------------------
+def _pubkeys(value) -> str:
+    keys = [k.strip().lower() for k in (value if isinstance(value, list) else str(value or "").split(",")) if str(k).strip()]
+    for k in keys:
+        if len(k) != 64 or any(c not in "0123456789abcdef" for c in k):
+            raise BuildError(f"config: registry_pubkeys must be 64-hex Ed25519 public keys (got {k[:20]!r})")
+    return ",".join(keys)
+
+
 def nsis_escape(value: str) -> str:
     """Escape for use inside a double-quoted NSIS string."""
     return value.replace("$", "$$").replace('"', '$\\"').replace("\r", "$\\r").replace("\n", "$\\n")
@@ -155,7 +164,7 @@ def render_nsi(cfg: Config, wrapper_version: str, flags: dict[str, bool], outfil
         "DEFINES": defines, "AUTOMATION": cfg.automation, "VERSION": cfg.version, "VIVERSION": vi_version(cfg.version),
         "PUBLISHER": cfg.publisher, "DEFAULT_RING": cfg.ring, "REGISTRY_URL": cfg.registry_url, "LOG_REMOTE": cfg.log_remote,
         "LLM_ENDPOINT": cfg.llm_endpoint, "LLM_MODEL": cfg.llm_model, "WRAPPER_VERSION": numeric_version(wrapper_version),
-        "STAGE_DIR": stage_dir, "OUTFILE": outfile, "ICON": icon,
+        "STAGE_DIR": stage_dir, "OUTFILE": outfile, "ICON": icon, "REGISTRY_PUBKEYS": cfg.registry_pubkeys,
         "GIT_ARG": "" if cfg.log_remote.startswith(("git@", "ssh://")) and not flags.get("HAVE_GIT") else "-SkipGit",
     }
     out = tpl

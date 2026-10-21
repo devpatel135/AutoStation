@@ -69,3 +69,9 @@ sends a final `decommissioned` event. Machines that never uninstall will see "no
 The `dev` ring uses a **separate logging remote** (set `log_remote` in its installer config / `platform.json`) and a registry namespace
 (own `manifest.yaml` branch or project), so dev runs never contaminate production logs or alerts. Developers run
 `python -m wrapper_core dev .` for fully offline loops.
+
+## Certification automation stops with `untrusted_redirect`
+The Playwright path only clicks the Microsoft account tile when the sign-in's `redirect_uri` points back at the portal or an allow-listed host (default `develop.deloitte.com`). Look at the run's `events.jsonl` for `untrusted_redirect`: `redirect_host` is the host Microsoft would return to. If it is a Deloitte host you trust, add it as a slot param in the registry manifest (`schedule.slots[].params.allowed_hosts: "host1,host2"`, exact hosts only) and promote; if you do not recognise it, do not add it. Machines whose Edge policy forbids DevTools (`RemoteDebuggingAllowed=0`) use native mode, which opens your normal Edge and cannot check redirects (it only presses a tile inside the window it opened).
+
+## Signing the registry manifest
+`python tools/setup_live.py` (answer `y` to the signing key) stores `REGISTRY_SIGNING_SEED` and the repo variable `AUTOSTATION_REGISTRY_PUBKEY`. The next `site` run signs `registry/manifest.yaml`; the next installer build pins the public key in `platform.json` (`registry_pubkeys`). Machines installed before that hold no key and keep accepting the registry until reinstalled. To rotate: generate a new key, list both public keys in the variable (comma-separated), release, then drop the old one. Verify any machine with `python -m wrapper_core.trust --show`.

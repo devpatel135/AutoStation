@@ -25,6 +25,7 @@ ManifestDPIAware true
 !define LOG_REMOTE      "@@LOG_REMOTE@@"
 ; git/ssh are prerequisites only for the ssh log transport (standalone "local" and github-api installs need neither)
 !define GIT_ARG "@@GIT_ARG@@"
+!define REGISTRY_PUBKEYS "@@REGISTRY_PUBKEYS@@"
 !define LLM_ENDPOINT    "@@LLM_ENDPOINT@@"
 !define LLM_MODEL       "@@LLM_MODEL@@"
 !define WRAPPER_VERSION "@@WRAPPER_VERSION@@"
@@ -188,7 +189,7 @@ Section "Install" SecInstall
 !endif
 
   ; 4. platform configuration (real JSON escaping done by the script)
-  !insertmacro RunPS "write-platform-config.ps1" '-Out "$INSTDIR\config\platform.json" -Ring "$Ring" -RegistryUrl "${REGISTRY_URL}" -LogRemote "${LOG_REMOTE}" -LlmEndpoint "${LLM_ENDPOINT}" -LlmModel "${LLM_MODEL}"'
+  !insertmacro RunPS "write-platform-config.ps1" '-Out "$INSTDIR\config\platform.json" -Ring "$Ring" -RegistryUrl "${REGISTRY_URL}" -LogRemote "${LOG_REMOTE}" -LlmEndpoint "${LLM_ENDPOINT}" -LlmModel "${LLM_MODEL}" -RegistryPubKeys "${REGISTRY_PUBKEYS}"'
   ${If} $0 != 0
     !insertmacro FailInstall "Could not write platform.json (exit code $0)." 5
   ${EndIf}

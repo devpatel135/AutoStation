@@ -14,7 +14,8 @@ param(
     [Parameter(Mandatory = $true)][string]$RegistryUrl,
     [string]$LogRemote = '',
     [string]$LlmEndpoint = '',
-    [string]$LlmModel = ''
+    [string]$LlmModel = '',
+    [string]$RegistryPubKeys = ''   # comma-separated 64-hex Ed25519 public keys that sign the registry manifest
 )
 $ErrorActionPreference = 'Stop'
 
@@ -35,6 +36,11 @@ $cfg['log_remote'] = $LogRemote
 $cfg['log_transport'] = $(if ($LogRemote -match '^(git@|ssh://)') { 'git-ssh' } else { 'dir' })
 if ($LlmEndpoint) { $cfg['llm_endpoint'] = $LlmEndpoint }
 if ($LlmModel) { $cfg['llm_model'] = $LlmModel }
+if ($RegistryPubKeys) {
+    $keys = @($RegistryPubKeys -split ',' | ForEach-Object { $_.Trim().ToLower() } | Where-Object { $_ })
+    foreach ($k in $keys) { if ($k -notmatch '^[0-9a-f]{64}$') { throw "invalid registry public key: $k" } }
+    $cfg['registry_pubkeys'] = $keys
+}
 
 $dir = Split-Path -Parent $Out
 if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }

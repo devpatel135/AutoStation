@@ -45,6 +45,7 @@ jobs:
     timeout-minutes: 40
     env:
       INPUT_RING: ${{ inputs.ring }}
+      REGISTRY_PUBKEY: ${{ vars.AUTOSTATION_REGISTRY_PUBKEY }}   # public key; set by tools/setup_live.py once the manifest is signed
       LOG_TOKEN_SET: ${{ secrets.LOGGING_TOKEN != '' }}
       LOG_REPO: ${{ vars.AUTOSTATION_LOG_REPO || format('{0}/AutoStation-logs', github.repository_owner) }}
       PAGES_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/registry/
@@ -89,7 +90,7 @@ jobs:
            "wrapper_core_zip": "../build/pkg/components/wrapper-core-$WV.zip",
            "framework_zip": "../build/pkg/components/execution-framework-$FV.zip",
            "automation_zip": "../build/pkg/automations/$AUTOMATION-$V.zip",
-           "git_zip": "../vendor/mingit.zip",
+           "git_zip": "../vendor/mingit.zip", "registry_pubkeys": "$REGISTRY_PUBKEY",
            "python_embed_zip": "../vendor/python-embed.zip"}
           EOF
           echo "AUTOMATION_VERSION=$V" >> "$GITHUB_ENV"

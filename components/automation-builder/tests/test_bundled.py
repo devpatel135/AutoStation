@@ -127,3 +127,14 @@ def test_git_zip_must_be_mingit(tmp_path):
         z.writestr("readme.txt", "x")
     with pytest.raises(bi.BuildError, match="git_zip"):
         bi.stage_build(config(tmp_path, git_zip="bad.zip"), tmp_path / "sb", {}, allow_missing_secrets=True)
+
+
+def test_registry_pubkeys_are_validated_and_rendered(tmp_path):
+    key = "ab" * 32
+    cfg = config(tmp_path, registry_pubkeys=bi._pubkeys(key))
+    stage = tmp_path / "sk"
+    flags, wv = bi.stage_build(cfg, stage, {}, allow_missing_secrets=True)
+    text = bi.render_nsi(cfg, wv, flags, "o.exe", ".", icon="")
+    assert f'!define REGISTRY_PUBKEYS "{key}"' in text and "-RegistryPubKeys" in text
+    with pytest.raises(bi.BuildError, match="registry_pubkeys"):
+        bi._pubkeys("not-hex")

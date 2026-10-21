@@ -42,6 +42,7 @@ the enterprise option if you later move the control plane to GitLab; the manifes
 | `LLM_KEY` | secret | analytics | LLM API key for failure diagnosis (CI side only; endpoints never see it) |
 | `JIRA_TOKEN` | secret | analytics | Jira API token (alert channel `jira`) |
 | `TEAMS_WEBHOOK_URL` | secret | analytics | Teams incoming webhook (alert channel `teams`) |
+| `AUTOSTATION_REGISTRY_PUBKEY` | variable (optional) | installers | public Ed25519 key(s) (hex, comma-separated) pinned into new installers so they only accept a registry manifest signed by `REGISTRY_SIGNING_SEED`; set by `tools/setup_live.py` |
 | `AUTOSTATION_LOG_REPO` | variable (optional) | installers, site | `owner/name` of the private logs repo (default `<owner>/AutoStation-logs`) |
 | `REGISTRY_SIGNING_SEED` | secret | site | Ed25519 private seed (hex) that signs `registry/manifest.yaml`; create with `tools/sign_registry.py --gen-key`, then pin the public key; unsigned until set |
 | `LOGGING_TOKEN` | secret | installers, site | fine-grained PAT (contents rw on `AutoStation-logs`): turns on connected installers and live dashboards, see [LIVE_LOGGING](LIVE_LOGGING.md) |
