@@ -12,9 +12,9 @@ compatibility:
 components:
   wrapper-core:
     rings:
-      dev: "0.3.0"
-      pilot: "0.3.0"
-      broad: "0.3.0"
+      dev: "0.4.0"
+      pilot: "0.4.0"
+      broad: "0.4.0"
     versions:
       "0.2.0":
         url: artifacts/components/wrapper-core-0.2.0.zip
@@ -22,11 +22,14 @@ components:
       "0.3.0":
         url: artifacts/components/wrapper-core-0.3.0.zip
         sha256: "27bd1a797f8de0a9c276ae5b868d942683fd58309949e0261d5d6d743bf7800e"
+      "0.4.0":
+        url: artifacts/components/wrapper-core-0.4.0.zip
+        sha256: ebd16a9df63027555fc6da7e17faef8b643da7e3633ee6f0868924c97b55bc46
   execution-framework:
     rings:
-      dev: "0.3.0"
-      pilot: "0.3.0"
-      broad: "0.3.0"
+      dev: "0.4.0"
+      pilot: "0.4.0"
+      broad: "0.4.0"
     versions:
       "0.2.0":
         url: artifacts/components/execution-framework-0.2.0.zip
@@ -34,6 +37,9 @@ components:
       "0.3.0":
         url: artifacts/components/execution-framework-0.3.0.zip
         sha256: "779ad7d8211f140e2cfea40bdc70ee0817d787dc9f02d9d9b2b54f56c337aab3"
+      "0.4.0":
+        url: artifacts/components/execution-framework-0.4.0.zip
+        sha256: a03b2d15be653dcd2e0242bc8cc58a6f814bac915a57f59d767eeed55696ac6b
 assets:
   default:
     internal_api_url: "https://api.example.internal"
@@ -52,13 +58,19 @@ automations:
     paused_reason: ""
     llm_allowed_classification: internal
     rings:
-      dev: "1.0.0"
-      pilot: "1.0.0"
-      broad: "1.0.0"
+      dev: "1.1.0"
+      pilot: "1.1.0"
+      broad: "1.1.0"
     versions:
       "1.0.0":
         url: artifacts/automations/automation-certification-site-1.0.0.zip
         sha256: c032e75644b2c441ca2e6065572db4528426743b15207ccbc531a945ff2ec86e
+        requires:
+          wrapper_core: ">=0.1.0,<1.0.0"
+          execution_framework: ">=0.1.0,<1.0.0"
+      "1.1.0":
+        url: artifacts/automations/automation-certification-site-1.1.0.zip
+        sha256: "93d0828cdce6bd21e679d3e51bd364c9531c80e65a3407ef24b572d1404d3fa1"
         requires:
           wrapper_core: ">=0.1.0,<1.0.0"
           execution_framework: ">=0.1.0,<1.0.0"
