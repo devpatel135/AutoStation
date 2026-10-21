@@ -67,6 +67,15 @@ jobs:
       - name: Smoke test - silent per-user install
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
+          trap {
+            $m = ($_.Exception.Message -replace '[\r\n]+', ' | ')
+            Write-Host "::error title=smoke failed::$m"
+            $h = Join-Path $env:LOCALAPPDATA 'AUTOMAGIX'
+            if (Test-Path $h) { Get-ChildItem $h -Recurse -Depth 2 -ErrorAction SilentlyContinue | Select-Object -First 60 -ExpandProperty FullName | Out-Host }
+            Get-Content (Join-Path $h 'logs\wrapper.log') -ErrorAction SilentlyContinue | Select-Object -Last 40 | Out-Host
+            exit 1
+          }
           $exe = Get-ChildItem build/out -Filter *.exe | Select-Object -First 1
           Write-Host "installing $($exe.Name)"
           $p = Start-Process -FilePath $exe.FullName -ArgumentList '/S' -Wait -PassThru
@@ -82,6 +91,15 @@ jobs:
       - name: Smoke test - first run reaches the log transport
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
+          trap {
+            $m = ($_.Exception.Message -replace '[\r\n]+', ' | ')
+            Write-Host "::error title=smoke failed::$m"
+            $h = Join-Path $env:LOCALAPPDATA 'AUTOMAGIX'
+            if (Test-Path $h) { Get-ChildItem $h -Recurse -Depth 2 -ErrorAction SilentlyContinue | Select-Object -First 60 -ExpandProperty FullName | Out-Host }
+            Get-Content (Join-Path $h 'logs\wrapper.log') -ErrorAction SilentlyContinue | Select-Object -Last 40 | Out-Host
+            exit 1
+          }
           $logs = Join-Path $env:GITHUB_WORKSPACE 'smoke-logs'
           $deadline = (Get-Date).AddSeconds(120)
           while ((Get-Date) -lt $deadline) {
@@ -100,6 +118,15 @@ jobs:
       - name: Smoke test - uninstall removes everything it installed
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
+          trap {
+            $m = ($_.Exception.Message -replace '[\r\n]+', ' | ')
+            Write-Host "::error title=smoke failed::$m"
+            $h = Join-Path $env:LOCALAPPDATA 'AUTOMAGIX'
+            if (Test-Path $h) { Get-ChildItem $h -Recurse -Depth 2 -ErrorAction SilentlyContinue | Select-Object -First 60 -ExpandProperty FullName | Out-Host }
+            Get-Content (Join-Path $h 'logs\wrapper.log') -ErrorAction SilentlyContinue | Select-Object -Last 40 | Out-Host
+            exit 1
+          }
           $home_ = Join-Path $env:LOCALAPPDATA 'AUTOMAGIX'
           $un = Get-ChildItem $home_ -Filter 'uninstall-*.exe' | Select-Object -First 1
           $p = Start-Process -FilePath $un.FullName -ArgumentList '/S' -Wait -PassThru
