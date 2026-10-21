@@ -32,6 +32,9 @@ $others = @($acl.Access | Where-Object {
         $_.IsInherited -or
         ($_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value -ne $me.User.Value)
     })
-if ($others.Count -gt 0) { throw "ACL for $Path still has other principals/inherited entries" }
+if ($others.Count -gt 0) {
+    $detail = ($others | ForEach-Object { "{0} inherited={1} rights={2}" -f $_.IdentityReference, $_.IsInherited, $_.FileSystemRights }) -join "; "
+    throw "ACL for $Path still has other principals/inherited entries: $detail (me=$($me.Name))"
+}
 Write-Output "restricted -> $Path"
 exit 0
