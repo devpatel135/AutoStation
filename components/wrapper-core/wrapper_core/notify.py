@@ -33,6 +33,7 @@ def toast(title: str, body: str) -> bool:
         return False
     try:
         env = dict(os.environ, AMX_TITLE=_xml_safe(title), AMX_BODY=_xml_safe(body))
+        env.pop("PSModulePath", None)  # a PowerShell 7 parent's module path breaks Windows PowerShell 5.1
         r = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", _PS],
                            env=env, capture_output=True, timeout=20)
         return r.returncode == 0

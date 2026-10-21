@@ -51,7 +51,8 @@ def _merge_triggers(base: dict, extra_path: str | None) -> dict:
 def _write(out: Path, rel: str, text: str, files: list[str]) -> None:
     p = out / rel
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(text, encoding="utf-8", newline="\n")
+    with open(p, "w", encoding="utf-8", newline="\n") as fh:  # Path.write_text(newline=) needs Python 3.10
+        fh.write(text)
     files.append(rel)
 
 

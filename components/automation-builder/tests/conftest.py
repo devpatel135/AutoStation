@@ -13,6 +13,12 @@ for p in (ROOT / "scripts", ROOT / "prompts", WRAPPER_CORE):
     sys.path.insert(0, str(p))
 
 
+# Windows PowerShell 5.1 launched from a PowerShell 7 session inherits PS7's PSModulePath and then cannot load
+# Microsoft.PowerShell.Security (Get-Acl, Set-Authenticode...). Drop it so powershell.exe uses its own defaults
+# (a Task Scheduler / installer launch has a clean environment, so production is unaffected).
+os.environ.pop("PSModulePath", None)
+
+
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch):
     for k in list(os.environ):

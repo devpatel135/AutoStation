@@ -41,7 +41,8 @@ def render_tree(src: Path, dst: Path, values: dict) -> list[Path]:
             text = f.read_text(encoding="utf-8")
         target = dst / rel
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(text, encoding="utf-8", newline="\n")
+        with open(target, "w", encoding="utf-8", newline="\n") as fh:  # Path.write_text(newline=) needs Python 3.10
+            fh.write(text)
         written.append(target)
     return written
 

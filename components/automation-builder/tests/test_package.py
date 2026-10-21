@@ -25,7 +25,8 @@ timeout_s: 60
 
 def make_automation(root: Path, yaml_text: str = AUTOMATION_YAML) -> Path:
     root.mkdir(parents=True, exist_ok=True)
-    (root / "automation.yaml").write_text(yaml_text, encoding="utf-8", newline="\n")
+    with open(root / "automation.yaml", "w", encoding="utf-8", newline="\n") as fh:  # Path.write_text(newline=) needs 3.10
+        fh.write(yaml_text)
     (root / "main.py").write_bytes(b"print('hi')\r\nprint('crlf normalised')\r\n")
     return root
 
