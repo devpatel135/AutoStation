@@ -1,0 +1,122 @@
+---
+version: 1.0.0
+description: Multi-step design chain driver - requirements, design, scaffold, tests, document (one narrow prompt per step)
+requires: [step, description]
+---
+You are one step in a fixed chain that designs an AUTOSTATION automation. Do ONLY the step named below; earlier
+steps are already done and their output is given as input. Never redo or contradict a previous step.
+
+## Overall goal
+{{ description }}
+
+## Current step: {{ step }}
+{% if step == "requirements" %}
+Produce the requirements and constraints list for this automation.
+
+Think about: inputs and outputs, target systems, whether an API (headless) or a browser is needed, data classification
+and whether LLM use is allowed on that data, schedule and volume, failure modes, who owns it.
+
+### Worked example
+Goal: "Automate the quarterly compliance report on portal Y".
+Output:
+```json
+{"summary": "Quarterly compliance report submission on portal Y",
+ "inputs": ["quarter (param)", "figures workbook on the shared path"],
+ "outputs": ["submission receipt id", "run summary"],
+ "target_systems": [{"name": "portal Y", "access": "browser, user session", "has_api": false}],
+ "data_classification": "confidential",
+ "llm_allowed": false,
+ "schedule": "quarterly, 1st business day 08:00",
+ "constraints": ["unattended", "no LLM on confidential figures", "idempotent: do not submit twice"],
+ "risks": ["portal layout changes", "session expiry mid-run"],
+ "open_questions": []}
+```
+Return ONLY one JSON object with keys: summary, inputs, outputs, target_systems, data_classification, llm_allowed, schedule, constraints, risks, open_questions.
+{% elif step == "design" %}
+Choose the AUTOSTATION patterns and design the components. Input: the requirements from the previous step.
+
+## Requirements (previous step output)
+{{ previous_output }}
+{% if api is defined and api %}
+
+## wrapper-core API (only these may be referenced)
+{{ api }}
+{% endif %}
+{% if manifest_schema is defined and manifest_schema %}
+
+## Registry manifest schema
+{{ manifest_schema }}
+{% endif %}
+
+Decide: headless API vs Playwright; whether any LLM pattern applies (1 decision point, 2 last-mile processing,
+3 selector resilience; pattern 4 agentic only if scripting is truly impossible); item granularity for `log_item`;
+retry policy (`error_handling`); schedule slots and params; the registry entry fields.
+
+### Worked example
+Output:
+```json
+{"approach": "browser", "reason": "portal Y has no API",
+ "patterns": ["pattern-3-resilience"],
+ "components": [{"name": "login_and_open_form", "role": "navigate with the user's session"},
+                {"name": "fill_and_submit", "role": "fill fields from the workbook, submit, capture receipt"}],
+ "items": "one item per report section",
+ "error_handling": {"max_retries": 3, "network_retry_wait_s": 60, "skip_on_data_error": false},
+ "schedule": {"slots": [{"id": "quarterly", "type": "weekly", "days": ["Monday"], "time": "08:00"}]},
+ "manifest_entry": {"data_classification": "confidential", "llm_allowed_classification": "internal"}}
+```
+Return ONLY one JSON object with keys: approach, reason, patterns, components, items, error_handling, schedule, manifest_entry.
+{% elif step == "scaffold" %}
+Generate the scaffold code. Input: the component design from the previous step. Use only the wrapper-core API below.
+
+## Design (previous step output)
+{{ previous_output }}
+{% if api is defined and api %}
+
+## wrapper-core API
+{{ api }}
+{% endif %}
+{% if standard is defined and standard %}
+
+## Automation Standard (your code will be reviewed against this)
+{{ standard }}
+{% endif %}
+
+### Worked example
+Output:
+```json
+{"files": [{"path": "automation.yaml", "content": "name: automation-quarterly-report\nversion: 0.1.0\nruntime: python\nentrypoint: main.py\n"},
+           {"path": "main.py", "content": "import wrapper_core as wrapper\n\n\n@wrapper.entrypoint\ndef main():\n    wrapper.log_event(\"start\", {})\n    wrapper.set_result(done=True)\n\n\nif __name__ == \"__main__\":\n    raise SystemExit(main())\n"}]}
+```
+Return ONLY one JSON object `{"files": [{"path": str, "content": str}]}` including automation.yaml and main.py.
+{% elif step == "tests" %}
+Write pytest tests for the scaffold. Input: the scaffold from the previous step. Offline only; stub all I/O.
+
+## Scaffold (previous step output)
+{{ previous_output }}
+
+### Worked example
+Output:
+```json
+{"tests": "import main\n\n\ndef test_main_returns_zero():\n    assert main.main() == 0\n", "covers": ["entrypoint exit code"]}
+```
+Return ONLY one JSON object `{"tests": str, "covers": [str]}`.
+{% elif step == "document" %}
+Assemble the final design document in Markdown from all previous outputs. Do not add new decisions.
+
+## Everything produced so far
+{{ previous_output }}
+
+### Worked example (structure only)
+```
+# Quarterly compliance report - design
+## Goal
+## Requirements
+## Design
+## Scaffold overview
+## Test plan
+## Risks and open questions
+```
+Return ONLY one JSON object `{"markdown": str}` using exactly those six sections in that order.
+{% endif %}
+
+Prompt template: {{ template_name }}@{{ template_version }} (step {{ step }}).

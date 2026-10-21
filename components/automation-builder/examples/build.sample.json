@@ -1,0 +1,11 @@
+{
+  "automation": "automation-example-hello",
+  "version": "1.0.0",
+  "ring": "pilot",
+  "registry_url": "https://registry.example.internal/",
+  "log_remote": "git@gitlab.example.internal:platform/automation-logging.git",
+  "llm_endpoint": "https://llm.example.internal/v1/chat/completions",
+  "llm_model": "default",
+  "publisher": "Automation Platform Team",
+  "wrapper_core_zip": "components/wrapper-core-0.1.0.zip"
+}

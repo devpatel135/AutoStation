@@ -1,0 +1,133 @@
+# automation-logging pipeline.
+#
+# Schedules (CI/CD > Schedules):
+#   * every 15 min : INGEST_ONLY=1        -> only the `ingest` job (keeps endpoint refs from piling up)
+#   * hourly       : (no variable)        -> ingest -> analyze -> alert -> pages
+#
+# Protected CI/CD variables (never committed):
+#   INGEST_TOKEN            project access token, role Maintainer, scopes read_repository + write_repository
+#                           (needs Maintainer: deleting protected `ingest/*` refs is a maintainer-only operation)
+#   AUTOSTATION_LLM_ENDPOINT / AUTOSTATION_LLM_KEY / AUTOSTATION_LLM_MODEL   LLM diagnosis (omit => diagnosis skipped)
+#   JIRA_URL / JIRA_TOKEN / JIRA_PROJECT, TEAMS_WEBHOOK_URL, SMTP_*          alert channels you enable in alerting.yaml
+#   WRAPPER_CORE_PROJECT_ID, WRAPPER_CORE_VERSION                            where to fetch wrapper-core (see before_script)
+# Plain variables:
+#   CONTAINERYARD_PYTHON_IMAGE   internal base image with Python >= 3.9 and git (no Docker Hub at build time)
+#   ARCHIVE_RETENTION_DAYS       default 90
+#
+# Where data lives: the `archive` branch of this repo (orphan, never merged). It holds
+#   archive/<kind>/<name>/YYYY/MM/DD/<id>.json   the log archive
+#   state/*.json                                 alert/diagnosis/analytics state (dedupe survives between pipelines)
+# Chosen over CI artifacts/cache because it is durable, diffable, auditable, and artifacts expire.
+# Growth is bounded by the `archive-prune` job (retention) and a monthly squash (see README).
+
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule" || $CI_PIPELINE_SOURCE == "web"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+stages: [test, ingest, analyze, alert, pages]
+
+default:
+  image: ${CONTAINERYARD_PYTHON_IMAGE}
+  before_script:
+    - git config --global user.name "automation-logging-ci" && git config --global user.email "ci@localhost"
+    # wrapper-core is shared code (miniyaml, llm, redact, manifest). In a split repo, fetch the released package;
+    # in the monorepo checkout ../wrapper-core is used automatically.
+    - |
+      if [ ! -d ../wrapper-core ] && [ -n "$WRAPPER_CORE_PROJECT_ID" ]; then
+        mkdir -p vendor && curl --fail --silent --show-error --header "JOB-TOKEN: $CI_JOB_TOKEN" \
+          "$CI_API_V4_URL/projects/$WRAPPER_CORE_PROJECT_ID/packages/generic/wrapper-core/$WRAPPER_CORE_VERSION/wrapper-core-$WRAPPER_CORE_VERSION.zip" -o vendor/wc.zip \
+          && python -c "import zipfile; zipfile.ZipFile('vendor/wc.zip').extractall('vendor')"
+        export PYTHONPATH="$PWD/vendor:$PYTHONPATH"
+      fi
+    - export PYTHONPATH="${PYTHONPATH}"
+
+.archive_pull: &archive_pull
+  - |
+    REMOTE="https://oauth2:${INGEST_TOKEN}@${CI_SERVER_HOST}/${CI_PROJECT_PATH}.git"
+    if git ls-remote --exit-code --heads "$REMOTE" archive >/dev/null 2>&1; then
+      git clone --quiet --depth 1 --branch archive "$REMOTE" data
+    else
+      mkdir data && git -C data init -q -b archive && git -C data remote add origin "$REMOTE"
+    fi
+    mkdir -p data/archive data/state
+
+.archive_push: &archive_push
+  - |
+    cd data && git add -A
+    if ! git diff --cached --quiet; then
+      git commit -q -m "archive: $CI_JOB_NAME $CI_PIPELINE_ID"
+      git push -q origin HEAD:archive || { git pull -q --rebase origin archive && git push -q origin HEAD:archive; }
+    fi
+    cd ..
+
+test:
+  stage: test
+  rules:
+    - if: $INGEST_ONLY
+      when: never
+    - when: on_success
+  script:
+    - pip install --quiet pytest
+    - python -m pytest -q
+
+ingest:
+  stage: ingest
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule" || $CI_PIPELINE_SOURCE == "web"
+  script:
+    - *archive_pull
+    - python -m automation_logging ingest --source git --remote "https://oauth2:${INGEST_TOKEN}@${CI_SERVER_HOST}/${CI_PROJECT_PATH}.git" --out data/archive
+    - *archive_push
+
+analyze:
+  stage: analyze
+  rules:
+    - if: $INGEST_ONLY
+      when: never
+    - if: $CI_PIPELINE_SOURCE == "schedule" || $CI_PIPELINE_SOURCE == "web"
+  script:
+    - *archive_pull
+    # the registry manifest + triggers/requests come from the registry project's published Pages (read-only)
+    - curl --fail --silent --header "PRIVATE-TOKEN: $REGISTRY_READ_TOKEN" "$REGISTRY_URL/manifest.yaml" -o manifest.yaml
+    - python -m automation_logging analyze --archive data/archive --manifest manifest.yaml --state data/state --out report.json
+    - python -m automation_logging diagnose --archive data/archive --manifest manifest.yaml --state data/state --signals report.json --max-calls 20
+    - python -m automation_logging triggers --archive data/archive --manifest manifest.yaml --out public/triggers.json --requests requests
+    - *archive_push
+  artifacts:
+    paths: [report.json, manifest.yaml, public/triggers.json]
+    expire_in: 2 days
+
+alert:
+  stage: alert
+  rules:
+    - if: $INGEST_ONLY
+      when: never
+    - if: $CI_PIPELINE_SOURCE == "schedule" || $CI_PIPELINE_SOURCE == "web"
+  needs: [analyze]
+  script:
+    - *archive_pull
+    - python -m automation_logging alert --signals report.json --config alerting.yaml --state data/state --archive data/archive
+    - *archive_push
+
+pages:
+  stage: pages
+  rules:
+    - if: $INGEST_ONLY
+      when: never
+    - if: $CI_PIPELINE_SOURCE == "schedule" || $CI_PIPELINE_SOURCE == "web"
+  needs: [analyze, alert]
+  script:
+    - *archive_pull
+    - python -m automation_logging dashboard --report report.json --archive data/archive --out public
+  artifacts:
+    paths: [public]
+
+archive-prune:
+  stage: ingest
+  rules:
+    - if: $PRUNE == "1"
+  script:
+    - *archive_pull
+    - python -m automation_logging prune --archive data/archive --days "${ARCHIVE_RETENTION_DAYS:-90}"
+    - *archive_push

@@ -1,0 +1,54 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  python:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+        python: ["3.9", "3.12"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install pytest pydantic jinja2
+      - name: Test every Python component
+        run: python tools/test_all.py
+
+  node:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Syntax check every JS file
+        shell: bash
+        run: find components -name "*.js" -not -path "*/node_modules/*" -print0 | xargs -0 -n1 node --check
+      - name: Framework + automation tests
+        run: |
+          node --test components/execution-framework/test/
+          node --test components/automations/automation-portal-report/test/
+
+  integration:
+    needs: python
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install pytest pydantic jinja2
+      - name: End-to-end platform walkthrough (package -> registry -> run -> ingest -> analytics -> dashboard -> notifier)
+        run: python tools/e2e_demo.py --out e2e-out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: e2e-dashboard
+          path: e2e-out/public

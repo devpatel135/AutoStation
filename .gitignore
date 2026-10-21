@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+node_modules/
+e2e-out/
+.amx-dev-run/
+*.egg-info/
+build/
+dist/
+*.exe
+.env
+*.key
+*.pem
+id_rsa*

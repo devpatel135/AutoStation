@@ -1,0 +1,211 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://autostation.invalid/schema/manifest.schema.json",
+  "title": "AUTOSTATION registry manifest (schema_version 1)",
+  "description": "Structure of manifest.yaml. Semantic rules (ring promotion order, compatibility matrix, requires satisfiability, artifact hashes) are enforced by `python -m registry validate`; this schema covers shape and value formats and is meant for editor tooling. Always quote times (\"09:00\") and versions (\"1.0.0\") in YAML.",
+  "type": "object",
+  "required": ["schema_version", "components", "automations"],
+  "additionalProperties": true,
+  "properties": {
+    "schema_version": { "const": 1 },
+    "fleet": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "paused": { "type": "boolean", "description": "Global kill-switch: wrapper-core halts every automation." },
+        "paused_reason": { "type": "string", "maxLength": 300 }
+      }
+    },
+    "rings": {
+      "type": "array",
+      "items": { "enum": ["dev", "pilot", "broad"] },
+      "description": "Promotion order is always dev -> pilot -> broad."
+    },
+    "compatibility": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["wrapper_core", "execution_framework"],
+        "additionalProperties": false,
+        "properties": {
+          "wrapper_core": { "$ref": "#/$defs/versionSpec" },
+          "execution_framework": { "$ref": "#/$defs/versionSpec" }
+        }
+      }
+    },
+    "components": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/component" }
+    },
+    "assets": {
+      "type": "object",
+      "description": "Dynamic non-secret config: `default` plus optional per-ring overrides. NEVER put credentials here.",
+      "properties": {
+        "default": { "type": "object" },
+        "dev": { "type": "object" },
+        "pilot": { "type": "object" },
+        "broad": { "type": "object" }
+      },
+      "additionalProperties": false
+    },
+    "automations": {
+      "type": "object",
+      "propertyNames": { "pattern": "^[a-z0-9][a-z0-9-]{1,62}$" },
+      "additionalProperties": { "$ref": "#/$defs/automation" }
+    }
+  },
+  "$defs": {
+    "semver": { "type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+(-[0-9A-Za-z.-]+)?$" },
+    "versionSpec": { "type": "string", "pattern": "^\\s*(([<>]=?|==|!=)?\\s*v?\\d+(\\.\\d+){0,2}(-[0-9A-Za-z.-]+)?\\s*,?\\s*)+$|^\\*$" },
+    "sha256": { "type": "string", "pattern": "^[0-9a-fA-F]{64}$" },
+    "classification": { "enum": ["public", "internal", "confidential", "restricted"] },
+    "ringMap": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "dev": { "$ref": "#/$defs/semver" },
+        "pilot": { "$ref": "#/$defs/semver" },
+        "broad": { "$ref": "#/$defs/semver" }
+      }
+    },
+    "versionRecord": {
+      "type": "object",
+      "required": ["url", "sha256"],
+      "additionalProperties": false,
+      "properties": {
+        "url": { "type": "string", "minLength": 1, "description": "Relative to the registry base, or an absolute http(s) URL." },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "requires": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "wrapper_core": { "$ref": "#/$defs/versionSpec" },
+            "execution_framework": { "$ref": "#/$defs/versionSpec" }
+          }
+        }
+      }
+    },
+    "component": {
+      "type": "object",
+      "required": ["rings", "versions"],
+      "properties": {
+        "rings": { "$ref": "#/$defs/ringMap" },
+        "versions": {
+          "type": "object",
+          "patternProperties": { "^\\d+\\.\\d+\\.\\d+(-[0-9A-Za-z.-]+)?$": { "$ref": "#/$defs/versionRecord" } },
+          "additionalProperties": false
+        }
+      }
+    },
+    "day": { "type": "string", "pattern": "^([Mm]onday|[Tt]uesday|[Ww]ednesday|[Tt]hursday|[Ff]riday|[Ss]aturday|[Ss]unday)$" },
+    "hhmm": { "type": "string", "pattern": "^([01]?\\d|2[0-3]):[0-5]\\d$" },
+    "slot": {
+      "type": "object",
+      "required": ["id", "type"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,40}$" },
+        "type": { "enum": ["daily", "weekly", "hourly", "poll"] },
+        "time": { "$ref": "#/$defs/hhmm" },
+        "days": { "type": "array", "items": { "$ref": "#/$defs/day" } },
+        "every": { "type": "integer", "minimum": 1 },
+        "every_minutes": { "type": "integer", "minimum": 1 },
+        "params": { "type": "object" }
+      },
+      "additionalProperties": false
+    },
+    "maintenanceWindow": {
+      "type": "object",
+      "properties": {
+        "days": { "type": "array", "items": { "$ref": "#/$defs/day" } },
+        "daily": { "type": "string", "pattern": "^\\s*([01]?\\d|2[0-3]):[0-5]\\d\\s*-\\s*([01]?\\d|2[0-3]):[0-5]\\d\\s*$" }
+      },
+      "additionalProperties": false
+    },
+    "schedule": {
+      "type": "object",
+      "properties": {
+        "timezone": { "type": "string" },
+        "expected_duration_ms": {
+          "type": "object",
+          "properties": {
+            "baseline": { "type": "integer", "minimum": 1 },
+            "warn_threshold": { "type": "number", "minimum": 1 }
+          },
+          "additionalProperties": false
+        },
+        "maintenance_windows": { "type": "array", "items": { "$ref": "#/$defs/maintenanceWindow" } },
+        "slots": { "type": "array", "items": { "$ref": "#/$defs/slot" } }
+      },
+      "additionalProperties": false
+    },
+    "errorHandling": {
+      "type": "object",
+      "properties": {
+        "max_retries": { "type": "integer", "minimum": 0, "maximum": 10 },
+        "network_retry_wait_s": { "type": "number", "minimum": 0 },
+        "backoff_multiplier": { "type": "number", "minimum": 1 },
+        "vpn_tool": { "type": "string" },
+        "skip_on_data_error": { "type": "boolean" },
+        "escalate_after_retries": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "trigger": {
+      "type": "object",
+      "required": ["on_automation"],
+      "properties": {
+        "on_automation": { "type": "string" },
+        "on_status": { "enum": ["success", "failed", "partial", "any"] },
+        "slot": { "type": "string" },
+        "params": { "type": "object" }
+      },
+      "additionalProperties": false
+    },
+    "link": {
+      "oneOf": [
+        { "type": "string" },
+        { "type": "object", "required": ["title", "url"], "properties": { "title": { "type": "string" }, "url": { "type": "string" } }, "additionalProperties": false }
+      ]
+    },
+    "catalog": {
+      "type": "object",
+      "description": "Portal / governance metadata. Ignored by wrapper-core.",
+      "properties": {
+        "summary": { "type": "string", "minLength": 1, "maxLength": 400 },
+        "systems": { "type": "array", "items": { "type": "string" } },
+        "owner_team": { "type": "string" },
+        "data_classification": { "$ref": "#/$defs/classification" },
+        "process_owner": { "type": "string" },
+        "links": { "type": "array", "items": { "$ref": "#/$defs/link" } },
+        "minutes_per_item": { "type": "number", "minimum": 0 },
+        "tags": { "type": "array", "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$" } }
+      },
+      "additionalProperties": false
+    },
+    "automation": {
+      "type": "object",
+      "required": ["description", "owner", "status"],
+      "properties": {
+        "description": { "type": "string", "minLength": 1 },
+        "owner": { "type": "string" },
+        "owner_team": { "type": "string" },
+        "systems": { "type": "array", "items": { "type": "string" } },
+        "data_classification": { "$ref": "#/$defs/classification" },
+        "status": { "enum": ["active", "paused"] },
+        "paused_reason": { "type": "string", "maxLength": 300 },
+        "llm_allowed_classification": { "$ref": "#/$defs/classification" },
+        "rings": { "$ref": "#/$defs/ringMap" },
+        "versions": {
+          "type": "object",
+          "patternProperties": { "^\\d+\\.\\d+\\.\\d+(-[0-9A-Za-z.-]+)?$": { "$ref": "#/$defs/versionRecord" } },
+          "additionalProperties": false
+        },
+        "schedule": { "$ref": "#/$defs/schedule" },
+        "error_handling": { "$ref": "#/$defs/errorHandling" },
+        "notify_on_complete": { "type": "boolean" },
+        "triggers": { "type": "array", "items": { "$ref": "#/$defs/trigger" } },
+        "catalog": { "$ref": "#/$defs/catalog" }
+      }
+    }
+  }
+}

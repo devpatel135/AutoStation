@@ -1,0 +1,70 @@
+# Reusable job templates for building a signed installer from an automation payload.
+#
+#   include:
+#     - project: platform/automation-builder
+#       ref: main
+#       file: /templates/build-installer.gitlab-ci.yml
+#
+# Pipeline stages expected by these jobs: package -> installer -> publish.
+#
+# Required CI variables (project/group level; mark secrets MASKED + PROTECTED, files as type "File"):
+#   BUILDER_IMAGE            builder image from this project's registry (see .gitlab-ci.yml build-image)
+#   AUTOMATION_NAME          e.g. automation-invoice-router     (must equal name: in automation.yaml)
+#   AUTOMATION_VERSION       semver, equals version: in automation.yaml (typically derived from the git tag)
+#   PAYLOAD_DIR              directory holding automation.yaml + code (default: .)
+#   REGISTRY_URL             base URL (or share) of the registry, as endpoints will read it
+#   LOG_REMOTE               git@host:group/automation-logging.git   (ssh remote the shared write-only key can push to)
+#   LLM_ENDPOINT, LLM_MODEL  optional
+#   LOGGING_SSH_KEY_FILE     [File] write-only logging deploy key
+#   REGISTRY_READ_TOKEN_FILE [File] read-only registry token
+#   KNOWN_HOSTS_FILE         [File] known_hosts for LOG_REMOTE (public data)
+#   SIGNING_PFX_FILE         [File] code-signing certificate (.pfx) from the internal PKI
+#   SIGNING_PFX_PASSWORD_FILE[File] its password
+#   SIGNING_TIMESTAMP_URL    RFC3161 timestamp authority
+#   PYTHON_EMBED_ZIP         [File or path] python.org embeddable package zip (from the containeryard artifact mirror)
+# Registry MR job:
+#   REGISTRY_PROJECT_ID, REGISTRY_BOT_TOKEN (MASKED, api + write_repository), REGISTRY_GIT_URL (https clone URL, no credentials)
+
+variables:
+  PAYLOAD_DIR: "."
+  BUILD_RING: dev
+
+# --- package the payload into a deterministic, registry-ready zip ------------------------------------------
+.package-payload:
+  stage: package
+  image: $BUILDER_IMAGE
+  script:
+    - mkdir -p dist
+    - autostation-build package automation "$AUTOMATION_NAME" "$PAYLOAD_DIR" --version "$AUTOMATION_VERSION" --out dist | tee dist/package.json
+  artifacts:
+    paths:
+      - dist/automations
+      - dist/package.json
+
+# --- installer: fetch bootstrap wrapper-core, render + validate the .nsi, compile, sign ---------------------------
+# Signing is mandatory outside the dev ring: set REQUIRE_SIGNING=1 (default for pilot/broad) and the job fails closed
+# when no certificate is configured. Dev builds without a certificate print a loud UNSIGNED warning.
+.build-installer:
+  stage: installer
+  image: $BUILDER_IMAGE
+  variables:
+    REQUIRE_SIGNING: "0"
+  script:
+    - mkdir -p dist/installers
+    - python /opt/autostation-builder/scripts/ci_installer_config.py config --out dist/build.json
+    - if [ "$REQUIRE_SIGNING" = "1" ] || [ "$BUILD_RING" != "dev" ]; then SIGN_FLAGS="--require-signing"; else SIGN_FLAGS="--sign --allow-missing-secrets"; fi; autostation-build installer --config dist/build.json --out dist --signer osslsigncode $SIGN_FLAGS | tee dist/installer.json
+  artifacts:
+    paths:
+      - dist/installers
+      - dist/installer.json
+    expire_in: 30 days
+
+# --- publish: propose the new version to the registry as a DEV-ring merge request ---------------------------------
+# Never promotes to pilot/broad: the MR approval is the governance gate; promotion is a separate reviewed registry MR.
+.open-registry-mr:
+  stage: publish
+  image: $BUILDER_IMAGE
+  script:
+    - python /opt/autostation-builder/scripts/ci_registry_mr.py --clone --registry-dir registry-checkout --kind automation --name "$AUTOMATION_NAME" --version "$AUTOMATION_VERSION" --zip "dist/automations/$AUTOMATION_NAME-$AUTOMATION_VERSION.zip" --installer "dist/installers/$AUTOMATION_NAME-$AUTOMATION_VERSION-setup.exe"
+  environment:
+    name: registry/dev

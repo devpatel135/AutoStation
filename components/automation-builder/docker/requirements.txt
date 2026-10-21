@@ -1,0 +1,4 @@
+# Installed from the internal PyPI mirror (PIP_INDEX_URL build arg). Validate any change against the mirror first.
+jinja2>=3.1,<4
+pydantic>=2.5,<3
+pytest>=7.4,<9

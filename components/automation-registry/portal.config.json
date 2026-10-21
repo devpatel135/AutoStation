@@ -1,0 +1,8 @@
+{
+  "title": "AUTOSTATION",
+  "gitlab_url": "https://gitlab.example.internal",
+  "project_path": "automation/automation-registry",
+  "default_branch": "main",
+  "ops_ref": "main",
+  "installers_path": "installers"
+}

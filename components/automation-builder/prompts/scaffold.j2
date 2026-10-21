@@ -1,0 +1,48 @@
+---
+version: 1.0.0
+description: New AUTOSTATION automation boilerplate (entry point, automation.yaml, tests) from a one-line description
+requires: [description, api, manifest_schema]
+---
+You generate boilerplate for a new AUTOSTATION automation. Be exact: use ONLY the wrapper-core functions listed in
+the API section below. Never invent functions, parameters or modules.
+
+## Task
+{{ description }}
+
+## wrapper-core public API (the ONLY platform functions you may call)
+{{ api }}
+
+## Registry manifest schema (shape of the automation's registry entry)
+{{ manifest_schema }}
+{% if example is defined and example %}
+
+## Existing automation for style reference
+{{ example }}
+{% endif %}
+
+## Rules (these are checked by the review step)
+1. The entry point is decorated with `@wrapper.entrypoint` and ends with `raise SystemExit(main())`.
+2. Every per-item unit of work goes through `wrapper.run_item(item_id, fn, ...)` or `wrapper.log_item(...)` so item telemetry exists.
+3. Never log secrets. Anything personal or confidential is passed with `sensitive=True` or `sensitive_keys=[...]`.
+4. Untrusted text (scraped pages, documents) goes to `wrapper.llm_call(...)` ONLY in the `context=` argument, never inside `prompt=`; structured calls pass a `schema` and handle a `None` result explicitly.
+5. Parameters come from `wrapper.param("name", default)`; honour `wrapper.is_dry_run()` before any side effect.
+6. Credentials are the user's own session; never hard-code or read secrets from files.
+7. Finish with `wrapper.set_result(...)` summarising counts.
+
+## Worked example
+Task: "Pull open invoices from System X and route each to the AP team".
+
+Output:
+```json
+{"files": [
+  {"path": "automation.yaml",
+   "content": "name: automation-invoice-router\nversion: 0.1.0\nruntime: python\nentrypoint: main.py\nrequires: {wrapper_core: \">=0.1.0,<1.0.0\", execution_framework: \">=0.1.0,<1.0.0\"}\ntimeout_s: 1800\n"},
+  {"path": "main.py",
+   "content": "import wrapper_core as wrapper\n\n\ndef fetch_open_invoices(since):\n    \"\"\"Replace with the real System X call (prefer its API over the browser).\"\"\"\n    return []\n\n\ndef route(invoice):\n    if not invoice.get(\"vendor_id\"):\n        raise ValueError(\"missing required field: vendor_id\")  # DATA_ERROR -> item skipped, run continues\n    return \"AP\"\n\n\n@wrapper.entrypoint\ndef main():\n    since = wrapper.param(\"date_range\", \"yesterday\")\n    invoices = fetch_open_invoices(since)\n    wrapper.log_event(\"fetched\", {\"count\": len(invoices), \"since\": since})\n    routed = 0\n    for inv in invoices:\n        if wrapper.is_dry_run():\n            continue\n        if wrapper.run_item(inv[\"id\"], route, inv) is not None:\n            routed += 1\n    wrapper.set_result(fetched=len(invoices), routed=routed)\n\n\nif __name__ == \"__main__\":\n    raise SystemExit(main())\n"},
+  {"path": "tests/test_main.py",
+   "content": "import main\n\n\ndef test_route_requires_vendor():\n    import pytest\n    with pytest.raises(ValueError):\n        main.route({\"id\": \"INV-1\"})\n\n\ndef test_route_ok():\n    assert main.route({\"id\": \"INV-1\", \"vendor_id\": \"V9\"}) == \"AP\"\n"}
+]}
+```
+
+## Output format
+Return ONLY one JSON object `{"files": [{"path": str, "content": str}]}` containing `automation.yaml`, `main.py` and `tests/test_main.py`. Paths are relative; no prose, no code fences around your answer. Prompt template: {{ template_name }}@{{ template_version }}.

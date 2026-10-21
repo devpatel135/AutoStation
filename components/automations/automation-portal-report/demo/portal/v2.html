@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Compliance Portal (demo v2 - redesigned)</title></head>
+<body>
+  <h1>Quarterly Compliance Controls</h1>
+  <table id="report">
+    <thead><tr><th>Id</th><th>Control</th><th>Owner</th><th>Status</th><th>Due date</th><th>Findings</th></tr></thead>
+    <tbody>
+      <tr><td>C-101</td><td>Access review</td><td>it-sec@example.com</td><td>compliant</td><td>2026-09-30</td><td>0</td></tr>
+      <tr><td>C-102</td><td>Backup restore test</td><td>infra@example.com</td><td>overdue</td><td>2026-09-15</td><td>3</td></tr>
+    </tbody>
+  </table>
+  <!-- The portal team renamed the control: id changed from #export-btn. The automation must self-heal. -->
+  <button id="btn-export-v2" data-action="export" type="button">Export report (CSV)</button>
+  <div id="status" aria-live="polite">idle</div>
+  <script>
+    document.getElementById('btn-export-v2').addEventListener('click', function () {
+      document.getElementById('status').textContent = 'Exported 2 rows';
+    });
+  </script>
+</body>
+</html>

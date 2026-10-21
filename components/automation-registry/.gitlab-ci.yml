@@ -1,0 +1,160 @@
+# automation-registry CI. See README.md ("GitLab settings") for the protected-branch / approval / variable setup this relies on.
+#
+# Pipelines:
+#   * every MR           -> validate + schema + compat + tests            (the merge gate)
+#   * default branch     -> validate + build-portal + pages               (publishes the storefront / admin panel / manifest)
+#   * schedule           -> same as default branch (keeps health + rule-triggers fresh; recommended: every 10 min)
+#   * web/api with ACTION-> ops-action                                    (admin panel backend; see registry/ci_ops.py)
+#
+# Variables you must define (Settings > CI/CD > Variables):
+#   OPS_BOT_TOKEN        project access token (role Developer, scopes api + write_repository), PROTECTED + MASKED
+#   WRAPPER_CORE_REPO    optional git URL of wrapper-core if the image does not already ship it at $WRAPPER_CORE_PATH
+#   BUILDER_PROJECT_ID   optional project id of automation-builder (to pull signed installers into the portal)
+#   LOGGING_PROJECT_ID   optional project id of automation-logging (to pull signals.json / runs.json into the portal)
+#   EMERGENCY_PAUSE_USERS optional comma list of usernames allowed to use EMERGENCY=1 on pause / fleet-pause
+#   ALLOW_PLACEHOLDERS   "1" ONLY while the manifest still has the starter all-zero sha256 values. Delete it at go-live.
+
+stages: [validate, build, pages, ops]
+
+default:
+  # Internal containeryard image with Python 3.9+ (no pip installs at build time: the runner is airgapped).
+  image: ${CONTAINERYARD}/automation-builder/python:3.12
+
+variables:
+  ALLOW_PLACEHOLDERS: "1"                 # REMOVE once real artifacts are registered (see validate-release below)
+  REGISTRY_ALLOW_PLACEHOLDERS: $ALLOW_PLACEHOLDERS
+  WRAPPER_CORE_PATH: /opt/automation-builder/wrapper-core
+  PYTHONDONTWRITEBYTECODE: "1"
+
+.setup: &setup
+  - |
+    if [ ! -d "$WRAPPER_CORE_PATH/wrapper_core" ]; then
+      if [ -d "../wrapper-core/wrapper_core" ]; then WRAPPER_CORE_PATH="$(cd ../wrapper-core && pwd)";
+      elif [ -n "$WRAPPER_CORE_REPO" ]; then git clone --depth 1 "https://gitlab-ci-token:${CI_JOB_TOKEN}@${WRAPPER_CORE_REPO#https://}" "$CI_PROJECT_DIR/.wrapper-core" && WRAPPER_CORE_PATH="$CI_PROJECT_DIR/.wrapper-core";
+      else echo "wrapper_core not found: set WRAPPER_CORE_PATH or WRAPPER_CORE_REPO"; exit 1; fi
+    fi
+    export PYTHONPATH="$WRAPPER_CORE_PATH:$CI_PROJECT_DIR"
+
+.mr-or-default:
+  rules:
+    - if: $ACTION                                                # ops-action pipelines run only the ops job
+      when: never
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+
+# ---- validate (the merge gate) ----------------------------------------------------------------------------------
+validate:
+  stage: validate
+  extends: .mr-or-default
+  script:
+    - *setup
+    - python -m registry validate --manifest manifest.yaml ${ALLOW_PLACEHOLDERS:+--allow-placeholders}
+    - |
+      if [ -d artifacts ]; then python -m registry validate --manifest manifest.yaml ${ALLOW_PLACEHOLDERS:+--allow-placeholders} --artifacts .; fi
+
+schema:
+  stage: validate
+  extends: .mr-or-default
+  script:
+    - *setup
+    - python -m registry validate --manifest manifest.yaml --schema-only
+
+compat-smoke:
+  stage: validate
+  extends: .mr-or-default
+  script:
+    - *setup
+    - python -m registry compat --manifest manifest.yaml
+
+# Release gate: never allows placeholder hashes. Informational until RELEASE_STRICT=1 is set (go-live), then blocking.
+validate-release:
+  stage: validate
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $RELEASE_STRICT == "1"
+      allow_failure: false
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      allow_failure: true
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event" && $RELEASE_STRICT == "1"
+      allow_failure: false
+  variables:
+    REGISTRY_ALLOW_PLACEHOLDERS: ""
+  script:
+    - *setup
+    - python -m registry validate --manifest manifest.yaml --strict
+
+registry-tests:
+  stage: validate
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      changes: ["registry/**/*", "tests/**/*", "schema/**/*"]
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      changes: ["registry/**/*", "tests/**/*", "schema/**/*"]
+  script:
+    - *setup
+    - python -m pytest -q
+
+# ---- build + publish ---------------------------------------------------------------------------------------------
+build-portal:
+  stage: build
+  rules:
+    - if: $ACTION
+      when: never
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"          # build (not publish) on MRs so portal breakage is caught early
+  script:
+    - *setup
+    # operator-queued triggers live on the protected `triggers` branch (so the ops bot never needs push access to main)
+    - |
+      if git fetch --depth 1 origin triggers 2>/dev/null; then git show FETCH_HEAD:triggers.json > triggers.json || true; fi
+    # optional inputs from sibling projects (installers from the builder, telemetry from the logging pipeline)
+    - |
+      fetch_artifacts() { # <project-id> <job> <dest>
+        [ -n "$1" ] || return 0
+        curl --fail --silent --location --header "JOB-TOKEN: $CI_JOB_TOKEN" \
+          "$CI_API_V4_URL/projects/$1/jobs/artifacts/$CI_DEFAULT_BRANCH/download?job=$2" -o /tmp/art.zip && unzip -o -q /tmp/art.zip -d "$3" || echo "note: no artifacts from project $1 job $2";
+      }
+      fetch_artifacts "$BUILDER_PROJECT_ID" build-installers .
+      fetch_artifacts "$LOGGING_PROJECT_ID" analytics logging-out
+    - |
+      ARGS=""
+      [ -f logging-out/signals.json ] && ARGS="$ARGS --signals logging-out/signals.json"
+      [ -d logging-out/runs ] && ARGS="$ARGS --runs logging-out/runs"
+      [ -f logging-out/triggers.json ] && ARGS="$ARGS --extra-triggers logging-out/triggers.json"
+      [ -d artifacts ] && ARGS="$ARGS --artifacts artifacts"
+      python -m registry build-portal --manifest manifest.yaml --out public $ARGS ${ALLOW_PLACEHOLDERS:+--allow-placeholders}
+  artifacts:
+    paths: [public]
+    expire_in: 7 days
+
+pages:
+  stage: pages
+  needs: [build-portal]
+  rules:
+    - if: $ACTION
+      when: never
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_PIPELINE_SOURCE == "schedule" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  script:
+    - test -f public/index.html
+  artifacts:
+    paths: [public]
+
+# ---- ops-action: the admin panel's backend -------------------------------------------------------------------------
+# Triggered from the prefilled "Run pipeline" link in admin.html (web) or via the API. Variables: ACTION TARGET REASON PARAMS BRANCH.
+# Manifest-changing actions -> branch + merge request (approval = governance gate).  trigger-add -> protected `triggers` branch.
+ops-action:
+  stage: ops
+  rules:
+    - if: $ACTION && ($CI_PIPELINE_SOURCE == "web" || $CI_PIPELINE_SOURCE == "api" || $CI_PIPELINE_SOURCE == "trigger")
+      when: always
+  needs: []
+  resource_group: ops-action                 # serialize: two operators must not race on history/CHANGELOG.md or triggers.json
+  script:
+    - *setup
+    - python -m registry ops-action --git --manifest manifest.yaml --result ops_result.json ${ALLOW_PLACEHOLDERS:+--allow-placeholders}
+  artifacts:
+    when: always
+    paths: [ops_result.json]
+    expire_in: 30 days

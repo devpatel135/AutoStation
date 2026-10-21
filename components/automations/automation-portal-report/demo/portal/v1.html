@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Compliance Portal (demo v1)</title></head>
+<body>
+  <h1>Quarterly Compliance Controls</h1>
+  <table id="report">
+    <thead><tr><th>Id</th><th>Control</th><th>Owner</th><th>Status</th><th>Due date</th><th>Findings</th></tr></thead>
+    <tbody>
+      <tr><td>C-101</td><td>Access review</td><td>it-sec@example.com</td><td>compliant</td><td>2026-09-30</td><td>0</td></tr>
+      <tr><td>C-102</td><td>Backup restore test</td><td>infra@example.com</td><td>overdue</td><td>2026-09-15</td><td>3</td></tr>
+      <tr><td>C-103</td><td>Vendor risk assessment</td><td>procurement@example.com</td><td>pending</td><td>2026-11-30</td><td>1</td></tr>
+      <tr><td>C-104</td><td>Policy attestation</td><td>hr@example.com</td><td>banana</td><td>2026-10-31</td><td>0</td></tr>
+    </tbody>
+  </table>
+  <button id="export-btn" type="button">Export CSV</button>
+  <div id="status" aria-live="polite">idle</div>
+  <script>
+    document.getElementById('export-btn').addEventListener('click', function () {
+      document.getElementById('status').textContent = 'Exported 4 rows';
+    });
+  </script>
+</body>
+</html>

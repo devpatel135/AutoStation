@@ -1,0 +1,62 @@
+# execution-framework CI. Images come from the internal containeryard (no Docker Hub at build time).
+# Required CI variables: CONTAINERYARD (registry host), NODE_ARTIFACT_DIR + PYTHON_EMBED_ZIP + TZDATA_WHEEL (internal artifact store paths),
+#                        NPM_CONFIG_REGISTRY (internal npm mirror; overrides .npmrc), BUILDER_SCRIPTS (path to automation-builder/scripts).
+stages: [lint, test, build, package]
+
+default:
+  image: $CONTAINERYARD/automation-builder:latest
+
+variables:
+  NPM_CONFIG_FUND: "false"
+  NPM_CONFIG_AUDIT: "false"
+
+.node:
+  image: $CONTAINERYARD/node:20
+  cache:
+    key: { files: [package-lock.json] }
+    paths: [node_modules/]
+  before_script:
+    - npm ci --ignore-scripts          # lock-file only; fails if package.json and the lock disagree
+
+lint:
+  extends: .node
+  stage: lint
+  script:
+    - node scripts/check-syntax.js     # node --check on every .js/.cjs/.mjs
+
+unit-tests:
+  extends: .node
+  stage: test
+  script:
+    - node --test --test-reporter=spec
+  # Playwright/Edge-dependent behaviour is not exercised here: tests inject fake pages, an in-process broker stub and a fake MCP registry.
+
+lock-drift:
+  extends: .node
+  stage: test
+  script:
+    - npm ls --omit=dev --all >/dev/null   # fails on missing/extraneous packages vs the lock
+
+assemble:
+  extends: .node
+  stage: build
+  script:
+    - >
+      node scripts/build-framework.mjs --out dist --node-dir "$NODE_ARTIFACT_DIR"
+      --python-embed "$PYTHON_EMBED_ZIP" --tzdata-wheel "$TZDATA_WHEEL"
+  artifacts:
+    paths: [dist/tree]
+    expire_in: 1 day
+
+package:
+  stage: package
+  needs: [assemble]
+  script:
+    # contract: package.py component <name> <srcdir> --version V --out DIR  -> <name>-<V>.zip + sha256 JSON
+    - python "$BUILDER_SCRIPTS/package.py" component execution-framework dist/tree --version "$(cat VERSION | tr -d '\r\n')" --out dist/pkg
+  artifacts:
+    paths: [dist/pkg]
+    expire_in: 30 days
+  rules:
+    - if: $CI_COMMIT_TAG
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH

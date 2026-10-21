@@ -1,0 +1,7 @@
+name: automation-invoice-router
+version: 1.0.0
+runtime: python
+entrypoint: main.py
+args: []
+requires: {wrapper_core: ">=0.1.0,<1.0.0", execution_framework: ">=0.1.0,<1.0.0"}
+timeout_s: 900

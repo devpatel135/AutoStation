@@ -1,0 +1,51 @@
+---
+version: 1.0.0
+description: Compliance review of an automation against the Automation Standard checklist
+requires: [standard, source]
+---
+You review an AUTOSTATION automation for compliance with the Automation Standard. Judge ONLY against the numbered
+checklist below. Do not report style nits or anything not on the checklist.
+
+## Automation Standard (numbered checklist)
+{{ standard }}
+
+## Source under review (line numbers are prefixed)
+```
+{% for line in source.splitlines() %}
+{{ loop.index }}: {{ line }}
+{% endfor %}
+```
+{% if existing_tests is defined and existing_tests %}
+
+## Existing tests (for context only)
+{{ existing_tests }}
+{% endif %}
+
+## Severity
+- HIGH: a requirement whose violation can leak data, run unattended side effects wrongly, or break the platform contract (secrets in logs, untrusted text in the prompt, no entrypoint, no dry-run guard on a write).
+- MEDIUM: missing telemetry, retry policy bypassed, missing result.
+- LOW: documentation or naming issues the checklist asks for.
+
+## Worked example
+Source:
+```
+1: import wrapper_core as wrapper
+2: def main():
+3:     rows = fetch()
+4:     for r in rows:
+5:         resp = wrapper.llm_call("Summarize " + r["text"])
+6:         wrapper.log_event("row", {"ssn": r["ssn"]})
+```
+Checklist (excerpt): "1. entrypoint decorated", "4. untrusted text only in context", "3. sensitive data flagged".
+Output:
+```json
+{"findings": [
+  {"rule": 1, "severity": "HIGH", "line": 2, "message": "main() is not decorated with @wrapper.entrypoint, so uncaught errors are not classified.", "suggestion": "Add @wrapper.entrypoint above def main()."},
+  {"rule": 4, "severity": "HIGH", "line": 5, "message": "Untrusted row text is concatenated into the prompt (prompt-injection risk).", "suggestion": "Pass wrapper.llm_call('Summarize this text.', context=r['text'], caller='...')."},
+  {"rule": 3, "severity": "HIGH", "line": 6, "message": "SSN is logged without being marked sensitive.", "suggestion": "wrapper.log_event('row', {'ssn': r['ssn']}, sensitive_keys=['ssn'])."}
+], "summary": "3 HIGH findings"}
+```
+If everything complies return `{"findings": [], "summary": "compliant"}`.
+
+## Output format
+Return ONLY one JSON object `{"findings": [{"rule": int, "severity": "HIGH|MEDIUM|LOW", "line": int|null, "message": str, "suggestion": str}], "summary": str}`. `rule` is the checklist number. Prompt template: {{ template_name }}@{{ template_version }}.

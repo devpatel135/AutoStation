@@ -1,0 +1,27 @@
+# GitLab CODEOWNERS for automation-registry. Replace the @group names with your real groups.
+# Combine with Settings > Merge requests > Approval rules > "Code owners" (required) so these approvals are enforced.
+
+# Default: the platform team reviews everything.
+*                                   @automation-platform
+
+# Registry code, CI and the schema change the governance gate itself -> platform maintainers only (2 approvals recommended).
+[Registry tooling and CI][2]
+/registry/                          @automation-platform/maintainers
+/tests/                             @automation-platform/maintainers
+/schema/                            @automation-platform/maintainers
+/.gitlab-ci.yml                     @automation-platform/maintainers
+/CODEOWNERS                         @automation-platform/maintainers
+
+# The manifest: platform approves ring promotion / fleet blocks; automation owners approve their own stanza (see below).
+[Manifest and history]
+/manifest.yaml                      @automation-platform
+/history/                           @automation-platform
+/portal.config.json                 @automation-platform
+
+# Governance document is owned by risk/security.
+[Governance]
+/docs/GOVERNANCE.md                 @security-governance @automation-platform
+
+# GitLab CODEOWNERS works per file, not per YAML block, so an automation owner cannot be a *required* approver for just their stanza.
+# The ops-action MR description carries a review checklist and names the requester; ask the owner (see `owner` in the manifest) to
+# approve explicitly. If you need hard enforcement, split the manifest per automation (manifest.d/<name>.yaml merged at build time).

@@ -1,0 +1,29 @@
+$name:
+  description: "$description"
+  owner: "$owner"
+  owner_team: "$owner_team"
+  systems: [TBD]
+  data_classification: $classification
+  llm_allowed_classification: internal
+  status: active
+  rings: {dev: "0.1.0", pilot: "0.1.0", broad: "0.1.0"}
+  versions: {}                 # filled in by `python -m registry add-version`
+  schedule:
+    timezone: America/New_York
+    expected_duration_ms: {baseline: 120000, warn_threshold: 2.0}
+    maintenance_windows:
+      - {days: [Saturday, Sunday]}
+    slots:
+      - {id: daily, type: daily, time: "09:00", params: {}}
+  error_handling:
+    max_retries: 3
+    network_retry_wait_s: 60
+    backoff_multiplier: 2.0
+    skip_on_data_error: true
+    escalate_after_retries: true
+  notify_on_complete: false
+  catalog:
+    summary: "$description"
+    systems: [TBD]
+    owner_team: "$owner_team"
+    tags: []

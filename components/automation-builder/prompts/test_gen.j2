@@ -1,0 +1,47 @@
+---
+version: 1.0.0
+description: pytest case generation for a function or module, in the style of the existing tests
+requires: [source]
+---
+You write pytest tests for an AUTOSTATION automation module. Cover the happy path and each expected failure mode.
+Tests must run offline with no network and no real browser; stub I/O with `monkeypatch`.
+
+## Code under test
+```python
+{{ source }}
+```
+{% if existing_tests is defined and existing_tests %}
+
+## Existing tests - match this style, fixtures and naming
+```python
+{{ existing_tests }}
+```
+{% endif %}
+{% if api is defined and api %}
+
+## wrapper-core API (for correct imports and stubbing)
+{{ api }}
+{% endif %}
+
+## Rules
+1. One behaviour per test; names read `test_<function>_<behaviour>`.
+2. Assert on outputs and on `wrapper` calls (stub `wrapper.log_item` / `wrapper.log_event` with `monkeypatch` and record calls).
+3. For each DATA_ERROR path, assert the item is skipped and the loop continues; for each LOGIC path assert the exception propagates.
+4. Never call the real LLM: monkeypatch `wrapper.llm_call` and cover the `None` (LLM unavailable) result.
+5. Import the module as the automation does (`import main`); no sys.path hacks beyond what the existing tests use.
+
+## Worked example
+Code under test:
+```python
+def route(invoice):
+    if not invoice.get("vendor_id"):
+        raise ValueError("missing required field: vendor_id")
+    return "AP"
+```
+Output:
+```json
+{"tests": "import pytest\n\nimport main\n\n\ndef test_route_returns_ap_for_valid_invoice():\n    assert main.route({\"id\": \"I1\", \"vendor_id\": \"V9\"}) == \"AP\"\n\n\ndef test_route_rejects_missing_vendor_id():\n    with pytest.raises(ValueError):\n        main.route({\"id\": \"I2\"})\n", "covers": ["happy path", "missing vendor_id (DATA_ERROR)"]}
+```
+
+## Output format
+Return ONLY one JSON object `{"tests": "<complete python source of the test module>", "covers": [str]}`. No prose, no code fences around your answer. Prompt template: {{ template_name }}@{{ template_version }}.

@@ -1,0 +1,61 @@
+# .gitlab-ci.yml for the SHARED components (wrapper-core, execution-framework): test -> package -> propose.
+#
+# A tag vX.Y.Z packages the component and opens a DEV-ring MR against the registry (components.<name>.versions + rings.dev).
+# Compatibility matrix and ring promotion stay reviewed registry changes; this job never promotes.
+
+include:
+  - project: platform/automation-builder
+    ref: main
+    file: /templates/build-installer.gitlab-ci.yml
+
+stages:
+  - test
+  - package
+  - publish
+
+variables:
+  BUILDER_IMAGE: $CI_REGISTRY/platform/automation-builder/builder:latest
+  COMPONENT_NAME: wrapper-core
+  COMPONENT_SRC: "."
+
+workflow:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+    - if: '$CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+$/'
+
+test:
+  stage: test
+  image: $BUILDER_IMAGE
+  script:
+    - python -m pytest -q --junitxml=report.xml
+  artifacts:
+    when: always
+    reports:
+      junit: report.xml
+
+package-component:
+  stage: package
+  image: $BUILDER_IMAGE
+  needs: [test]
+  script:
+    - export COMPONENT_VERSION="${CI_COMMIT_TAG#v}"
+    - export COMPONENT_VERSION="${COMPONENT_VERSION:-0.0.0-ci.$CI_PIPELINE_IID}"
+    - mkdir -p dist
+    - autostation-build package component "$COMPONENT_NAME" "$COMPONENT_SRC" --version "$COMPONENT_VERSION" --out dist | tee dist/package.json
+  artifacts:
+    paths:
+      - dist/components
+      - dist/package.json
+
+open-registry-mr:
+  extends: .open-registry-mr
+  stage: publish
+  needs: [package-component]
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+$/'
+  variables:
+    AUTOMATION_NAME: $COMPONENT_NAME
+  script:
+    - export COMPONENT_VERSION="${CI_COMMIT_TAG#v}"
+    - python /opt/autostation-builder/scripts/ci_registry_mr.py --clone --registry-dir registry-checkout --kind component --name "$COMPONENT_NAME" --version "$COMPONENT_VERSION" --zip "dist/components/$COMPONENT_NAME-$COMPONENT_VERSION.zip"

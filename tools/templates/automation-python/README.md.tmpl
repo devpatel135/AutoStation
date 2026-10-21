@@ -1,0 +1,26 @@
+# $name
+
+$description
+
+* **Owner:** $owner
+* **Runtime:** Python (wrapper-core). Runs unattended on a schedule as the signed-in user.
+* **Data classification:** $classification
+
+## Develop
+
+```bash
+# run through the real run lifecycle, offline (mock LLM, local log folder)
+python -m wrapper_core dev . --param date_range=yesterday
+# compliance review against docs/AUTOMATION_STANDARD.md (HIGH findings fail CI)
+python -m wrapper_core assist review main.py
+# tests
+python -m pytest
+```
+
+## Release
+
+1. Merge to `main` → CI lints, tests, packages the payload and builds a **dev-ring** installer.
+2. CI opens an MR against the registry assigning the version to the `dev` ring. Review + approve it.
+3. Promote through `pilot` then `broad` with `python -m registry promote $name --to pilot|broad` (each is an MR).
+
+The registry stanza to start from is in `manifest-entry.yaml`.

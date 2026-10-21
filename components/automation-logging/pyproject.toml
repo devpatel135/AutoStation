@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "automation-logging"
+version = "0.1.0"
+description = "AUTOSTATION log ingestion, analytics, compliance signals, LLM diagnosis, alerting and dashboard"
+requires-python = ">=3.9"
+dependencies = ["wrapper-core>=0.1.0"]   # shared miniyaml / llm / redact / manifest; stdlib-only otherwise
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[tool.setuptools.packages.find]
+include = ["automation_logging*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

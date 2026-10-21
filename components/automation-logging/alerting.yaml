@@ -1,0 +1,28 @@
+# automation-logging alert routing (wrapper_core.miniyaml subset: quote times, no anchors).
+#
+# Open question Q10 (Jira vs an internal notification automation) is deliberately NOT decided here: all channels exist,
+# routing decides. `outbox` is the JSONL file the dog-fooding notifier automation can consume (state/alerts-outbox.jsonl
+# on the `archive` branch); `jira` implements option A; `teams`/`email` are the direct options.
+channels:
+  - {name: outbox, type: file, path: alerts-outbox.jsonl}
+  - {name: teams, type: webhook, format: teams, url_env: TEAMS_WEBHOOK_URL}
+  - {name: jira, type: jira, issue_type: Bug}
+  - {name: mail, type: email, to_owner: true}
+
+# severity -> channels. Start conservative: only the outbox, then add channels as the team proves they watch them.
+routing:
+  critical: [outbox]        # e.g. [outbox, teams, jira, mail]
+  high: [outbox]            # e.g. [outbox, teams, jira]
+  medium: [outbox]
+  low: []
+
+# per-automation override; `email` becomes the owner address on alerts for that automation
+owners: {}
+#  automation-invoice-router: {channels: [outbox, teams], email: "ap-automation@example.com"}
+
+# below `min_severity` nothing is sent during the window (state untouched, so it fires when the window ends)
+quiet_hours: {timezone: UTC, window: "22:00-06:00", min_severity: critical}
+
+dedupe_window_h: 24        # a resolved condition that reappears sooner than this is not re-announced
+re_alert_interval_h: 24    # reminder cadence while a condition stays active
+notify_resolved: true

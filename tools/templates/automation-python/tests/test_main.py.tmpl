@@ -1,0 +1,23 @@
+"""Lifecycle test: the payload runs through the REAL wrapper-core run lifecycle, offline (mock LLM, dir log transport)."""
+from __future__ import annotations
+
+import os
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+# wrapper-core location: installed package, or a sibling checkout via WRAPPER_CORE_DIR
+sys.path.insert(0, os.environ.get("WRAPPER_CORE_DIR", str(ROOT.parent / "wrapper-core")))
+
+from wrapper_core.testing import run_payload  # noqa: E402
+
+
+def test_runs_cleanly():
+    r = run_payload(ROOT, {})
+    assert r.record["status"] == "success", r.record.get("error")
+    assert r.record["items"]["failed"] == 0
+
+
+def test_dry_run_has_no_side_effects():
+    r = run_payload(ROOT, {}, dry_run=True)
+    assert r.record["status"] == "success"

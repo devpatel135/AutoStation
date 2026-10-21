@@ -1,0 +1,284 @@
+; =====================================================================================================
+; AUTOSTATION per-automation installer  -  TEMPLATE
+;
+; Rendered by scripts/build_installer.py: every double-at-sign token is replaced (values NSIS-escaped) and the
+; HAVE_* defines are generated. Secrets (logging SSH key, registry read token) are NEVER substituted into
+; this text: they are staged as separate files and embedded by `File`, so this script is safe to log/archive.
+;
+; Design: the installer stays THIN. It lays down (only when missing/stale) an interpreter + wrapper-core, writes
+; configuration + secrets, then hands over to `python -m wrapper_core install <automation>`, whose
+; lifecycle.install_automation does the dynamic assembly (execution-framework, payload), registers Task
+; Scheduler + the Startup-folder maintenance script. Per-user, NO admin: RequestExecutionLevel user.
+; Silent: /S    Ring: /RING=pilot    Dir: /D=C:\path (must be last)    Skip first run: /NORUN
+; =====================================================================================================
+Unicode true
+SetCompressor /SOLID lzma
+RequestExecutionLevel user
+ManifestDPIAware true
+@@DEFINES@@
+
+!define AUTOMATION      "@@AUTOMATION@@"
+!define VERSION         "@@VERSION@@"
+!define PUBLISHER       "@@PUBLISHER@@"
+!define DEFAULT_RING    "@@DEFAULT_RING@@"
+!define REGISTRY_URL    "@@REGISTRY_URL@@"
+!define LOG_REMOTE      "@@LOG_REMOTE@@"
+!define LLM_ENDPOINT    "@@LLM_ENDPOINT@@"
+!define LLM_MODEL       "@@LLM_MODEL@@"
+!define WRAPPER_VERSION "@@WRAPPER_VERSION@@"
+!define UNINST_KEY      "Software\Microsoft\Windows\CurrentVersion\Uninstall\AUTOMAGIX-${AUTOMATION}"
+
+!ifdef HAVE_ICON
+  !define MUI_ICON   "@@ICON@@"
+  !define MUI_UNICON "@@ICON@@"
+!endif
+
+Name "${AUTOMATION} ${VERSION}"
+OutFile "@@OUTFILE@@"
+InstallDir "$LOCALAPPDATA\AUTOMAGIX"
+InstallDirRegKey HKCU "Software\AUTOMAGIX" "InstallDir"
+BrandingText "${PUBLISHER}"
+ShowInstDetails show
+ShowUninstDetails show
+
+VIProductVersion "@@VIVERSION@@"
+VIAddVersionKey "ProductName"     "AUTOMAGIX ${AUTOMATION}"
+VIAddVersionKey "ProductVersion"  "${VERSION}"
+VIAddVersionKey "FileVersion"     "${VERSION}"
+VIAddVersionKey "CompanyName"     "${PUBLISHER}"
+VIAddVersionKey "LegalCopyright"  "${PUBLISHER}"
+VIAddVersionKey "FileDescription" "AUTOMAGIX installer for ${AUTOMATION}"
+
+!include "MUI2.nsh"
+!include "LogicLib.nsh"
+!include "FileFunc.nsh"
+!include "WordFunc.nsh"
+!include "TextFunc.nsh"
+!insertmacro GetParameters
+!insertmacro GetOptions
+!insertmacro VersionCompare
+!insertmacro TrimNewLines
+
+Var Ring
+Var NoRun
+Var PythonExe
+
+!insertmacro MUI_PAGE_WELCOME
+!insertmacro MUI_PAGE_INSTFILES
+!insertmacro MUI_PAGE_FINISH
+!insertmacro MUI_UNPAGE_CONFIRM
+!insertmacro MUI_UNPAGE_INSTFILES
+!insertmacro MUI_LANGUAGE "English"
+
+; ---- helpers --------------------------------------------------------------------------------------
+; Run one of the embedded PowerShell scripts (result code in $0). Output is shown in the details pane;
+; the scripts never print secrets.
+!macro RunPS SCRIPT ARGS
+  nsExec::ExecToLog `"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\scripts\${SCRIPT}" ${ARGS}`
+  Pop $0
+!macroend
+
+; Fail the installation: message (suppressed when silent), exit code, abort.
+!macro FailInstall MSG CODE
+  DetailPrint "ERROR: ${MSG}"
+  MessageBox MB_OK|MB_ICONSTOP "${MSG}" /SD IDOK
+  SetErrorLevel ${CODE}
+  Abort
+!macroend
+
+Function .onInit
+  ${GetParameters} $R0
+  StrCpy $Ring "${DEFAULT_RING}"
+  ClearErrors
+  ${GetOptions} $R0 "/RING=" $R1
+  ${IfNot} ${Errors}
+    StrCpy $Ring $R1
+  ${EndIf}
+  ClearErrors
+  ${If} $Ring != "dev"
+  ${AndIf} $Ring != "pilot"
+  ${AndIf} $Ring != "broad"
+    MessageBox MB_OK|MB_ICONSTOP "Invalid /RING=$Ring (expected dev, pilot or broad)." /SD IDOK
+    SetErrorLevel 3
+    Abort
+  ${EndIf}
+  StrCpy $NoRun "0"
+  ${GetOptions} $R0 "/NORUN" $R1
+  ${IfNot} ${Errors}
+    StrCpy $NoRun "1"
+  ${EndIf}
+  ClearErrors
+FunctionEnd
+
+; ---- install --------------------------------------------------------------------------------------
+Section "Install" SecInstall
+  SectionIn RO
+  SetOverwrite on
+
+  ; helper scripts live only in the installer's temp plugins dir
+  InitPluginsDir
+  SetOutPath "$PLUGINSDIR\scripts"
+  File "@@STAGE_DIR@@\scripts\install-check.ps1"
+  File "@@STAGE_DIR@@\scripts\protect-secret.ps1"
+  File "@@STAGE_DIR@@\scripts\restrict-acl.ps1"
+  File "@@STAGE_DIR@@\scripts\set-credential.ps1"
+  File "@@STAGE_DIR@@\scripts\configure-python.ps1"
+  File "@@STAGE_DIR@@\scripts\write-platform-config.ps1"
+  File "@@STAGE_DIR@@\scripts\first-run.ps1"
+
+  ; 1. prerequisites (git, ssh, disk, write access) - nothing is written to the install dir before this passes
+  DetailPrint "Checking prerequisites..."
+  nsExec::ExecToStack `"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\scripts\install-check.ps1" -InstallDir "$INSTDIR"`
+  Pop $0
+  Pop $1
+  DetailPrint "$1"
+  ${If} $0 != 0
+    !insertmacro FailInstall "Prerequisite check failed. $1" 2
+  ${EndIf}
+
+  CreateDirectory "$INSTDIR\config"
+  CreateDirectory "$INSTDIR\secrets"
+
+  ; 2. interpreter (installer-managed, lives outside execution-framework so self-heal can swap that dir while running)
+!ifdef HAVE_PYTHON_EMBED
+  ${IfNot} ${FileExists} "$INSTDIR\python\python.exe"
+    DetailPrint "Installing embedded Python..."
+    SetOutPath "$INSTDIR\python"
+    File /r "@@STAGE_DIR@@\python\*.*"
+  ${EndIf}
+  StrCpy $PythonExe `"$INSTDIR\python\python.exe"`
+  !insertmacro RunPS "configure-python.ps1" '-PythonDir "$INSTDIR\python"'
+  ${If} $0 != 0
+    !insertmacro FailInstall "Could not configure the embedded Python (exit code $0)." 4
+  ${EndIf}
+!else
+  ; built without an embedded interpreter: a system Python 3.9+ on PATH is required
+  StrCpy $PythonExe "python.exe"
+!endif
+
+  ; 3. wrapper-core: only when missing or older than the bundled version (self-heal keeps it current afterwards)
+  StrCpy $R2 "0.0.0"
+  ${If} ${FileExists} "$INSTDIR\wrapper-core\VERSION"
+    FileOpen $R3 "$INSTDIR\wrapper-core\VERSION" r
+    FileRead $R3 $R2
+    FileClose $R3
+    ${TrimNewLines} "$R2" $R2
+  ${EndIf}
+  ${VersionCompare} "${WRAPPER_VERSION}" "$R2" $R4
+  ${If} $R4 == 1
+  ${OrIfNot} ${FileExists} "$INSTDIR\wrapper-core\wrapper_core\__init__.py"
+    DetailPrint "Installing wrapper-core ${WRAPPER_VERSION}..."
+    SetOutPath "$INSTDIR\wrapper-core"
+    File /r "@@STAGE_DIR@@\wrapper-core\*.*"
+  ${Else}
+    DetailPrint "wrapper-core $R2 already installed - keeping it."
+  ${EndIf}
+
+  ; 4. platform configuration (real JSON escaping done by the script)
+  !insertmacro RunPS "write-platform-config.ps1" '-Out "$INSTDIR\config\platform.json" -Ring "$Ring" -RegistryUrl "${REGISTRY_URL}" -LogRemote "${LOG_REMOTE}" -LlmEndpoint "${LLM_ENDPOINT}" -LlmModel "${LLM_MODEL}"'
+  ${If} $0 != 0
+    !insertmacro FailInstall "Could not write platform.json (exit code $0)." 5
+  ${EndIf}
+
+!ifdef HAVE_KNOWN_HOSTS
+  SetOutPath "$INSTDIR\config"
+  File "@@STAGE_DIR@@\config\known_hosts"
+!endif
+
+  ; 5. secrets: DPAPI-protect the write-only logging key (plaintext wiped), token -> Credential Manager
+!ifdef HAVE_SSH_KEY
+  DetailPrint "Protecting the logging key with DPAPI..."
+  SetOutPath "$PLUGINSDIR\sec"
+  File "@@STAGE_DIR@@\secrets\logging_key"
+  !insertmacro RunPS "protect-secret.ps1" '-InFile "$PLUGINSDIR\sec\logging_key" -OutFile "$INSTDIR\secrets\logging_key.dpapi" -DeleteInput'
+  ${If} $0 != 0
+    !insertmacro FailInstall "Could not protect the logging key (exit code $0)." 6
+  ${EndIf}
+!endif
+!ifdef HAVE_TOKEN
+  DetailPrint "Storing the registry read token in Windows Credential Manager..."
+  SetOutPath "$PLUGINSDIR\sec"
+  File "@@STAGE_DIR@@\secrets\registry_token"
+  !insertmacro RunPS "set-credential.ps1" '-Target "AUTOMAGIX/registry_token" -SecretFile "$PLUGINSDIR\sec\registry_token"'
+  ${If} $0 != 0
+    !insertmacro FailInstall "Could not store the registry token (exit code $0)." 7
+  ${EndIf}
+!endif
+  !insertmacro RunPS "restrict-acl.ps1" '-Path "$INSTDIR\secrets"'
+
+  ; 6. hand over to wrapper-core: dynamic assembly + Task Scheduler + Startup maintenance script
+  DetailPrint "Installing ${AUTOMATION} (wrapper-core install)..."
+  System::Call 'Kernel32::SetEnvironmentVariable(t, t)i("AUTOMAGIX_HOME", "$INSTDIR").r9'
+!ifndef HAVE_PYTHON_EMBED
+  System::Call 'Kernel32::SetEnvironmentVariable(t, t)i("PYTHONPATH", "$INSTDIR\wrapper-core").r9'
+!endif
+  nsExec::ExecToLog `$PythonExe -m wrapper_core install ${AUTOMATION}`
+  Pop $0
+  ${If} $0 != 0
+    !insertmacro FailInstall "wrapper-core could not install ${AUTOMATION} (exit code $0). See the details pane and $INSTDIR\logs\wrapper.log." 8
+  ${EndIf}
+
+  ; 7. uninstaller + per-user Add/Remove Programs entry (HKCU: no admin)
+  WriteUninstaller "$INSTDIR\uninstall-${AUTOMATION}.exe"
+  WriteRegStr   HKCU "Software\AUTOMAGIX" "InstallDir" "$INSTDIR"
+  WriteRegStr   HKCU "${UNINST_KEY}" "DisplayName"     "AUTOMAGIX ${AUTOMATION}"
+  WriteRegStr   HKCU "${UNINST_KEY}" "DisplayVersion"  "${VERSION}"
+  WriteRegStr   HKCU "${UNINST_KEY}" "Publisher"       "${PUBLISHER}"
+  WriteRegStr   HKCU "${UNINST_KEY}" "InstallLocation" "$INSTDIR"
+  WriteRegStr   HKCU "${UNINST_KEY}" "UninstallString" `"$INSTDIR\uninstall-${AUTOMATION}.exe"`
+  WriteRegStr   HKCU "${UNINST_KEY}" "QuietUninstallString" `"$INSTDIR\uninstall-${AUTOMATION}.exe" /S`
+!ifdef HAVE_ICON
+  WriteRegStr   HKCU "${UNINST_KEY}" "DisplayIcon"     "$INSTDIR\uninstall-${AUTOMATION}.exe"
+!endif
+  WriteRegDWORD HKCU "${UNINST_KEY}" "NoModify" 1
+  WriteRegDWORD HKCU "${UNINST_KEY}" "NoRepair" 1
+
+  ; 8. first run: confirm it works (detached + hidden; Task Scheduler takes over from the next slot)
+  ${If} $NoRun == "0"
+    !insertmacro RunPS "first-run.ps1" '-Python $PythonExe -AutomagixHome "$INSTDIR" -Automation "${AUTOMATION}"'
+  ${EndIf}
+  DetailPrint "Done."
+SectionEnd
+
+; ---- uninstall ------------------------------------------------------------------------------------
+Section "Uninstall"
+  ${If} ${FileExists} "$INSTDIR\python\python.exe"
+    StrCpy $PythonExe `"$INSTDIR\python\python.exe"`
+  ${Else}
+    StrCpy $PythonExe "python.exe"
+    System::Call 'Kernel32::SetEnvironmentVariable(t, t)i("PYTHONPATH", "$INSTDIR\wrapper-core").r9'
+  ${EndIf}
+  System::Call 'Kernel32::SetEnvironmentVariable(t, t)i("AUTOMAGIX_HOME", "$INSTDIR").r9'
+
+  ; tasks, payload, ref-counted shared components, final 'decommissioned' event (sent BEFORE the key is deleted),
+  ; DPAPI blob and Credential Manager entries - all handled by wrapper-core
+  DetailPrint "Decommissioning ${AUTOMATION}..."
+  nsExec::ExecToLog `$PythonExe -m wrapper_core uninstall ${AUTOMATION}`
+  Pop $0
+  ${If} $0 != 0
+    DetailPrint "WARNING: wrapper-core uninstall returned $0; continuing with file cleanup."
+  ${EndIf}
+
+  Delete "$INSTDIR\uninstall-${AUTOMATION}.exe"
+  DeleteRegKey HKCU "${UNINST_KEY}"
+
+  ; last AUTOMAGIX automation on this machine? then remove installer-managed shared bits too
+  FindFirst $0 $1 "$INSTDIR\uninstall-*.exe"
+  FindClose $0
+  ${If} $1 == ""
+    DetailPrint "Last automation removed - cleaning up shared files."
+    RMDir /r "$INSTDIR\python"
+    RMDir /r "$INSTDIR\wrapper-core"
+    RMDir /r "$INSTDIR\execution-framework"
+    RMDir /r "$INSTDIR\automations"
+    RMDir /r "$INSTDIR\state"
+    RMDir /r "$INSTDIR\bin"
+    RMDir /r "$INSTDIR\runs"
+    RMDir /r "$INSTDIR\logs"
+    RMDir /r "$INSTDIR\config"
+    RMDir /r "$INSTDIR\secrets"
+    RMDir "$INSTDIR\spool"
+    RMDir "$INSTDIR"
+    DeleteRegKey HKCU "Software\AUTOMAGIX"
+  ${EndIf}
+SectionEnd
