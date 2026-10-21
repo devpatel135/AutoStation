@@ -42,7 +42,7 @@ def make_python_zip(path: Path) -> Path:
     return path
 
 
-PRIVATE_KEY = "-----BEGIN OPENSSH PRIVATE KEY-----\nSECRETKEYMATERIAL0123456789abcdefSECRET\n-----END OPENSSH PRIVATE KEY-----\n"
+PRIVATE_KEY = "-----BEGIN OPENSSH PRIVATE KEY-----\nSECRETKEYMATERIAL0123456789abcdefSECRET\n-----END OPENSSH PRIVATE KEY-----\n"  # secret-scan: allow (fake fixture)
 TOKEN = "glpat-SUPERSECRETTOKEN123456789"
 
 

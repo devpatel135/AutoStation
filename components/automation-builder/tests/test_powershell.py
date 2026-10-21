@@ -28,7 +28,7 @@ def py(code: str, *args: str) -> subprocess.CompletedProcess:
                           env={**os.environ, "PYTHONPATH": str(WRAPPER)}, timeout=60)
 
 
-SECRET = bytes(range(256)) + b"-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----\n"
+SECRET = bytes(range(256)) + b"-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----\n"  # secret-scan: allow (fake fixture)
 
 
 def test_dpapi_ps_protect_then_python_unprotect(tmp_path):

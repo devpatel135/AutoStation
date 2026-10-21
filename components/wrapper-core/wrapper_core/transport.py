@@ -16,6 +16,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 
 from . import secrets
@@ -56,36 +57,107 @@ class DirTransport(Transport):
             raise TransportError(f"cannot write {target}: {exc}") from exc
 
 
+def find_git(paths: Paths) -> str | None:
+    """Git bundled by the installer (MinGit) wins, then PATH."""
+    bundled = paths.root / "git" / "cmd" / "git.exe"
+    return str(bundled) if bundled.exists() else shutil.which("git")
+
+
+def find_ssh(paths: Paths) -> str | None:
+    """Windows' built-in OpenSSH, then the ssh.exe inside the bundled MinGit, then PATH."""
+    win = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "OpenSSH" / "ssh.exe"
+    for cand in (win, paths.root / "git" / "usr" / "bin" / "ssh.exe"):
+        if cand.exists():
+            return str(cand)
+    return shutil.which("ssh")
+
+
 class GitSshTransport(Transport):
+    """git over SSH with a deploy key (DPAPI-protected at rest, written to a private temp file for one push, then wiped).
+
+    mode ``branch`` (default): every artefact is a new file on ONE branch (``ingest``, override with env
+    ``AUTOMAGIX_LOG_GIT_BRANCH``): shallow clone, add, commit, push; a lost race (non-fast-forward) is retried. This is what the
+    site workflow reads (``clone --branch ingest``).  mode ``refs`` (env ``AUTOMAGIX_LOG_GIT_MODE=refs``): the original
+    write-only design - an orphan commit pushed to a brand-new unique ref, no fetch.
+    """
+
     def __init__(self, remote: str, ring: str, paths: Paths | None = None, timeout_s: int = 90):
         super().__init__(ring)
         self.remote, self.paths, self.timeout_s = remote, paths or Paths(), timeout_s
+        self.mode = os.environ.get("AUTOMAGIX_LOG_GIT_MODE", "branch")
+        self.branch = os.environ.get("AUTOMAGIX_LOG_GIT_BRANCH", "ingest")
+        if not all(c.isalnum() or c in "-_/." for c in self.branch) or self.branch.startswith(("-", "/")) or ".." in self.branch:
+            raise TransportError("invalid AUTOMAGIX_LOG_GIT_BRANCH")
+
+    def _ssh_env(self, keyfile: Path) -> dict:
+        env = dict(os.environ, GIT_TERMINAL_PROMPT="0")
+        hosts = self.paths.known_hosts
+        ssh = find_ssh(self.paths) or "ssh"
+        cmd = (f'"{ssh}" -i "{keyfile}" -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=20 '
+               f'-o StrictHostKeyChecking={"yes" if hosts.exists() else "accept-new"} '
+               + (f'-o UserKnownHostsFile="{hosts}" ' if hosts.exists() else ""))
+        env["GIT_SSH_COMMAND"] = cmd.replace("\\", "/")
+        return env
 
     def send(self, kind: str, name: str, art_id: str, payload: dict) -> None:
-        git = shutil.which("git")
+        git = find_git(self.paths)
         if not git:
-            raise TransportError("git not found on PATH")
+            raise TransportError("git not found (not bundled and not on PATH)")
         if self.remote.startswith("-"):
             raise TransportError("refusing remote that looks like an option")
         blob = secrets.logging_key_blob(self.paths)
         if blob is None:
             raise TransportError("logging key blob missing (secrets/logging_key.dpapi)")
+        body = json.dumps(payload, indent=2, default=str) + "\n"
         with tempfile.TemporaryDirectory(prefix="amx-log-") as tmp:
-            repo = Path(tmp)
-            f = repo / rel_path(kind, name, art_id)
-            atomic_write_text(f, json.dumps(payload, indent=2, default=str) + "\n")
-            env = dict(os.environ, GIT_TERMINAL_PROMPT="0")
-            ident = ["-c", "user.name=automagix", "-c", "user.email=automagix@localhost", "-c", "commit.gpgsign=false"]
-            self._git(git, repo, ["init", "-q"], env)
+            with secrets.TempPrivateKey(blob, self.paths.secrets / "tmp") as keyfile:
+                env = self._ssh_env(keyfile)
+                if self.mode == "refs":
+                    self._send_ref(git, Path(tmp), env, kind, name, art_id, body)
+                else:
+                    self._send_branch(git, Path(tmp), env, kind, name, art_id, body)
+
+    # -- unique-ref mode (no fetch) ------------------------------------------------------------------------------------------
+    def _send_ref(self, git, tmp: Path, env: dict, kind, name, art_id, body) -> None:
+        repo = tmp / "r"
+        repo.mkdir()
+        atomic_write_text(repo / rel_path(kind, name, art_id), body)
+        ident = ["-c", "user.name=automagix", "-c", "user.email=automagix@localhost", "-c", "commit.gpgsign=false"]
+        self._git(git, repo, ["init", "-q"], env)
+        self._git(git, repo, ["add", "-A"], env)
+        self._git(git, repo, ident + ["commit", "-q", "-m", f"{kind} {name} {art_id}"], env)
+        self._git(git, repo, ["push", "-q", self.remote, f"HEAD:refs/heads/{ref_for(self.ring, kind, name, art_id)}"], env)
+
+    # -- single-branch mode ----------------------------------------------------------------------------------------------------
+    def _send_branch(self, git, tmp: Path, env: dict, kind, name, art_id, body) -> None:
+        ident = ["-c", "user.name=automagix", "-c", "user.email=automagix@localhost", "-c", "commit.gpgsign=false"]
+        rel = f"ingest/{safe_name(self.ring)}/{rel_path(kind, name, art_id)}"
+        last = ""
+        for attempt in range(4):
+            repo = tmp / f"r{attempt}"
+            try:
+                self._git(git, tmp, ["clone", "-q", "--depth", "1", "--branch", self.branch, "--single-branch", self.remote, str(repo)], env)
+            except TransportError as exc:
+                if "not found" not in str(exc).lower() and "could not find remote branch" not in str(exc).lower():
+                    raise
+                repo.mkdir(exist_ok=True)       # first writer: create the branch from an orphan commit
+                self._git(git, repo, ["init", "-q", "-b", self.branch], env)
+                self._git(git, repo, ["remote", "add", "origin", self.remote], env)
+            target = repo / rel
+            if target.exists():
+                return  # already delivered (idempotent re-send)
+            atomic_write_text(target, body)
             self._git(git, repo, ["add", "-A"], env)
             self._git(git, repo, ident + ["commit", "-q", "-m", f"{kind} {name} {art_id}"], env)
-            with secrets.TempPrivateKey(blob, self.paths.secrets / "tmp") as keyfile:
-                hosts = self.paths.known_hosts
-                ssh = (f'ssh -i "{keyfile}" -o IdentitiesOnly=yes -o BatchMode=yes '
-                       f'-o StrictHostKeyChecking={"yes" if hosts.exists() else "accept-new"} '
-                       + (f'-o UserKnownHostsFile="{hosts}" ' if hosts.exists() else ""))
-                env["GIT_SSH_COMMAND"] = ssh.replace("\\", "/")
-                self._git(git, repo, ["push", "-q", self.remote, f"HEAD:refs/heads/{ref_for(self.ring, kind, name, art_id)}"], env)
+            try:
+                self._git(git, repo, ["push", "-q", "origin", f"HEAD:refs/heads/{self.branch}"], env)
+                return
+            except TransportError as exc:
+                last = str(exc)
+                if not any(t in last.lower() for t in ("non-fast-forward", "fetch first", "rejected", "failed to update ref")):
+                    raise
+                time.sleep(min(1 + attempt, 3))  # lost a race with another machine: re-clone and retry
+        raise TransportError(f"push kept losing races: {last[:200]}")
 
     def _git(self, git: str, cwd: Path, args: list[str], env: dict) -> None:
         try:

@@ -113,10 +113,11 @@ class OAuth2ClientCredentials:
                 form["scope"] = self.scope
             if self.audience:
                 form["audience"] = self.audience
+            _check_scheme(self.token_url)
             req = urllib.request.Request(self.token_url, data=urllib.parse.urlencode(form).encode(), method="POST",
                                          headers={"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"})
             try:
-                with urllib.request.urlopen(req, timeout=self.timeout) as r:  # noqa: S310 - operator-configured URL
+                with _urlopen(req, self.timeout) as r:  # noqa: S310 - scheme checked above
                     body = _json.loads(r.read().decode("utf-8"))
             except urllib.error.HTTPError as exc:
                 raise AuthExpired(f"token endpoint returned HTTP {exc.code}") from exc
@@ -147,6 +148,47 @@ def _origin(url: str) -> Tuple[str, str]:
     return p.scheme.lower(), p.netloc.lower()
 
 
+def _is_loopback(host: Optional[str]) -> bool:
+    return (host or "").lower() in ("localhost", "127.0.0.1", "::1")
+
+
+def _check_scheme(url: str) -> str:
+    """Only http(s) URLs may be requested: urllib would otherwise happily open file:// and ftp:// (local file read / SSRF)."""
+    p = urllib.parse.urlsplit(url)
+    if p.scheme.lower() not in ("http", "https") or not p.hostname:
+        raise DataError(f"refusing URL with scheme {p.scheme or '(none)'!r}: only http and https are allowed")
+    return url
+
+
+_KEEP_ON_CROSS_ORIGIN = ("accept", "accept-language", "user-agent")
+
+
+class _SafeRedirect(urllib.request.HTTPRedirectHandler):
+    """Redirects stay on http(s), never downgrade https -> http, and cross-origin hops lose every credential-bearing header
+    (Authorization, Cookie, API-key style custom headers - everything except a small harmless allow-list)."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        _check_scheme(newurl)
+        old, new_p = urllib.parse.urlsplit(req.full_url), urllib.parse.urlsplit(newurl)
+        if old.scheme.lower() == "https" and new_p.scheme.lower() != "https" and not _is_loopback(new_p.hostname):
+            raise DataError("refusing a redirect from https to http")
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new is not None and _origin(newurl) != _origin(req.full_url):
+            for store in (new.headers, new.unredirected_hdrs):
+                for k in list(store):
+                    if k.lower() not in _KEEP_ON_CROSS_ORIGIN:
+                        del store[k]
+        return new
+
+
+def _urlopen(req: "urllib.request.Request", timeout: float, context: Any = None):
+    """urlopen with the safe redirect policy (and an optional TLS context)."""
+    handlers: List[Any] = [_SafeRedirect()]
+    if context is not None:
+        handlers.append(urllib.request.HTTPSHandler(context=context))
+    return urllib.request.build_opener(*handlers).open(req, timeout=timeout)
+
+
 def _dig(obj: Any, dotted: Optional[str]) -> Any:
     if not dotted:
         return obj
@@ -175,6 +217,7 @@ class Client:
             url = path
         else:
             url = f"{self.base_url}/{path.lstrip('/')}" if self.base_url else path
+        _check_scheme(url)
         if params:
             url += ("&" if "?" in url else "?") + urllib.parse.urlencode(params, doseq=True)
         return url
@@ -206,7 +249,7 @@ class Client:
             t0 = time.monotonic()
             try:
                 req = urllib.request.Request(url, data=body, headers=h, method=method)
-                with urllib.request.urlopen(req, timeout=timeout or self.timeout, context=self._ctx) as r:  # noqa: S310
+                with _urlopen(req, timeout or self.timeout, self._ctx) as r:  # noqa: S310 - scheme checked in _url
                     content = r.read(MAX_BODY + 1)
                     if len(content) > MAX_BODY:
                         raise DataError("response body exceeds the 50 MB limit; use download()")
@@ -277,6 +320,19 @@ class Client:
         p = dict(params or {})
         url: Optional[str] = path
         page, offset = start_page, 0
+        origin0 = _origin(self._url(path, None))
+        seen = set()  # type: set
+
+        def follow(link: str, current: str) -> str:
+            nxt_url = urllib.parse.urljoin(current, link)
+            _check_scheme(nxt_url)
+            if _origin(nxt_url) != origin0:
+                raise DataError("paginate: refusing a next link on a different origin (credentials would leak)")
+            if nxt_url in seen:
+                raise DataError("paginate: next link loops back to a page already fetched")
+            seen.add(nxt_url)
+            return nxt_url
+
         for _ in range(max_pages):
             q = dict(p)
             if style == "page":
@@ -304,7 +360,7 @@ class Client:
                 m = re.search(r'<([^>]+)>\s*;\s*rel="?next"?', resp.headers.get("link", ""))
                 if not m:
                     return
-                url = m.group(1)
+                url = follow(m.group(1), resp.url)
             elif style == "next_key":
                 nxt = _dig(body, next_key) if isinstance(body, dict) else None
                 if not nxt:
@@ -313,7 +369,7 @@ class Client:
                     p[cursor_param] = nxt
                     url = path
                 else:
-                    url = nxt
+                    url = follow(str(nxt), resp.url)
             else:
                 raise ValueError("style must be page|offset|link|next_key")
         raise DataError(f"paginate: stopped after max_pages={max_pages}")
@@ -333,6 +389,7 @@ def client(base_url: str = "", headers: Optional[Dict[str, str]] = None, auth: A
 
 
 def _download(url: str, dest, sha256: Optional[str], headers: Dict[str, str], timeout: float, max_bytes: int, ctx) -> str:
+    _check_scheme(url)
     dest_s = os.fspath(dest)
     d = os.path.dirname(os.path.abspath(dest_s))
     os.makedirs(d, exist_ok=True)
@@ -342,7 +399,7 @@ def _download(url: str, dest, sha256: Optional[str], headers: Dict[str, str], ti
     try:
         req = urllib.request.Request(url, headers=headers)
         try:
-            with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r, os.fdopen(fd, "wb") as f:  # noqa: S310
+            with _urlopen(req, timeout, ctx) as r, os.fdopen(fd, "wb") as f:  # noqa: S310 - scheme checked above
                 for chunk in iter(lambda: r.read(1 << 20), b""):
                     total += len(chunk)
                     if total > max_bytes:

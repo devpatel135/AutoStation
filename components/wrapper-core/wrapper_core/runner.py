@@ -21,7 +21,7 @@ from ._version import __version__ as WRAPPER_VERSION
 from .broker import Broker
 from .heartbeat import send_heartbeat, send_lifecycle
 from .logging import log_event
-from .paths import Paths, get_logger, platform_config
+from .paths import Paths, check_name, get_logger, platform_config
 from .retry import (Category, Escalation, RetryPolicy, Skipped, AuthExpired, DataError, LogicError, NetworkError,
                     SystemUnavailable, classify_text, run_with_retry)
 from .redact import redacted_json
@@ -29,7 +29,21 @@ from .synopsis import build as build_synopsis
 from .util import hostname, iso, new_run_id, read_json, user_hash, utcnow, write_json
 
 EXIT_OK, EXIT_FAILED, EXIT_HUNG = 0, 1, 2
-_SECRET_ENV = ("AUTOSTATION_LLM_KEY", "AUTOMAGIX_REGISTRY_TOKEN")
+_SECRET_PREFIXES = ("AUTOSTATION_", "AUTOMAGIX_LOGGING_", "AUTOMAGIX_REGISTRY_TOKEN", "AUTOMAGIX_CRED_")
+_SECRET_SUFFIXES = ("_TOKEN", "_SECRET", "_KEY", "_PASSWORD", "_PASSWD")
+
+
+def scrub_env(environ) -> dict:
+    """The environment a payload process inherits: everything except platform secrets (LLM key/endpoint config, registry and
+    logging tokens, credential fallbacks) and anything that is named like a token/secret/key. The runner then adds exactly
+    the AUTOMAGIX_* run variables the payload needs (including the per-run broker token)."""
+    out = {}
+    for k, v in environ.items():
+        u = k.upper()
+        if u.startswith(_SECRET_PREFIXES) or u.endswith(_SECRET_SUFFIXES):
+            continue
+        out[k] = v
+    return out
 
 
 def _sleep(seconds: float) -> None:  # indirection so tests can run instantly
@@ -42,8 +56,34 @@ class RunOutcome:
     exit_code: int
 
 
+def _pid_alive(pid: int) -> bool:
+    """Is a process with this PID running? Query only - never signals it (os.kill(pid, 0) would terminate it on Windows)."""
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        import ctypes
+        k32 = ctypes.windll.kernel32
+        k32.OpenProcess.restype = ctypes.c_void_p
+        h = k32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not h:
+            return k32.GetLastError() == 5  # access denied => exists
+        try:
+            code = ctypes.c_ulong()
+            return bool(k32.GetExitCodeProcess(ctypes.c_void_p(h), ctypes.byref(code))) and code.value == 259  # STILL_ACTIVE
+        finally:
+            k32.CloseHandle(ctypes.c_void_p(h))
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+    return True
+
+
 class RunLock:
-    """File lock with age-based staleness (os.kill(pid, 0) would TERMINATE the process on Windows - never use it)."""
+    """File lock: stale when older than the TTL, or when the PID that wrote it is gone (a killed/crashed run must not block the next one).
+    Age-based staleness (os.kill(pid, 0) would TERMINATE the process on Windows - never use it)."""
 
     def __init__(self, path: Path, ttl_s: int):
         self.path, self.ttl_s, self.held = path, ttl_s, False
@@ -59,7 +99,12 @@ class RunLock:
                 return True
             except FileExistsError:
                 try:
-                    if time.time() - self.path.stat().st_mtime > self.ttl_s:
+                    owner = 0
+                    try:
+                        owner = int(self.path.read_text(encoding="ascii").split()[0])
+                    except (OSError, ValueError, IndexError):
+                        pass
+                    if time.time() - self.path.stat().st_mtime > self.ttl_s or (owner and owner != os.getpid() and not _pid_alive(owner)):
                         self.path.unlink()  # stale: previous run died hard
                         continue
                 except OSError:
@@ -163,7 +208,7 @@ class _Execution:
 
     def _launch_once(self) -> None:
         cmd, extra = build_command(self.paths, self.adir, self.desc)
-        env = {k: v for k, v in os.environ.items() if k not in _SECRET_ENV and not k.startswith("AUTOMAGIX_CRED_")}
+        env = scrub_env(os.environ)
         env.update(self.env)
         env.update(extra)
         out_f, err_f = self.ctx.run_dir / "stdout.log", self.ctx.run_dir / "stderr.log"
@@ -217,11 +262,14 @@ class _Execution:
 
 
 def _expected_ms(schedule: dict | None) -> tuple[int | None, int | None]:
-    e = (schedule or {}).get("expected_duration_ms") or {}
-    base = e.get("baseline")
-    if not base:
+    e = _as_dict((schedule or {}).get("expected_duration_ms"))
+    try:
+        base = e.get("baseline")
+        if not base:
+            return None, None
+        return int(base), int(base * float(e.get("warn_threshold", 2.0)))
+    except (TypeError, ValueError, OverflowError):
         return None, None
-    return int(base), int(base * float(e.get("warn_threshold", 2.0)))
 
 
 def _finalise(paths: Paths, record: dict, ctx, dry_run: bool, use_llm: bool = True) -> None:
@@ -251,6 +299,14 @@ def run_automation(name: str, slot_id: str | None = None, dry_run: bool = False,
                    ignore_maintenance: bool = False) -> RunOutcome:
     paths = (paths or Paths()).ensure()
     log = get_logger(paths)
+    try:
+        check_name(name)
+        if slot_id is not None:
+            check_name(slot_id)
+    except ValueError as exc:
+        log.error("refusing to run: %s", exc)
+        print(f"error: {exc}", file=sys.stderr)
+        return RunOutcome(None, EXIT_FAILED)
     cfg = platform_config(paths)
     ring = cfg["ring"]
 
@@ -270,11 +326,15 @@ def run_automation(name: str, slot_id: str | None = None, dry_run: bool = False,
         started_dt = utcnow()
         t0 = time.monotonic()
 
-        heal = selfheal.run(paths, cfg, name)
+        try:
+            heal = selfheal.run(paths, cfg, name)
+        except Exception as exc:  # noqa: BLE001 - self-heal must never stop an installed payload from running
+            log.error("self-heal crashed: %s", exc)
+            heal = selfheal.HealResult(ring=ring, errors=[f"self-heal crashed: {type(exc).__name__}"])
         m = heal.manifest
-        entry = {**selfheal.payload_defaults(paths, name), **((mf.automation(m, name) if m else None) or {})}
+        entry = _clean_entry({**selfheal.payload_defaults(paths, name), **_as_dict(mf.automation(m, name) if m else None)})
         schedule = entry.get("schedule")
-        slots = (schedule or {}).get("slots") or []
+        slots = [s for s in (schedule or {}).get("slots") or [] if isinstance(s, dict)]
         slot = next((s for s in slots if str(s.get("id")) == slot_id), None) if slot_id else (slots[0] if slots else None)
         slot_id = slot_id or (str(slot["id"]) if slot else "adhoc")
 
@@ -315,10 +375,10 @@ def run_automation(name: str, slot_id: str | None = None, dry_run: bool = False,
             notify.version_bump_notice(name, heal.installed)
 
         # ---- invocations: one for the slot, or one per pending trigger for poll slots ----------------
-        slot_params = dict((slot or {}).get("params") or {})
+        slot_params = _as_dict((slot or {}).get("params")).copy()
         invocations: list[tuple[dict, str | None]]
         if slot and slot.get("type") == "poll":
-            invocations = [({**slot_params, **(t.get("params") or {})}, t.get("id")) for t in heal.triggers]
+            invocations = [({**slot_params, **_as_dict(t.get("params"))}, t.get("id")) for t in heal.triggers]
             if not invocations:
                 log.info("%s poll: no pending triggers", name)
                 return RunOutcome(None, EXIT_OK)
@@ -338,6 +398,18 @@ def run_automation(name: str, slot_id: str | None = None, dry_run: bool = False,
         lock.release()
 
 
+def _as_dict(value) -> dict:
+    return value if isinstance(value, dict) else {}
+
+
+def _clean_entry(entry: dict) -> dict:
+    """Manifest/payload-supplied operational config is untrusted: drop values of the wrong shape instead of crashing."""
+    for key in ("schedule", "error_handling"):
+        if key in entry and not isinstance(entry[key], dict):
+            entry.pop(key)
+    return entry
+
+
 def _new_ctx(paths: Paths, name: str, slot_id: str):
     run_id = new_run_id()
     ctx = runctx.RunContext(paths.runs / run_id, run_id, name, slot_id)
@@ -354,7 +426,11 @@ def _run_once(paths, cfg, name, slot_id, params, trigger_id, heal, entry, schedu
         record["trigger_id"] = trigger_id
     adir = paths.automation_dir(name)
 
-    window = None if ignore_maintenance else mf.in_maintenance(schedule)
+    try:
+        window = None if ignore_maintenance else mf.in_maintenance(schedule)
+    except Exception as exc:  # noqa: BLE001 - a garbled maintenance block must not block the run
+        log.warning("ignoring unreadable maintenance windows: %s", exc)
+        window = None
     if window:
         log_event("phase", {"name": "maintenance_window", "status": "skipped", "window": window})
         return finish(record, ctx, "skipped_maintenance", EXIT_OK, use_llm=False)
@@ -384,7 +460,12 @@ def _run_once(paths, cfg, name, slot_id, params, trigger_id, heal, entry, schedu
         record["error"] = {"category": "LOGIC_ERROR", "type": "IncompatibleVersions", "message": "; ".join(problems), "attempts": 0}
         return finish(record, ctx, "self_heal_failed", EXIT_FAILED)
 
-    policy = RetryPolicy.from_manifest(entry.get("error_handling"), cwd=str(adir))
+    try:
+        policy = RetryPolicy.from_manifest(entry.get("error_handling"), cwd=str(adir))
+        int(policy.max_retries), float(policy.network_retry_wait_s), float(policy.backoff_multiplier)
+    except (TypeError, ValueError):
+        log.warning("ignoring unreadable error_handling block")
+        policy = RetryPolicy(cwd=str(adir))
     base_ms, hung_ms = _expected_ms(schedule)
     if base_ms:
         record["expected_finish_at"] = iso(utcnow().replace(microsecond=0) + __import__("datetime").timedelta(milliseconds=base_ms))

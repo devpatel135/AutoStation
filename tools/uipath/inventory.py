@@ -40,6 +40,7 @@ import htmlutil as H  # noqa: E402
 from common import (REDACTED, contains_inline_secret, cron_to_slot, is_expression, looks_like_secret_name, norm_name,  # noqa: E402
                     redact_text)
 from xlsxmini import read_table, read_xlsx  # noqa: E402
+from xmlsafe import DtdNotAllowed, extract_zip, safe_xml_root  # noqa: E402
 
 SKIP_DIRS = {".local", ".objects", ".screenshots", ".git", "node_modules", "__pycache__", ".settings", ".tmh"}
 MAX_XAML_BYTES = 25 * 1024 * 1024
@@ -138,11 +139,10 @@ def parse_workflow(project_dir: Path, f: Path, config: dict) -> dict:
             wf["parse_error"] = f"file too large ({size} bytes)"
             return wf
         raw = f.read_bytes()
-        head = raw[:4096].lower()
-        if b"<!doctype" in head or b"<!entity" in raw[:20000].lower():
-            wf["parse_error"] = "DTD/entity declarations are not allowed"
-            return wf
-        root = ET.fromstring(raw)
+        root = safe_xml_root(raw)   # scans the whole decoded document (UTF-16/BOM included) for DTD / ENTITY declarations
+    except DtdNotAllowed:
+        wf["parse_error"] = "DTD/entity declarations are not allowed"
+        return wf
     except (ET.ParseError, OSError) as exc:
         wf["parse_error"] = f"{type(exc).__name__}: {str(exc)[:120]}"
         return wf
@@ -622,13 +622,8 @@ def find_projects(root: Path) -> list[Path]:
 
 
 def _extract_archive(archive: Path, dest: Path) -> None:
-    root = dest.resolve()
-    with zipfile.ZipFile(archive) as z:
-        for info in z.infolist():
-            target = (dest / info.filename).resolve()
-            if root != target and root not in target.parents:
-                raise ValueError(f"unsafe path in archive {archive.name}: {info.filename}")
-        z.extractall(dest)
+    """Path-traversal checked, member-count and total-size capped (streamed) - a zip bomb raises ``ArchiveLimitError``."""
+    extract_zip(archive, dest)
 
 
 def scan(src: Path, orchestrator: Path | None = None, base: float = 1.0, per_point: float = 0.06, test_overhead: float = 0.25) -> dict:

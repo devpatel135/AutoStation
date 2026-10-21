@@ -74,6 +74,16 @@ class Paths:
         return self.state / "manifest.cache.yaml"
 
     @property
+    def manifest_sig_cache(self) -> Path:
+        """The signature document that vouched for ``manifest_cache`` (re-verified every time the cache is read)."""
+        return self.state / "manifest.cache.yaml.sig"
+
+    @property
+    def manifest_signed_at(self) -> Path:
+        """Newest ``signed_at`` ever accepted: the anti-rollback high-water mark."""
+        return self.state / "manifest.signed_at"
+
+    @property
     def consumed_triggers(self) -> Path:
         return self.state / "consumed_triggers.json"
 

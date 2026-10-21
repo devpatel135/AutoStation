@@ -13,13 +13,17 @@ from pathlib import Path
 from . import manifest as mf
 from . import notify, secrets, selfheal, transport
 from .heartbeat import send_heartbeat, send_lifecycle
-from .paths import Paths, get_logger, platform_config
+from .paths import Paths, check_name, get_logger, platform_config
 from .scheduler import Scheduler
 from .util import read_json, write_json
 
 
 def install_automation(name: str, paths: Paths | None = None, scheduler: Scheduler | None = None) -> dict:
     paths = (paths or Paths()).ensure()
+    try:
+        check_name(name)
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc), "installed": []}
     cfg = platform_config(paths)
     heal = selfheal.run(paths, cfg, name)
     if heal.halted:
@@ -43,17 +47,19 @@ def maintain(paths: Paths | None = None, scheduler: Scheduler | None = None) -> 
     sched = scheduler or Scheduler(paths)
     m = None
     try:
-        m, _offline = selfheal.fetch_manifest(paths, cfg.get("registry_url", ""), secrets.get_registry_token(paths)) if cfg.get("registry_url") else (None, True)
+        if cfg.get("registry_url"):  # falls back to the signature-verified cache itself; HealError = nothing trustworthy
+            m, _offline = selfheal.fetch_manifest(paths, cfg["registry_url"], secrets.get_registry_token(paths), cfg=cfg)
     except selfheal.HealError as exc:
         log.warning("maintain: manifest unavailable: %s", exc)
-        if paths.manifest_cache.exists():
-            m = mf.parse(paths.manifest_cache.read_text(encoding="utf-8"))
     touched: dict[str, list[str]] = {}
     for name in sorted(selfheal.read_installed(paths)["automations"]):
-        entry = {**selfheal.payload_defaults(paths, name), **((mf.automation(m, name) if m else None) or {})}
-        if not entry.get("schedule"):
-            continue
-        touched[name] = sched.register(name, entry.get("schedule"))
+        try:
+            entry = {**selfheal.payload_defaults(paths, name), **((mf.automation(m, name) if m else None) or {})}
+            if not isinstance(entry.get("schedule"), dict):
+                continue
+            touched[name] = sched.register(name, entry.get("schedule"))
+        except Exception as exc:  # noqa: BLE001 - one bad entry must not stop the others being re-asserted
+            log.warning("maintain: cannot register %s: %s", name, exc)
     # ping the registry at every sign-in: pick up new versions / the kill-switch without waiting for the next scheduled run
     updated: dict[str, list[str]] = {}
     for name in sorted(selfheal.read_installed(paths)["automations"]):
@@ -78,6 +84,7 @@ def uninstall_automation(name: str, paths: Paths | None = None, scheduler: Sched
                          purge_shared: bool = True) -> dict:
     paths = paths or Paths()
     log = get_logger(paths)
+    check_name(name)  # becomes directory/file/task names below
     report = {"automation": name, "removed": [], "kept": []}
     # 1. final log event while the key still exists
     sent = send_lifecycle(paths, "decommissioned", name, {"ring": platform_config(paths)["ring"]})
@@ -105,10 +112,18 @@ def uninstall_automation(name: str, paths: Paths | None = None, scheduler: Sched
             if d.exists():
                 shutil.rmtree(d, ignore_errors=True)
                 report["removed"].append(str(d))
-        for f in (paths.secrets / "logging_key.dpapi", paths.secrets / "registry_token.dpapi"):
+        for f in (paths.secrets / "logging_key.dpapi", paths.secrets / "logging_token.dpapi",
+                  paths.secrets / "registry_token.dpapi"):
             if f.exists():
                 secrets.wipe_file(f)
                 report["removed"].append(str(f))
+        tmp = paths.secrets / "tmp"  # materialised git-ssh keys (normally wiped right after each push; a crash can leave one)
+        if tmp.is_dir():
+            for f in tmp.iterdir():
+                if f.is_file():
+                    secrets.wipe_file(f)
+            shutil.rmtree(tmp, ignore_errors=True)
+            report["removed"].append(str(tmp))
         for target in ("AUTOMAGIX/registry_token", "AUTOMAGIX/llm_key"):
             secrets.credman_delete(target)
         report["removed"].append("credential manager entries")

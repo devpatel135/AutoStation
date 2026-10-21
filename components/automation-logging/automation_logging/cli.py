@@ -25,6 +25,7 @@ def main(argv: list[str] | None = None) -> int:
     i.add_argument("--from", dest="src", help="DirTransport root (dir)")
     i.add_argument("--out", required=True, help="archive directory")
     i.add_argument("--keep-refs", action="store_true", help="git: do not delete processed refs")
+    i.add_argument("--max-refs", type=int, default=2000, help="git: process at most this many refs per run (rest wait for the next run)")
 
     def common(sp, alerts=True):
         sp.add_argument("--archive", required=True)
@@ -90,7 +91,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.cmd == "ingest":
         from . import ingest
-        stats = ingest.ingest(args.source, args.out, remote=args.remote, src_dir=args.src, **({"delete": not args.keep_refs} if args.source == "git" else {}))
+        stats = ingest.ingest(args.source, args.out, remote=args.remote, src_dir=args.src, **({"delete": not args.keep_refs, "max_refs": args.max_refs} if args.source == "git" else {}))
         print(json.dumps(stats, indent=2))
         return 1 if stats["errors"] else 0
 

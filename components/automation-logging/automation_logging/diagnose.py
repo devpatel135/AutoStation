@@ -9,13 +9,15 @@ Safeguards (assessment: "prompt injection via log content", "data classification
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import tempfile
 from contextlib import contextmanager
+from datetime import timedelta
 from pathlib import Path
 
-from .common import iso, read_json, utcnow, write_json
+from .common import iso, parse_iso, read_json, utcnow, write_json
 from . import analytics
 
 ELIGIBLE = ("FAILED", "HUNG", "ITEM_FAILURES")
@@ -69,12 +71,43 @@ def build_context(signal: dict, data: analytics.Data) -> str:
     return json.dumps(ctx, default=str)[:12000]
 
 
+CACHE_TTL_H = 24
+
+
+def source_record_hash(signal: dict, data: analytics.Data) -> str:
+    """Hash of the (untrusted) record the diagnosis was derived from; a cached diagnosis only applies to the same source."""
+    run = data.runs_by_id.get((signal.get("evidence") or [None])[-1]) or {}
+    basis = {"run_id": run.get("run_id"), "status": run.get("status"), "error": run.get("error"), "items": run.get("items"),
+             "error_message": signal.get("error_message"), "error_category": signal.get("error_category")}
+    return hashlib.sha256(json.dumps(basis, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+
+
+def _cache_fresh(entry, src_hash: str, now, ttl_h: float) -> bool:
+    """A cache entry is only reused while it is young AND was made from the same source record."""
+    try:
+        created = parse_iso(entry.get("created_at") or entry.get("ts"))
+        return (isinstance(entry.get("diagnosis"), dict) and entry.get("source_record_hash") == src_hash
+                and timedelta(0) <= now - created <= timedelta(hours=ttl_h))
+    except (AttributeError, TypeError, ValueError):
+        return False
+
+
+def _clean_diagnosis(value: dict) -> dict:
+    """Model output over unauthenticated telemetry: bounded strings, flagged unverified."""
+    out = {k: (v[:600] if isinstance(v, str) else v) for k, v in value.items() if isinstance(k, str) and isinstance(v, (str, int, float, bool))}
+    out["unverified"] = True
+    return out
+
+
 def diagnose_signals(signals: list[dict], data: analytics.Data, manifest: dict, cache_path: str | Path,
-                     max_calls: int = 20, llm_call=None) -> tuple[list[dict], dict]:
+                     max_calls: int = 20, llm_call=None, now=None, ttl_h: float = CACHE_TTL_H) -> tuple[list[dict], dict]:
     """Attach ``diagnosis`` to eligible signals. Returns (signals, stats). ``llm_call`` is injectable for tests."""
     from wrapper_core.llm import classification_allowed, llm_call_ex
     call = llm_call or llm_call_ex
+    now = now or utcnow()
     cache = read_json(cache_path, {}) or {}
+    if not isinstance(cache, dict):
+        cache = {}
     autos = manifest.get("automations") or {}
     stats = {"eligible": 0, "calls": 0, "cached": 0, "skipped_classification": 0, "skipped_cap": 0, "failed": 0}
     groups: dict[str, dict] = {}   # group key -> diagnosis result (so one call serves many hosts)
@@ -87,12 +120,13 @@ def diagnose_signals(signals: list[dict], data: analytics.Data, manifest: dict, 
         if key in groups:
             s["diagnosis"], s["diagnosis_reason"] = groups[key]["diagnosis"], groups[key]["reason"]
             continue
+        src_hash = source_record_hash(s, data)
         with _llm_env(entry):
             if not entry or not classification_allowed(None):  # unknown automation => unknown classification => fail closed
                 res = {"diagnosis": None, "reason": "classification"}
                 stats["skipped_classification"] += 1
-            elif key in cache:
-                res = {"diagnosis": cache[key]["diagnosis"], "reason": "cache"}
+            elif key in cache and _cache_fresh(cache[key], src_hash, now, ttl_h):
+                res = {"diagnosis": _clean_diagnosis(cache[key]["diagnosis"]), "reason": "cache"}
                 stats["cached"] += 1
             elif stats["calls"] >= max_calls:
                 res = {"diagnosis": None, "reason": "cap"}
@@ -102,8 +136,9 @@ def diagnose_signals(signals: list[dict], data: analytics.Data, manifest: dict, 
                 r = call(PROMPT, build_context(s, data), schema=SCHEMA, caller=CALLER, template=TEMPLATE, timeout_s=60)
                 value = getattr(r, "value", r)
                 if isinstance(value, dict):
-                    res = {"diagnosis": value, "reason": "llm"}
-                    cache[key] = {"diagnosis": value, "ts": iso(), "signal_type": s["type"]}
+                    res = {"diagnosis": _clean_diagnosis(value), "reason": "llm"}
+                    cache[key] = {"diagnosis": value, "created_at": iso(now), "ts": iso(now), "source_record_hash": src_hash,
+                                  "signal_type": s["type"], "unverified": True}
                 else:
                     res = {"diagnosis": None, "reason": "llm_unavailable"}
                     stats["failed"] += 1

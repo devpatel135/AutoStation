@@ -54,3 +54,14 @@
 * **Attended/on-demand triggers** go through `triggers.json` + poll slots (minutes of latency), not a tray app, by design.
 * **Prompt-injection residual risk** (see table) — model behaviour cannot be proven; controls are layered so a successful
   injection cannot reach an irreversible action.
+
+## GitHub pipeline and supply-chain hardening
+
+* **Actions pinned to commit SHAs** (`python tools/pin_actions.py`; `--check` runs in the `hygiene` CI job; Dependabot bumps them). Only GitHub-owned actions are allowed to run (`tools/harden_repo.py`).
+* **No script injection:** workflow inputs reach shells only via `env:`; `tools/check_workflows.py` fails the build on `${{ inputs.* }}` / `${{ github.event.* }}` inside a `run:` script, on unpinned actions and on jobs without `timeout-minutes`.
+* **Least privilege:** the default `GITHUB_TOKEN` is read-only; each job declares what it needs; checkout does not persist credentials where nothing pushes; release/ops jobs run only from `main`.
+* **Pinned inputs to the installer:** the embedded Python is verified against a pinned SHA-256, MinGit (bundled git + ssh for ssh-based logging) against a pinned SHA-256 (`tools/fetch_mingit.py`), Node against nodejs.org's SHASUMS, playwright-core to an exact version.
+* **Provenance:** published installers carry GitHub build-provenance attestations: `gh attestation verify <installer> --repo <owner>/<repo>`.
+* **Secrets:** `tools/check_secrets.py` (CI) + GitHub secret scanning with push protection. `LOGGING_TOKEN` should be a fine-grained PAT scoped to the single private logs repo (Contents read/write), stored via `tools/setup_live.py`.
+* **Branch safety:** rulesets forbid deleting or force-pushing `main`, `registry-artifacts` (append-only) and `triggers`.
+* **One-time admin step:** `python tools/setup_live.py` (needs an admin token, run in your own terminal) applies the repository settings above and creates the logs repo / secret / `production` environment.

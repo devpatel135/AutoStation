@@ -184,4 +184,4 @@ def test_github_links_reference_implementation():
     assert links["workflow"] == "https://github.com/devpatel135/AutoStation/actions/workflows/ops-action.yml"
     assert links["pull_request"].startswith("https://github.com/devpatel135/AutoStation/compare/main...ops%2Fpause-auto-a-x1?quick_pull=1")
     assert links["edit"] == "https://github.com/devpatel135/AutoStation/edit/main/components/automation-registry/manifest.yaml"
-    assert "-f action=\"pause\"" in links["gh_command"] and "-f branch=\"ops/pause-auto-a-x1\"" in links["gh_command"]
+    assert "-f action='pause'" in links["gh_command"] and "-f branch='ops/pause-auto-a-x1'" in links["gh_command"]   # shell-safe single quotes

@@ -128,6 +128,13 @@ NAV = [("index.html", "Catalog", "catalog"), ("compatibility.html", "Compatibili
        ("governance.html", "Governance", "gov"), ("admin.html", "Admin", "admin")]
 
 
+# The portal page never loads a font or fetches anything: nothing but inline style/script and data: images may run.
+CSP = ("default-src 'none'; img-src data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; form-action 'none'")
+CSP_META = f'<meta http-equiv="Content-Security-Policy" content="{CSP}">'
+TELEMETRY_NOTICE = "Telemetry is submitted by installed clients and is not authenticated; treat numbers as advisory"
+TELEMETRY_BANNER = f'<div class="banner" role="note"><strong>Advisory data.</strong> {TELEMETRY_NOTICE}.</div>'
+
+
 def layout(title: str, body: str, *, config: dict, active: str = "", depth: int = 0, manifest_text: str = "",
            extra_head: str = "", extra_js: str = "") -> str:
     base = "../" * depth
@@ -138,6 +145,7 @@ def layout(title: str, body: str, *, config: dict, active: str = "", depth: int 
     brand = esc(config.get("title", "AUTOSTATION"))
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
+{CSP_META}
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{esc(title)} - {brand}</title>
 <script>{THEME_HEAD_JS}</script>
@@ -147,6 +155,7 @@ def layout(title: str, body: str, *, config: dict, active: str = "", depth: int 
   <div class="brand">{LOGO_SVG}<div><div class="eyebrow">{brand} registry</div><div style="font-weight:700">{esc(title)}</div></div></div>
   <nav class="main" aria-label="Main">{links}<button id="theme-toggle" type="button" title="Toggle light/dark theme" aria-label="Toggle theme">Theme</button></nav>
 </header>
+{TELEMETRY_BANNER}
 {body}
 <footer class="foot">Generated from manifest.yaml (sha256 {esc(digest)}). Static site: no server, no scripts that call home.</footer>
 </div><script>{THEME_TOGGLE_JS}</script>{extra_js}</body></html>

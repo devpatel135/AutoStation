@@ -183,8 +183,11 @@ def zip_dir(src_dir: "str | Path", zip_path: "str | Path", include_root: bool = 
     return zp
 
 
-def unzip_safe(zip_path: "str | Path", dest: "str | Path", max_files: int = 10000, max_total_bytes: int = 1 << 30) -> List[Path]:
-    """Extract refusing zip-slip (``..``, absolute paths, drive letters), too many entries, or a zip bomb."""
+def unzip_safe(zip_path: "str | Path", dest: "str | Path", max_files: int = 10000, max_total_bytes: int = 500 * 1024 * 1024) -> List[Path]:
+    """Extract refusing zip-slip (``..``, absolute paths, drive letters, symlinks), too many entries, or a zip bomb.
+
+    The size cap is enforced on the bytes actually decompressed (streamed), not on the sizes the archive header claims.
+    On any refusal the files written so far are removed again."""
     dest_p = Path(dest)
     dest_p.mkdir(parents=True, exist_ok=True)
     root = dest_p.resolve()
@@ -193,23 +196,43 @@ def unzip_safe(zip_path: "str | Path", dest: "str | Path", max_files: int = 1000
         z = zipfile.ZipFile(zip_path)
     except zipfile.BadZipFile as exc:
         raise DataError(f"not a valid zip: {zip_path}") from exc
-    with z:
-        infos = z.infolist()
-        if len(infos) > max_files:
-            raise DataError(f"zip has {len(infos)} entries (limit {max_files})")
-        if sum(i.file_size for i in infos) > max_total_bytes:
-            raise DataError("zip expands beyond the size limit")
-        for info in infos:
-            name = info.filename
-            if name.startswith(("/", "\\")) or ":" in name.split("/")[0] or ".." in Path(name.replace("\\", "/")).parts:
-                raise DataError(f"unsafe path in zip: {name}")
-            target = (dest_p / name).resolve()
-            if root != target and root not in target.parents:
-                raise DataError(f"unsafe path in zip: {name}")
-        for info in infos:
-            z.extract(info, dest_p)
-            if not info.is_dir():
-                out.append((dest_p / info.filename))
+    try:
+        with z:
+            infos = z.infolist()
+            if len(infos) > max_files:
+                raise DataError(f"zip has {len(infos)} entries (limit {max_files})")
+            if sum(i.file_size for i in infos) > max_total_bytes:
+                raise DataError("zip expands beyond the size limit")
+            for info in infos:
+                name = info.filename
+                if name.startswith(("/", "\\")) or ":" in name.split("/")[0] or ".." in Path(name.replace("\\", "/")).parts:
+                    raise DataError(f"unsafe path in zip: {name}")
+                if ((info.external_attr >> 16) & 0o170000) == 0o120000:
+                    raise DataError(f"symbolic link in zip refused: {name}")
+                target = (dest_p / name).resolve()
+                if root != target and root not in target.parents:
+                    raise DataError(f"unsafe path in zip: {name}")
+            total = 0
+            for info in infos:
+                target = dest_p / info.filename
+                if info.is_dir():
+                    target.mkdir(parents=True, exist_ok=True)
+                    continue
+                target.parent.mkdir(parents=True, exist_ok=True)
+                out.append(target)
+                with z.open(info) as src, open(target, "wb") as f:
+                    for chunk in iter(lambda: src.read(1 << 20), b""):
+                        total += len(chunk)
+                        if total > max_total_bytes:
+                            raise DataError("zip expands beyond the size limit")
+                        f.write(chunk)
+    except (DataError, zipfile.BadZipFile):
+        for p in out:
+            try:
+                p.unlink()
+            except OSError:
+                pass
+        raise
     emit("files.unzip_safe", files=len(out))
     return out
 

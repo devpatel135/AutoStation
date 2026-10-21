@@ -29,7 +29,13 @@ SYSTEM_PROMPT = (
     "If a <schema> is given, reply with ONLY one JSON value that conforms to it - no prose, no code fences."
 )
 
-_TAGS = re.compile(r"</?\s*(untrusted_data|instructions|schema)\s*>", re.I)
+# Prompt-structure tags in any spelling a model would still read as a tag: any case, whitespace after "<" or around "/",
+# attributes (<untrusted_data x="y">), zero-width characters inside the name, full-width/angle-bracket look-alikes, and an
+# unterminated tag (no closing bracket). The match is capped so a stray "<schema" cannot swallow the whole document.
+_ZW = "[​-‏‪-‮⁠-⁤﻿­]*"
+_LT, _GT = "[<＜‹〈]", "[>＞›〉]"
+_NAMES = "|".join(_ZW.join(name) for name in ("untrusted_data", "instructions", "schema"))
+_TAGS = re.compile(rf"{_LT}\s*/?\s*(?:{_ZW})(?P<name>{_NAMES})(?![A-Za-z0-9_])[^<>＜＞‹›〈〉]{{0,200}}{_GT}?", re.I)
 
 
 class LLMError(RuntimeError):
@@ -44,16 +50,25 @@ class LLMResult:
 
 def neutralize(text: str) -> str:
     """Remove prompt-structure delimiters from untrusted text so it cannot close its own data block."""
-    return _TAGS.sub(lambda m: f"[{m.group(1)}-tag-removed]", text)
+    return _TAGS.sub(lambda m: "[" + re.sub(_ZW_STRIP, "", m.group("name")).lower() + "-tag-removed]", text)
+
+
+_ZW_STRIP = "[​-‏‪-‮⁠-⁤﻿­]"
 
 
 def classification_allowed(classification: str | None) -> bool:
-    eff = classification or os.environ.get("AUTOMAGIX_DATA_CLASSIFICATION")
+    """Gate on the data classification. A caller-supplied label (the broker takes one from the payload process) can only
+    make the check STRICTER than the run's own ``AUTOMAGIX_DATA_CLASSIFICATION``, never looser; unknown labels fail closed."""
+    env_label = os.environ.get("AUTOMAGIX_DATA_CLASSIFICATION")
     allowed = os.environ.get("AUTOMAGIX_LLM_ALLOWED_CLASSIFICATION")
-    if not eff or not allowed:
+    if not allowed:
+        return True
+    labels = [x for x in (classification, env_label) if x]
+    if not labels:
         return True
     try:
-        return CLASSIFICATIONS.index(eff) <= CLASSIFICATIONS.index(allowed)
+        eff = max(CLASSIFICATIONS.index(x) for x in labels)
+        return eff <= CLASSIFICATIONS.index(allowed)
     except ValueError:
         return False  # unknown label: fail closed
 
@@ -63,7 +78,8 @@ def build_messages(prompt: str, context: str, schema: Any, caller: str, extra_in
              f"<untrusted_data>\n{neutralize(context or '')}\n</untrusted_data>"]
     if schema is not None:
         parts.append(f"<schema>\n{schema_mod.describe(schema)}\n</schema>")
-    return [{"role": "system", "content": f"{SYSTEM_PROMPT} [caller: {caller}]"},
+    safe_caller = re.sub(r"[^\w .:/@-]", "", neutralize(str(caller)))[:80]  # the broker takes it from the payload process
+    return [{"role": "system", "content": f"{SYSTEM_PROMPT} [caller: {safe_caller}]"},
             {"role": "user", "content": "\n\n".join(parts)}]
 
 

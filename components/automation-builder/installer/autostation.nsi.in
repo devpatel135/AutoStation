@@ -193,6 +193,15 @@ Section "Install" SecInstall
     !insertmacro FailInstall "Could not write platform.json (exit code $0)." 5
   ${EndIf}
 
+!ifdef HAVE_GIT
+  ; MinGit (git + ssh) bundled for the ssh log transport; wrapper-core prefers it over anything on PATH
+  ${IfNot} ${FileExists} "$INSTDIR\git\cmd\git.exe"
+    DetailPrint "Installing bundled git..."
+    SetOutPath "$INSTDIR\git"
+    File /r "@@STAGE_DIR@@\git\*.*"
+  ${EndIf}
+!endif
+
 !ifdef HAVE_KNOWN_HOSTS
   SetOutPath "$INSTDIR\config"
   File "@@STAGE_DIR@@\config\known_hosts"

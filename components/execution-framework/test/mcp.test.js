@@ -32,7 +32,7 @@ function fakePage() {
 
 function setup(opts = {}) {
   const page = fakePage();
-  const registry = mcp.createToolRegistry({ getPage: async () => page, ...opts });
+  const registry = mcp.createToolRegistry({ getPage: async () => page, allowedOrigins: ['https://portal.example.com'], deps: { lookup: async () => [{ address: '93.184.216.34' }] }, ...opts });
   const server = mcp.createServer({ registry });
   const rpc = (method, params, id = 1) => server.handleMessage({ jsonrpc: '2.0', id, method, params });
   return { page, registry, server, rpc };

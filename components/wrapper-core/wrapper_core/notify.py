@@ -23,8 +23,11 @@ $appId = '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershe
 """
 
 
-def _xml_safe(s: str) -> str:
-    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")[:200]
+def _xml_safe(s: str, limit: int = 200) -> str:
+    """Truncate FIRST, then escape: cutting after escaping can slice an entity in half (``&am``) and make the toast XML
+    invalid. Characters XML 1.0 forbids are dropped."""
+    s = "".join(ch for ch in str(s)[:limit] if ch in "\t\n\r" or ord(ch) >= 0x20)
+    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
 def toast(title: str, body: str) -> bool:

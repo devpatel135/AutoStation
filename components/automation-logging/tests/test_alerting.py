@@ -30,7 +30,7 @@ class FakeSmtp:
     def __init__(self, host, port):
         self.host, self.port, self.tls, self.login_args = host, port, False, None
 
-    def starttls(self):
+    def starttls(self, context=None):
         self.tls = True
 
     def login(self, u, p):

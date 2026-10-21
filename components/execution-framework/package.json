@@ -1,6 +1,6 @@
 {
   "name": "execution-framework",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "AUTOSTATION shared automation runtime: Node SDK, Playwright (system Edge/Chrome), CDP, resilience, agent loop, MCP, adapters, HTTP client",
   "main": "index.js",
   "license": "UNLICENSED",

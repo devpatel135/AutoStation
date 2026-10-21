@@ -7,7 +7,7 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
-from site_common import ROOT, SiteConfig, esc, layout, slug, write
+from site_common import ROOT, SiteConfig, esc, harden_html, layout, slug, write
 
 from registry.portal import markdown
 
@@ -213,6 +213,6 @@ def build_docs_site(out: Path, repo: Path, cfg: SiteConfig) -> dict:
     write(out, "docs/search-index.json", json.dumps(index_entries, separators=(",", ":")) + "\n")
     asm = repo / "docs" / "assessment.html"
     if asm.is_file():
-        shutil.copy2(asm, out / "docs" / "assessment.html")
+        write(out, "docs/assessment.html", harden_html(asm.read_text(encoding="utf-8")))
         pages.append("docs/assessment.html")
     return {"pages": pages, "docs": [d.stem for d in docs], "search_entries": len(index_entries)}

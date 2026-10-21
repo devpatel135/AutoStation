@@ -29,6 +29,14 @@ _EPOCH_1900 = _dt.datetime(1899, 12, 30)
 _EPOCH_1904 = _dt.datetime(1904, 1, 1)
 _INVALID_XML = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f]")
 
+# Hostile-workbook limits (an .xlsx is a zip of XML: zip bombs and XML entity bombs are the classic ways to exhaust a worker).
+MAX_MEMBERS = 10_000
+MAX_PART_BYTES = 256 * 1024 * 1024        # one XML part, uncompressed
+MAX_TOTAL_BYTES = 500 * 1024 * 1024       # all parts read from one workbook
+MAX_ROWS, MAX_COLS = 1_048_576, 16_384    # Excel's own sheet limits
+MAX_GRID_CELLS = 50_000_000               # dense grid we are willing to materialise
+_DOCTYPE = re.compile(rb"<!\s*(DOCTYPE|ENTITY)", re.I)
+
 
 def _ln(tag: str) -> str:
     return tag.rsplit("}", 1)[-1]
@@ -83,6 +91,11 @@ class _Book:
             self.z = zipfile.ZipFile(path)
         except (zipfile.BadZipFile, OSError) as exc:
             raise DataError(f"not a readable .xlsx file: {path}") from exc
+        infos = self.z.infolist()
+        if len(infos) > MAX_MEMBERS or sum(i.file_size for i in infos) > MAX_TOTAL_BYTES * 8:
+            self.z.close()
+            raise DataError(f"{path}: workbook has too many parts or an implausible uncompressed size")
+        self._read_total = 0
         names = set(self.z.namelist())
         if "xl/workbook.xml" not in names:
             raise DataError(f"{path} is not an OOXML workbook (xl/workbook.xml missing)")
@@ -96,7 +109,28 @@ class _Book:
         self.z.close()
 
     def _xml(self, part: str):
-        return ET.fromstring(self.z.read(part))
+        """Parse one workbook part with a streaming size cap (declared sizes are not trusted) and DOCTYPE/ENTITY rejected
+        (no entity expansion is ever needed for OOXML, so any DTD is treated as an attack)."""
+        try:
+            with self.z.open(part) as f:
+                data = f.read(MAX_PART_BYTES + 1)
+        except KeyError:
+            raise DataError(f"workbook part {part} is missing") from None
+        except (zipfile.BadZipFile, RuntimeError, NotImplementedError, EOFError, OSError) as exc:
+            raise DataError(f"workbook part {part} is unreadable: {type(exc).__name__}") from exc
+        if len(data) > MAX_PART_BYTES:
+            raise DataError(f"workbook part {part} exceeds {MAX_PART_BYTES} bytes uncompressed")
+        self._read_total += len(data)
+        if self._read_total > MAX_TOTAL_BYTES:
+            raise DataError(f"workbook expands beyond {MAX_TOTAL_BYTES} bytes (zip bomb?)")
+        if data.startswith((b"\xff\xfe", b"\xfe\xff", b"\x00")) or data[1:2] == b"\x00":
+            raise DataError(f"workbook part {part} uses an unsupported (UTF-16/32) encoding")
+        if _DOCTYPE.search(data):
+            raise DataError(f"workbook part {part} contains a DOCTYPE/ENTITY declaration (refused: XML entity bomb / XXE)")
+        try:
+            return ET.fromstring(data)
+        except ET.ParseError as exc:
+            raise DataError(f"workbook part {part} is not valid XML: {exc}") from exc
 
     def _load_workbook(self):
         wb = self._xml("xl/workbook.xml")
@@ -176,6 +210,8 @@ class _Book:
             if _ln(row_el.tag) != "row":
                 continue
             rnum = int(row_el.get("r") or (max(rows) + 1 if rows else 1))
+            if not 1 <= rnum <= MAX_ROWS:
+                raise DataError(f"row number {rnum} is outside the sheet limits")
             cells: Dict[int, Any] = {}
             auto_col = 0
             for c in row_el:
@@ -187,6 +223,8 @@ class _Book:
                     ci = col_index(m.group(1)) if m else auto_col
                 else:
                     ci = auto_col
+                if ci >= MAX_COLS:
+                    raise DataError(f"column index {ci} is outside the sheet limits")
                 auto_col = ci + 1
                 cells[ci] = self._cell_value(c, epoch)
             if cells:
@@ -194,6 +232,8 @@ class _Book:
         if not rows:
             return name, []
         width = max(max(c) for c in rows.values()) + 1
+        if width * max(rows) > MAX_GRID_CELLS:
+            raise DataError("sheet is too sparse/large to load (would need more than 50 million cells)")
         grid = []
         for rnum in range(1, max(rows) + 1):
             r = rows.get(rnum, {})
@@ -476,8 +516,21 @@ def read_csv(path: "str | os.PathLike", delimiter: Optional[str] = None, encodin
     return rows
 
 
+_FORMULA_LEAD = ("=", "+", "-", "@", "\t", "\r")
+
+
+def csv_safe(value: Any, escape_formulas: bool = True) -> Any:
+    """CSV/formula-injection guard (OWASP): a text cell that Excel/LibreOffice would evaluate as a formula (leading
+    ``= + - @``, tab or CR) is prefixed with an apostrophe so it is shown as text. Numbers and dates are untouched."""
+    if escape_formulas and isinstance(value, str) and value.startswith(_FORMULA_LEAD):
+        return "'" + value
+    return value
+
+
 def write_csv(path: "str | os.PathLike", rows: Sequence[Row], columns: Optional[Sequence[str]] = None, delimiter: str = ",",
-              encoding: str = "utf-8") -> str:
+              encoding: str = "utf-8", escape_formulas: bool = True) -> str:
+    """Write ``rows`` as CSV. Text cells that start with ``= + - @ \\t \\r`` are neutralised (``'`` prefix) so opening the file
+    in Excel cannot execute them; pass ``escape_formulas=False`` for machine-to-machine files that must round-trip verbatim."""
     cols = _columns(rows, columns)
     dest = os.fspath(path)
     d = os.path.dirname(os.path.abspath(dest))
@@ -487,9 +540,10 @@ def write_csv(path: "str | os.PathLike", rows: Sequence[Row], columns: Optional[
     try:
         with open(tmp, "w", encoding=encoding, newline="") as f:
             w = csv.writer(f, delimiter=delimiter)
-            w.writerow(cols)
+            w.writerow([csv_safe(c, escape_formulas) for c in cols])
             for r in rows:
-                w.writerow(["" if r.get(c) is None else (r[c].isoformat() if hasattr(r[c], "isoformat") else r[c]) for c in cols])
+                w.writerow(["" if r.get(c) is None else csv_safe(r[c].isoformat() if hasattr(r[c], "isoformat") else r[c], escape_formulas)
+                            for c in cols])
         os.replace(tmp, dest)
     except BaseException:
         try:

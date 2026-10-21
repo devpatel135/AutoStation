@@ -138,12 +138,12 @@ def test_site_with_a_real_registry_publishes_it_and_shows_real_hashes(tmp_path):
     site = tmp_path / "site"
     st = build_site.build(site, ROOT, registry=reg, installer_sha_file=None)
     assert (site / "registry" / "manifest.yaml").read_text(encoding="utf-8") == (reg / "manifest.yaml").read_text(encoding="utf-8")
-    assert (site / "registry" / "artifacts" / "automations" / "automation-certification-site-1.0.0.zip").is_file()
+    assert list((site / "registry" / "artifacts" / "automations").glob("automation-certification-site-*.zip"))
     assert not (site / "registry" / "build-summary.json").exists()
     text = (site / "install" / "automation-certification-site.html").read_text(encoding="utf-8")
     assert "PLACEHOLDER" not in text
     m = miniyaml.loads((reg / "manifest.yaml").read_text(encoding="utf-8"))
-    assert m["automations"]["automation-certification-site"]["versions"]["1.0.0"]["sha256"] in text
+    assert all(v["sha256"] in text for v in m["automations"]["automation-certification-site"]["versions"].values())
     assert "registry manifest" in (site / "index.html").read_text(encoding="utf-8")
     assert check_site.check_site(site) == []
 
@@ -361,7 +361,7 @@ def test_bootstrap_verifies_hash_and_refuses_everything_else(boot, tmp_path):
                    "-InstallerPath", str(exe), "-NoRun", tmp=tmp_path)
     assert nosha.returncode != 0 and "cannot be verified" in (nosha.stdout + nosha.stderr)
     allowed = run_ps(script, "-Automation", "automation-certification-site", "-CatalogUrl", catalog(installer={"url": "https://x/y.exe", "sha256": None}),
-                     "-InstallerPath", str(exe), "-NoRun", "-AllowUnverified", tmp=tmp_path)
+                     "-InstallerPath", str(exe), "-NoRun", "-AllowUnverified", "-AllowUnsigned", tmp=tmp_path)
     assert allowed.returncode == 0, allowed.stdout + allowed.stderr
     unknown = run_ps(script, "-Automation", "nope", "-CatalogUrl", catalog(), "-InstallerPath", str(exe), "-NoRun", tmp=tmp_path)
     assert unknown.returncode != 0 and "automation-certification-site" in (unknown.stdout + unknown.stderr)
@@ -369,5 +369,99 @@ def test_bootstrap_verifies_hash_and_refuses_everything_else(boot, tmp_path):
                         "-InstallerPath", str(exe), "-NoRun", tmp=tmp_path)
     assert unreleased.returncode != 0 and "not released" in (unreleased.stdout + unreleased.stderr)
     paused = run_ps(script, "-Automation", "automation-certification-site", "-CatalogUrl", catalog(status="paused", paused_reason="bad data"),
-                    "-InstallerPath", str(exe), "-NoRun", tmp=tmp_path)
+                    "-InstallerPath", str(exe), "-NoRun", "-AllowUnsigned", tmp=tmp_path)
     assert paused.returncode == 0 and "PAUSED" in (paused.stdout + paused.stderr)
+
+
+# ---- security hardening: CSP + labelling, hostile manifest names, honest verification wording, fail-closed bootstrap ---------------
+BANNER = "Telemetry is submitted by installed clients and is not authenticated; treat numbers as advisory"
+
+
+def test_every_generated_page_has_a_csp_and_the_advisory_banner(demo_site):
+    site = demo_site[0]
+    pages = html_files(site)
+    assert len(pages) > 20
+    for p in pages:
+        text = p.read_text(encoding="utf-8")
+        rel = p.relative_to(site).as_posix()
+        m = re.search(r'http-equiv="Content-Security-Policy" content="([^"]*)"', text)
+        assert m, f"no CSP on {rel}"
+        csp = m.group(1)
+        assert "default-src 'none'" in csp and "base-uri 'none'" in csp and "form-action 'none'" in csp, rel
+        assert "script-src" in csp and "*" not in csp and "http:" not in csp, rel
+        if not rel.startswith("migration/"):    # the migration page is rendered from local inventory files, not telemetry
+            assert BANNER in text, f"no advisory banner on {rel}"
+
+
+def test_dashboard_csp_only_allows_the_font_hosts_it_needs(demo_site):
+    text = (demo_site[0] / "dashboard" / "index.html").read_text(encoding="utf-8")
+    csp = re.search(r'http-equiv="Content-Security-Policy" content="([^"]*)"', text).group(1)
+    assert "font-src https://fonts.gstatic.com" in csp and "style-src-elem 'unsafe-inline' https://fonts.googleapis.com" in csp
+    assert "connect-src" not in csp and "frame-src" not in csp
+
+
+def test_unsafe_automation_names_get_no_install_page_catalog_entry_or_command(tmp_path, repo_manifest):
+    m = miniyaml.loads(repo_manifest.read_text(encoding="utf-8"))
+    good = m["automations"]["automation-certification-site"]
+    for evil in ('x"><img src=x onerror=alert(1)>', "bad name; calc", "../evil", "$(whoami)"):
+        m["automations"][evil] = json.loads(json.dumps(good))
+    cfg = build_site.SiteConfig()
+    out = tmp_path / "site"
+    res = site_install.build_install_center(out, m, cfg)
+    names = {p.name for p in (out / "install").iterdir()}
+    assert "automation-certification-site.html" in names
+    assert not [n for n in names if any(bad in n for bad in ("img", "calc", "evil", "whoami", " "))]
+    cat = json.loads((out / "install" / "catalog.json").read_text(encoding="utf-8"))
+    assert list(cat["automations"]) == ["automation-certification-site"]
+    assert len([n for n in cfg.notes if "not a plain name" in n]) == 4
+    blob = "".join(p.read_text(encoding="utf-8") for p in (out / "install").glob("*.html"))
+    assert "<img src=x" not in blob and "calc" not in blob and "whoami" not in blob
+
+
+def test_only_a_real_sha256_is_ever_embedded_in_a_page_or_command(tmp_path, repo_manifest):
+    shas = tmp_path / "shas.json"
+    shas.write_text(json.dumps({"automation-certification-site": '0"; Start-Process calc; "'}), encoding="utf-8")
+    site = tmp_path / "site"
+    build_site.build(site, ROOT, installer_sha_file=shas, manifest=repo_manifest)
+    text = (site / "install" / "automation-certification-site.html").read_text(encoding="utf-8")
+    assert "Start-Process" not in text and "paste the SHA-256 from the release page" in text
+    cat = json.loads((site / "install" / "catalog.json").read_text(encoding="utf-8"))
+    assert cat["automations"]["automation-certification-site"]["installer"]["sha256"] is None
+    good = "ab" * 32
+    shas.write_text(json.dumps({"automation-certification-site": good.upper()}), encoding="utf-8")
+    build_site.build(site, ROOT, installer_sha_file=shas, manifest=repo_manifest)
+    assert f'$expected = &quot;{good}&quot;' in (site / "install" / "automation-certification-site.html").read_text(encoding="utf-8")
+
+
+def test_bad_repo_or_http_installer_template_is_refused(tmp_path, repo_manifest):
+    with pytest.raises(SystemExit):
+        build_site.build(tmp_path / "a", ROOT, github_repo='o/r"; calc; "', manifest=repo_manifest)
+    with pytest.raises(SystemExit):
+        build_site.build(tmp_path / "b", ROOT, installer_url_template="http://evil.example/{name}.exe", manifest=repo_manifest)
+
+
+def test_verification_wording_is_honest_and_attestation_is_documented(demo_site):
+    site = demo_site[0]
+    boot_text = (site / "install" / "bootstrap.ps1").read_text(encoding="utf-8")
+    assert "independent origin" not in boot_text
+    assert "gh attestation verify <file> --repo <owner>/<repo>" in boot_text and "-AllowUnsigned" in boot_text and "-RequireAttestation" in boot_text
+    assert "@@REPO@@" not in boot_text and "devpatel135/AutoStation" in boot_text
+    assert "independent origin" not in (ROOT / "tools" / "site" / "site_install.py").read_text(encoding="utf-8")
+    page = (site / "install" / "automation-certification-site.html").read_text(encoding="utf-8")
+    assert "gh attestation verify .\\automation-certification-site-setup.exe --repo devpatel135/AutoStation" in page
+    assert "does <em>not</em> prove who built" in page
+
+
+@pytest.mark.skipif(PS is None, reason="PowerShell not available")
+def test_bootstrap_fails_closed_on_an_unsigned_installer_for_broad_only(boot, tmp_path):
+    script, exe, sha, catalog = boot
+    base = ["-Automation", "automation-certification-site", "-CatalogUrl", catalog(), "-InstallerPath", str(exe), "-NoRun"]
+    broad = run_ps(script, *base, "-Ring", "broad", tmp=tmp_path)
+    assert broad.returncode != 0 and "Refusing to install into ring 'broad'" in (broad.stdout + broad.stderr), broad.stdout + broad.stderr
+    allowed = run_ps(script, *base, "-Ring", "broad", "-AllowUnsigned", tmp=tmp_path)
+    assert allowed.returncode == 0 and "Signature status" in (allowed.stdout + allowed.stderr), allowed.stdout + allowed.stderr
+    for ring in ("pilot", "dev"):
+        r = run_ps(script, *base, "-Ring", ring, tmp=tmp_path)
+        assert r.returncode == 0 and "Signature status" in (r.stdout + r.stderr), (ring, r.stdout + r.stderr)
+    hostile = run_ps(script, "-Automation", "x; calc", "-CatalogUrl", catalog(), "-InstallerPath", str(exe), "-NoRun", tmp=tmp_path)
+    assert hostile.returncode != 0 and "does not match" in (hostile.stdout + hostile.stderr)

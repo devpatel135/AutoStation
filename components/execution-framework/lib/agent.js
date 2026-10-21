@@ -8,7 +8,10 @@
  *    which the broker delimits as untrusted data
  *  - closed tool set, schema-validated calls; custom tools must be registered by the automation author
  *  - navigation is origin-allow-listed (default: only the starting origin) and re-checked after every step
- *  - irreversible clicks (submit/send/delete/pay...) are blocked unless params.allow_irreversible=true
+ *  - irreversible actions are blocked unless params.allow_irreversible=true: EVERY Enter/Return press, every click on a structurally
+ *    submit-like element (button[type=submit], input[type=submit|image], any button / role=button inside or associated with a form)
+ *    and every click whose accessible name/text/value/title/aria-label reads like submit/send/pay/delete/accept/sign/...;
+ *    an element that cannot be classified (no description, describe() failed) is DENIED (default-deny)
  *  - step budget, stall detection (repeated action / unchanged page), LLM unavailable => fail safe (stop)
  *  - fill values are never logged (length only); the DOM is never logged (input hash only)
  */
@@ -17,7 +20,8 @@ const cdp = require('./cdp');
 const schemaLib = require('./schema');
 const wrapper = require('./wrapper');
 
-const IRREVERSIBLE = /\b(submit|send|delete|remove|pay|purchase|confirm|approve|transfer|publish|post|destroy|erase)\b/i;
+const IRREVERSIBLE = /\b(?:(?:submit|send|confirm|place\s+(?:the\s+)?order|buy|pay|check\s*out|accept|allow|grant|sign|transfer|publish|post|destroy|erase)(?:s|es|ed|ing|ment|ments)?|(?:delet|remov|purchas|agre|approv|authori[sz]|subscrib|eras)(?:e|es|ed|d|ing|al|als)|appl(?:y|ies|ied|ying))\b/i;
+const ENTER_KEY = /(?:^|\+)(?:enter|return|numpadenter)$/i;
 
 const BUILTIN_TOOLS = {
   navigate: { description: 'Go to a URL (must be on an allowed origin).', args: { url: 'string' } },
@@ -56,6 +60,29 @@ function checkOrigin(url, allowedOrigins) {
 
 function isIrreversible(description) {
   return IRREVERSIBLE.test(String(description || ''));
+}
+
+/**
+ * Pure: classify the element a click would hit. `info` is what io.describe returned: the structured object created by
+ * createPageIo ({tag, type, role, inForm, formAssoc, text}) or (legacy / fakes) a plain label string.
+ * -> {irreversible, reason}. Anything that cannot be classified is irreversible (default-deny).
+ */
+function classifyElement(info, selector) {
+  const label = (typeof info === 'string') ? info : (info && typeof info === 'object' ? String(info.text || '') : '');
+  const structured = info && typeof info === 'object' ? info : null;
+  if (structured) {
+    const tag = String(structured.tag || '').toLowerCase();
+    const type = String(structured.type || '').toLowerCase();
+    const role = String(structured.role || '').toLowerCase();
+    const inForm = Boolean(structured.inForm || structured.formAssoc);
+    if (tag === 'input' && (type === 'submit' || type === 'image')) return { irreversible: true, reason: 'submit_input' };
+    if (type === 'submit') return { irreversible: true, reason: 'submit_type' };
+    if (tag === 'button' && inForm) return { irreversible: true, reason: 'button_in_form' };
+    if ((role === 'button' || (tag === 'input' && type === 'button')) && inForm) return { irreversible: true, reason: 'form_button' };
+  }
+  if (isIrreversible(label) || isIrreversible(selector)) return { irreversible: true, reason: 'label' };
+  if (!label.trim() && !(structured && structured.tag)) return { irreversible: true, reason: 'unclassifiable' };
+  return { irreversible: false, reason: '' };
 }
 
 /** Pure: validate one model-proposed call against the closed tool set. Returns {ok, error, call}. */
@@ -124,7 +151,19 @@ function buildContext({ url, snapshot, history, extracts, data }) {
 
 /** Playwright-backed IO (real browser). Tests inject a fake with the same methods. */
 function createPageIo(page, deps = {}) {
-  const describe = (el) => [el.innerText, el.value, el.getAttribute('aria-label'), el.id, el.getAttribute('name'), el.title].filter(Boolean).join(' ').slice(0, 300);
+  // runs inside the page: no closures. Structure (tag/type/role/form association) is reported alongside every accessible label.
+  const describe = (el) => {
+    const attr = (n) => el.getAttribute(n) || '';
+    const text = [el.innerText, el.value, attr('aria-label'), el.title, attr('alt'), attr('name'), el.id].filter((v) => typeof v === 'string' && v).join(' ').slice(0, 300);
+    return {
+      tag: String(el.tagName || '').toLowerCase(),
+      type: String(el.type || attr('type')).toLowerCase(),
+      role: attr('role').toLowerCase(),
+      inForm: Boolean(el.closest && el.closest('form')),
+      formAssoc: Boolean(el.form) || Boolean(attr('form')),
+      text,
+    };
+  };
   return {
     snapshot: () => (deps.snapshot ? deps.snapshot(page) : cdp.domSnapshot(page, { maxChars: 8000 })),
     url: async () => page.url(),
@@ -217,14 +256,18 @@ async function runAgent(opts, deps = {}) {
     }
 
     // irreversible-action gate
-    const gateSel = call.tool === 'click' ? call.args.selector : (call.tool === 'press' && /^enter$/i.test(call.args.key) ? call.args.selector : null);
-    if (gateSel && confirmBeforeIrreversible && !allowIrreversible) {
-      let desc = '';
-      try { desc = await io.describe(gateSel); } catch (_) { desc = ''; }
-      if (isIrreversible(desc) || isIrreversible(gateSel)) {
+    if (confirmBeforeIrreversible && !allowIrreversible) {
+      let gate = null;
+      if (call.tool === 'press' && ENTER_KEY.test(String(call.args.key))) gate = { irreversible: true, reason: 'enter_key' }; // Enter submits forms: always gated
+      else if (call.tool === 'click') {
+        let info = null;
+        try { info = await io.describe(call.args.selector); } catch (_) { info = null; }
+        gate = classifyElement(info, call.args.selector);
+      }
+      if (gate && gate.irreversible) {
         invalid += 1;
         history.push({ step, tool: call.tool, args: summarizeArgs(call.tool, call.args), outcome: 'blocked', note: 'irreversible action needs params.allow_irreversible=true' });
-        log('agent_step', { step, tool: call.tool, outcome: 'blocked', note: 'irreversible_gate' });
+        log('agent_step', { step, tool: call.tool, outcome: 'blocked', note: 'irreversible_gate', gate_reason: gate.reason });
         if (invalid >= 3) return finish('blocked_irreversible', { reason: 'agent kept attempting an irreversible action' });
         continue;
       }
@@ -256,6 +299,6 @@ async function runAgent(opts, deps = {}) {
 }
 
 module.exports = {
-  runAgent, validateToolCall, checkOrigin, isIrreversible, StallDetector, buildStepPrompt, buildContext, createPageIo,
+  runAgent, validateToolCall, checkOrigin, isIrreversible, classifyElement, StallDetector, buildStepPrompt, buildContext, createPageIo,
   BUILTIN_TOOLS, IRREVERSIBLE, stepSchema, originOf,
 };

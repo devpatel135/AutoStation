@@ -29,29 +29,33 @@ on:
       ring:
         description: Default ring baked into the installer
         default: broad
-      python_embed_url:
-        description: python.org embeddable zip
-        default: https://www.python.org/ftp/python/3.12.7/python-3.12.7-embed-amd64.zip
 
 permissions:
   contents: read
 
 env:
   AUTOMATION: automation-certification-site
+  # Pinned: the installer bundles this interpreter, so it is verified byte-for-byte (python.org publishes no signature for embed zips).
+  PY_EMBED_URL: https://www.python.org/ftp/python/3.12.7/python-3.12.7-embed-amd64.zip
+  PY_EMBED_SHA256: 0d57bb6cb078b74d23dbfe91f77d6780d45bed328911609f1f7ee2ba1606bf44
 
 jobs:
   build:
     runs-on: windows-latest
+    timeout-minutes: 40
     env:
+      INPUT_RING: ${{ inputs.ring }}
       LOG_TOKEN_SET: ${{ secrets.LOGGING_TOKEN != '' }}
       LOG_REPO: ${{ vars.AUTOSTATION_LOG_REPO || format('{0}/AutoStation-logs', github.repository_owner) }}
       PAGES_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/registry/
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 20
       - run: python -m pip install jinja2 pytest pydantic
@@ -62,8 +66,8 @@ jobs:
       - name: Package wrapper-core, execution-framework and the payload; write the build config
         shell: bash
         run: |
-          RING="${{ inputs.ring }}"; RING="${RING:-broad}"
-          EMB="${{ inputs.python_embed_url }}"; EMB="${EMB:-https://www.python.org/ftp/python/3.12.7/python-3.12.7-embed-amd64.zip}"
+          RING="${INPUT_RING:-broad}"
+          case "$RING" in dev|pilot|broad) ;; *) echo "::error::invalid ring"; exit 1 ;; esac
           if [ "$LOG_TOKEN_SET" = "true" ]; then LOG="$LOG_REPO"; echo "connected build: logs go to $LOG_REPO"; else LOG="local"; echo "::notice::LOGGING_TOKEN secret not set: building a STANDALONE installer (logs stay on the machine)"; fi
           mkdir -p build/stage/wrapper-core build/pkg vendor
           cp -r components/wrapper-core/wrapper_core build/stage/wrapper-core/
@@ -75,7 +79,9 @@ jobs:
           python components/automation-builder/scripts/package.py component execution-framework build/stage/execution-framework --version "$FV" --out build/pkg
           V=$(python -c "import sys; sys.path.insert(0,'components/wrapper-core'); from wrapper_core import miniyaml; print(miniyaml.load('components/automations/$AUTOMATION/automation.yaml')['version'])")
           python components/automation-builder/scripts/package.py automation "$AUTOMATION" "components/automations/$AUTOMATION" --version "$V" --out build/pkg
-          curl -fsSL -o vendor/python-embed.zip "$EMB"
+          curl -fsSL -o vendor/python-embed.zip "$PY_EMBED_URL"
+          echo "$PY_EMBED_SHA256  vendor/python-embed.zip" | sha256sum -c -
+          python tools/fetch_mingit.py --out vendor/mingit.zip
           cat > build/build.json <<EOF
           {"automation": "$AUTOMATION", "version": "$V", "ring": "$RING",
            "registry_url": "$PAGES_URL", "log_remote": "$LOG",
@@ -83,6 +89,7 @@ jobs:
            "wrapper_core_zip": "../build/pkg/components/wrapper-core-$WV.zip",
            "framework_zip": "../build/pkg/components/execution-framework-$FV.zip",
            "automation_zip": "../build/pkg/automations/$AUTOMATION-$V.zip",
+           "git_zip": "../vendor/mingit.zip",
            "python_embed_zip": "../vendor/python-embed.zip"}
           EOF
           echo "AUTOMATION_VERSION=$V" >> "$GITHUB_ENV"
@@ -104,7 +111,7 @@ jobs:
             Set-Content -Path "$($f.FullName).sha256" -Value "$h  $($f.Name)" -Encoding ascii
           }
           Get-ChildItem release | Select-Object Name, Length | Format-Table -AutoSize
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: installer
           path: release/*
@@ -167,6 +174,7 @@ jobs:
           $env:AUTOMATION_PARAM_PORTAL_URL = 'http://127.0.0.1:8099/portal.html'
           $env:AUTOMATION_PARAM_PICKER_HOST = 'localhost:8099'
           $env:AUTOMATION_PARAM_HEADLESS = 'true'
+          $env:AUTOMATION_PARAM_ALLOWED_HOSTS = '127.0.0.1:8099,localhost:8099'; $env:AMX_ALLOW_TEST_HOSTS = '1'   # local demo only
           $env:AUTOMATION_PARAM_TIMEOUT_S = '45'
           & (Join-Path $home_ 'python\python.exe') -m wrapper_core run $env:AUTOMATION --slot daily
           $code = $LASTEXITCODE
@@ -204,13 +212,20 @@ jobs:
     needs: build
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: write
+      id-token: write
+      attestations: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: installer
           path: dist
+      - name: Attest build provenance (verify with: gh attestation verify <file> --repo ${{ github.repository }})
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
+        with:
+          subject-path: dist/*.exe
       - name: Publish to the rolling release
         env:
           GH_TOKEN: ${{ github.token }}

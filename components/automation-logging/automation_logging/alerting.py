@@ -16,7 +16,9 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import smtplib
+import ssl
 import sys
 import urllib.error
 import urllib.parse
@@ -47,16 +49,62 @@ def load_config(path: str | Path | None) -> dict:
 
 
 # ------------------------------------------------------------------------------------------ transports
+class _SameHostRedirect(urllib.request.HTTPRedirectHandler):
+    """Never follow a redirect to another host (or from https to http): urllib would replay Authorization / PRIVATE-TOKEN."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        old, new = urllib.parse.urlsplit(req.full_url), urllib.parse.urlsplit(newurl)
+        if (old.hostname or "").lower() != (new.hostname or "").lower() or (old.scheme == "https" and new.scheme != "https"):
+            raise urllib.error.HTTPError(req.full_url, code, "cross-origin redirect refused", headers, fp)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def safe_opener() -> urllib.request.OpenerDirector:
+    return urllib.request.build_opener(_SameHostRedirect())
+
+
+def require_https(url: str, allow_http: bool = False, what: str = "url") -> str:
+    """Alert channels carry tokens and incident text: https only, unless the operator explicitly opted in."""
+    scheme = urllib.parse.urlsplit(str(url)).scheme.lower()
+    if scheme == "https" or (allow_http and scheme == "http"):
+        return url
+    raise ChannelError(f"{what} must be https (set allow_insecure_http: true on the channel to permit http)")
+
+
 class HttpTransport:
     """Default urllib transport. ``request`` returns (status, body_bytes) and never raises on HTTP errors."""
 
     def request(self, method: str, url: str, headers: dict | None = None, body: bytes | None = None, timeout: int = 30):
         req = urllib.request.Request(url, data=body, method=method, headers=headers or {})
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 - operator-configured URLs
+            with safe_opener().open(req, timeout=timeout) as resp:  # noqa: S310 - operator-configured URLs
                 return resp.status, resp.read()
         except urllib.error.HTTPError as exc:
             return exc.code, exc.read()
+
+
+# ------------------------------------------------------------------------------------------ sanitising (telemetry is attacker-authored)
+_CTRL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f\u2028\u2029\u202a-\u202e\u2066-\u2069]")
+_MENTION = re.compile(r"@(?=\s*(?:everyone|here|channel|all)\b)", re.I)
+
+
+def sanitize(value, limit: int = 1000) -> str:
+    """Make attacker-authored text inert for Slack / Teams / Jira / GitLab / email: no control or bidi characters, no code
+    fences, no angle-bracket markup (``<!channel>``, ``<@U1>``, ``<http://x|y>``), no markdown links, no @everyone."""
+    s = "" if value is None else str(value)
+    s = _CTRL.sub(" ", s.replace("\r\n", "\n").replace("\r", "\n"))
+    s = s.replace("`", "'").replace("<", "\u2039").replace(">", "\u203a")
+    s = _MENTION.sub("@\u200b", s)
+    s = s.replace("](", "] (").replace("[", "(").replace("]", ")")
+    return s[:limit]
+
+
+def _clean_token(value, limit: int = 128) -> str:
+    return re.sub(r"[^A-Za-z0-9_.:-]", "_", str(value))[:limit]
+
+
+def _jql_quote(value) -> str:
+    return str(value).replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ").replace("\r", " ")
 
 
 # ------------------------------------------------------------------------------------------ alert content
@@ -80,20 +128,31 @@ def enrich(signals: list[dict], data) -> list[dict]:
 
 
 def build_alert(signal: dict, kind: str, now: datetime, log_base_url: str | None = None, owner_email: str | None = None) -> dict:
+    # Every string below can originate in attacker-authored telemetry: sanitise once here so no channel renders it raw.
+    S = sanitize
     diag = signal.get("diagnosis") or None
+    if isinstance(diag, dict):
+        diag = {S(k, 50): S(v, 600) for k, v in diag.items() if isinstance(v, (str, int, float, bool))}
     path = signal.get("log_path")
+    path = urllib.parse.quote(str(path), safe="/._-~") if path else path
     link = (log_base_url.rstrip("/") + "/" + path) if (log_base_url and path) else path
-    sev = signal["severity"]
-    scope = signal.get("automation") or ", ".join(signal.get("automations") or []) or signal.get("host") or "fleet"
-    title = f"[AUTOSTATION {sev.upper()}] {signal['type']} - {scope}" + (f" on {signal['host']}" if signal.get("host") else "")
+    sev = S(signal["severity"], 20)
+    typ = S(signal["type"], 60)
+    scope = S(signal.get("automation") or ", ".join(str(a) for a in signal.get("automations") or []) or signal.get("host") or "fleet", 200)
+    host = S(signal["host"], 100) if signal.get("host") else signal.get("host")
+    title = f"[AUTOSTATION {sev.upper()}] {typ} - {scope}" + (f" on {host}" if host else "")
     if kind == "resolved":
-        title = f"[AUTOSTATION RESOLVED] {signal['type']} - {scope}"
-    return {"alert_id": signal["id"], "kind": kind, "ts": iso(now), "severity": sev, "signal_type": signal["type"],
-            "automation": signal.get("automation"), "host": signal.get("host"), "ring": signal.get("ring"),
-            "title": title, "detail": signal.get("detail"), "error_category": signal.get("error_category"),
-            "error_message": signal.get("error_message"), "diagnosis": diag, "diagnosis_reason": signal.get("diagnosis_reason"),
-            "retry_history": signal.get("retry_history") or [], "synopsis": signal.get("synopsis"), "log_link": link,
-            "evidence": signal.get("evidence") or [], "owner": owner_email or signal.get("owner"),
+        title = f"[AUTOSTATION RESOLVED] {typ} - {scope}"
+    hist = [{k: (S(v, 200) if isinstance(v, str) else v) for k, v in h.items()} for h in (signal.get("retry_history") or []) if isinstance(h, dict)]
+    return {"alert_id": _clean_token(signal["id"]), "kind": kind, "ts": iso(now), "severity": sev, "signal_type": typ,
+            "automation": S(signal["automation"], 100) if signal.get("automation") else None, "host": host,
+            "ring": S(signal["ring"], 20) if signal.get("ring") else None,
+            "title": title, "detail": S(signal.get("detail"), 1000) if signal.get("detail") is not None else None,
+            "error_category": S(signal["error_category"], 60) if signal.get("error_category") else None,
+            "error_message": S(signal["error_message"], 500) if signal.get("error_message") else None, "diagnosis": diag,
+            "diagnosis_reason": signal.get("diagnosis_reason"),
+            "retry_history": hist, "synopsis": S(signal["synopsis"], 600) if signal.get("synopsis") else None, "log_link": link,
+            "evidence": [_clean_token(e) for e in signal.get("evidence") or []], "owner": owner_email or signal.get("owner"),
             "first_seen": signal.get("first_seen")}
 
 
@@ -105,7 +164,8 @@ def render_text(a: dict) -> str:
         lines.append(f"Run synopsis: {a['synopsis']}")
     d = a.get("diagnosis")
     if d:
-        lines += ["", "LLM diagnosis (" + str(d.get("confidence", "?")) + " confidence):", f"  Root cause: {d.get('root_cause')}",
+        lines += ["", "LLM diagnosis (" + str(d.get("confidence", "?")) + " confidence; unverified model output over unauthenticated telemetry):",
+                  f"  Root cause: {d.get('root_cause')}",
                   f"  Suggested action: {d.get('suggested_action')}"]
     if a.get("retry_history"):
         lines += ["", "Retry history:"] + [f"  #{r.get('attempt')} {r.get('category')} -> {r.get('decision')} ({r.get('source')}): {r.get('outcome')}"
@@ -160,7 +220,7 @@ class WebhookChannel(Channel):
         url = self.cfg.get("url") or self.ctx.env.get(self.cfg.get("url_env", "ALERT_WEBHOOK_URL"))
         if not url:
             raise ChannelError(f"webhook {self.name}: no url / {self.cfg.get('url_env', 'ALERT_WEBHOOK_URL')} not set")
-        return url
+        return require_https(url, bool(self.cfg.get("allow_insecure_http")), f"webhook {self.name}: url")
 
     def payload(self, a: dict) -> dict:
         fmt = self.cfg.get("format", "json")
@@ -201,10 +261,13 @@ class EmailChannel(Channel):
         msg["From"] = env.get("SMTP_FROM", "autostation@localhost")
         msg["To"] = ", ".join(sorted(set(to)))
         msg.set_content(render_text(alert))
+        use_tls = env.get("SMTP_STARTTLS", "0") == "1"
+        if env.get("SMTP_USER") and not use_tls and env.get("SMTP_ALLOW_INSECURE_AUTH", "0") != "1":
+            raise ChannelError("email: refusing to send SMTP credentials without TLS (set SMTP_STARTTLS=1)")
         smtp = self.ctx.smtp_factory(host, int(env.get("SMTP_PORT", "25")))
         try:
-            if env.get("SMTP_STARTTLS", "0") == "1":
-                smtp.starttls()
+            if use_tls:
+                smtp.starttls(context=ssl.create_default_context())  # verifies the server certificate and host name
             if env.get("SMTP_USER"):
                 smtp.login(env["SMTP_USER"], env.get("SMTP_PASSWORD", ""))
             smtp.send_message(msg)
@@ -234,10 +297,10 @@ class JiraChannel(Channel):
         base, project = env.get("JIRA_URL"), env.get("JIRA_PROJECT") or self.cfg.get("project")
         if not base or not project:
             raise ChannelError("jira: JIRA_URL / JIRA_PROJECT not set")
-        base = base.rstrip("/")
+        base = require_https(base, bool(self.cfg.get("allow_insecure_http")), "jira: JIRA_URL").rstrip("/")
         hdr = {"Authorization": self._auth(), "Content-Type": "application/json", "Accept": "application/json"}
-        label = "autostation-" + alert["alert_id"]
-        jql = f'project = "{project}" AND labels = "{label}" AND statusCategory != Done'
+        label = "autostation-" + _clean_token(alert["alert_id"])
+        jql = f'project = "{_jql_quote(project)}" AND labels = "{_jql_quote(label)}" AND statusCategory != Done'
         st, body = self.ctx.http.request("GET", f"{base}/rest/api/2/search?jql={urllib.parse.quote(jql)}&fields=key&maxResults=1", hdr)
         if st != 200:
             raise ChannelError(f"jira search HTTP {st}")
@@ -254,7 +317,7 @@ class JiraChannel(Channel):
             return {"ok": True, "detail": "no open issue to resolve"}
         fields = {"project": {"key": project}, "summary": alert["title"][:250], "description": text,
                   "issuetype": {"name": self.cfg.get("issue_type", "Bug")},
-                  "labels": ["autostation", label, "autostation-" + alert["signal_type"].lower()]}
+                  "labels": ["autostation", label, "autostation-" + _clean_token(alert["signal_type"]).lower()]}
         st, body = self.ctx.http.request("POST", f"{base}/rest/api/2/issue", hdr, json.dumps({"fields": fields}).encode())
         if st not in (200, 201):
             raise ChannelError(f"jira create HTTP {st}")
@@ -267,9 +330,10 @@ class GitLabIssueChannel(Channel):
         api, pid, token = env.get("GITLAB_API_URL"), env.get("GITLAB_ALERT_PROJECT_ID"), env.get("GITLAB_ALERT_TOKEN")
         if not (api and pid and token):
             raise ChannelError("gitlab-issue: GITLAB_API_URL / GITLAB_ALERT_PROJECT_ID / GITLAB_ALERT_TOKEN not set")
-        api = api.rstrip("/")
+        api = require_https(api, bool(self.cfg.get("allow_insecure_http")), "gitlab-issue: GITLAB_API_URL").rstrip("/")
+        pid = urllib.parse.quote(str(pid), safe="")
         hdr = {"PRIVATE-TOKEN": token, "Content-Type": "application/json"}
-        label = "autostation::" + alert["alert_id"]
+        label = "autostation::" + _clean_token(alert["alert_id"])
         st, body = self.ctx.http.request("GET", f"{api}/projects/{pid}/issues?state=opened&labels={urllib.parse.quote(label)}", hdr)
         if st != 200:
             raise ChannelError(f"gitlab list HTTP {st}")

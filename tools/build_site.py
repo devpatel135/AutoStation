@@ -20,6 +20,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -36,6 +37,8 @@ import site_docs, site_install, site_landing  # noqa: E402
 from registry import store as reg_store  # noqa: E402
 from registry.portal import build as portal_build  # noqa: E402
 from wrapper_core import miniyaml  # noqa: E402
+
+REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 
 DEMO_PROGRAM_YAML = """currency: USD
 hourly_cost: 55
@@ -130,10 +133,15 @@ def build(out: Path, repo: Path = ROOT, *, registry: Path | None = None, manifes
             shutil.rmtree(child) if child.is_dir() else child.unlink()
     out.mkdir(parents=True, exist_ok=True)
 
-    cfg = SiteConfig(repo=github_repo or os.environ.get("GITHUB_REPOSITORY") or sc.DEFAULT_REPO, built_at=now_iso(), commit=sc.git_commit())
+    repo_name = github_repo or os.environ.get("GITHUB_REPOSITORY") or sc.DEFAULT_REPO
+    if not REPO_RE.match(repo_name):   # the repo ends up in links and in copy-paste commands (gh attestation verify ...)
+        raise SystemExit(f"error: {repo_name!r} is not a valid owner/repo")
+    cfg = SiteConfig(repo=repo_name, built_at=now_iso(), commit=sc.git_commit())
     portal_cfg_file = repo / "components" / "automation-registry" / "portal.config.json"
     portal_cfg = sc.read_json(portal_cfg_file, {}) or {}
     cfg.installer_url_template = installer_url_template or portal_cfg.get("installer_url_template") or sc.DEFAULT_INSTALLER_TEMPLATE
+    if not str(cfg.installer_url_template).startswith("https://"):
+        raise SystemExit("error: installer_url_template must be an https:// URL (the install pages tell people to run what it downloads)")
     tmp_root = Path(tempfile.mkdtemp(prefix="amx-site-build-"))
 
     # ---- data sources -----------------------------------------------------------------------------------
@@ -215,8 +223,8 @@ def build(out: Path, repo: Path = ROOT, *, registry: Path | None = None, manifes
     shas: dict[str, str | None] = {}
     given = sc.read_json(Path(installer_sha_file), {}) if installer_sha_file else {}
     for name in (m.get("automations") or {}):
-        s = given.get(name)
-        if not s and fetch_installer_sha:
+        s = site_install._sha_or_none(given.get(name))   # only a real 64-hex digest is ever embedded in a page or command
+        if not s and fetch_installer_sha and site_install.SAFE_NAME.match(str(name)):
             s = site_install.fetch_installer_sha(cfg.installer_url(name))
         shas[name] = s
     runtimes = {}

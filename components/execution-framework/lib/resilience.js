@@ -8,7 +8,11 @@
  *  - the LLM never supplies values: fill/select values always come from the caller
  *  - the proposed action must match the original action kind
  *  - the proposed selector must match exactly ONE visible element
- *  - deny-listed targets (delete/remove/payment...) are never auto-healed unless allowDestructive is set
+ *  - deny-listed targets (delete/remove/payment/send/approve/accept/allow/...) are never auto-healed unless allowDestructive is set
+ *  - fill/select are never LLM-healed when the value (or the field) looks sensitive, or when the page origin changed while the action ran:
+ *    a model-chosen element must not receive a secret or data typed for a different site
+ *  - healed selectors read back from the cache are re-validated like a fresh proposal (exactly one visible element, not deny-listed,
+ *    same origin as when it was cached, sane syntax); anything stale or suspicious is dropped
  *  - heal budget per run (maxHealsPerRun); the DOM is never logged, only a template name + input hash
  */
 const crypto = require('node:crypto');
@@ -21,7 +25,25 @@ const wrapper = require('./wrapper');
 const evidence = require('./evidence');
 const debugLib = require('./debug');
 
-const DEFAULT_DENY = /delete|remove|destroy|erase|purge|submit payment|pay now|confirm payment|wire transfer|transfer funds/i;
+const { looksSensitiveValue, SENSITIVE_NAME } = require('./recorder');
+
+const DEFAULT_DENY = /delete|remove|destroy|erase|purge|submit payment|pay now|confirm payment|wire transfer|transfer funds|\b(?:send|approv|buy|purchas|accept|allow|grant|authori[sz]|agree|confirm|transfer|publish)/i;
+
+function originOf(url) {
+  try {
+    const u = new URL(url);
+    return u.protocol === 'http:' || u.protocol === 'https:' ? u.origin : '';
+  } catch (_) {
+    return '';
+  }
+}
+
+/** Is typing/selecting `value` into `selectorText` something a model-chosen element must never receive? */
+function sensitiveInput(selectorText, value) {
+  let v = '';
+  try { v = typeof value === 'string' ? value : JSON.stringify(value === undefined ? '' : value); } catch (_) { v = ''; }
+  return looksSensitiveValue(v) || SENSITIVE_NAME.test(String(selectorText || ''));
+}
 
 const HEAL_SCHEMA = {
   type: 'object',
@@ -103,7 +125,7 @@ function createFileCache(file) {
   };
   return {
     get: (key) => load().entries[key] || null,
-    set: (key, selector) => { const d = load(); const prev = d.entries[key]; d.entries[key] = { selector, healed_at: new Date().toISOString(), uses: (prev && prev.selector === selector ? prev.uses : 0) + 1 }; save(); },
+    set: (key, selector, meta = {}) => { const d = load(); const prev = d.entries[key]; d.entries[key] = { selector, ...(meta.origin ? { origin: meta.origin } : {}), healed_at: new Date().toISOString(), uses: (prev && prev.selector === selector ? prev.uses : 0) + 1 }; save(); },
     delete: (key) => { delete load().entries[key]; save(); },
   };
 }
@@ -113,8 +135,8 @@ function defaultCachePath(env = process.env) {
 }
 
 /** Verify a proposed selector in the live page. Returns {ok, reason}. */
-async function validateCandidate(page, selector, { deny, allowDestructive, expectKind, proposedKind }) {
-  if (/javascript:|<|>/.test(selector) || selector.length > 300) return { ok: false, reason: 'unsafe selector syntax' };
+async function validateCandidate(page, selector, { deny, allowDestructive, expectKind, proposedKind, requireVisible = true }) {
+  if (typeof selector !== 'string' || /javascript:|<|>/.test(selector) || selector.length > 300) return { ok: false, reason: 'unsafe selector syntax' };
   if (proposedKind !== expectKind) return { ok: false, reason: `action mismatch: wanted ${expectKind}, model proposed ${proposedKind}` };
   let loc;
   let n;
@@ -126,7 +148,7 @@ async function validateCandidate(page, selector, { deny, allowDestructive, expec
   }
   if (n !== 1) return { ok: false, reason: `proposed selector matches ${n} elements (need exactly 1)` };
   const first = loc.first();
-  if (!(await first.isVisible())) return { ok: false, reason: 'proposed element is not visible' };
+  if (requireVisible && !(await first.isVisible())) return { ok: false, reason: 'proposed element is not visible' };
   if (!allowDestructive) {
     let desc = '';
     try { desc = await first.evaluate(describeEl); } catch (_) { desc = ''; }
@@ -146,13 +168,26 @@ function resilientPage(page, opts = {}) {
   const denyRe = { test: (s) => o.denyPatterns.some((rx) => rx.test(s)) };
   let heals = 0;
 
-  async function heal(method, spec, selector, args, err) {
+  // caller-supplied context gate (e.g. "only while the browser is on the Microsoft sign-in host"); applies to cached healings too
+  async function canHealHere() {
+    if (typeof o.canHeal !== 'function') return true;
+    try { return Boolean(await o.canHeal(page)); } catch (_) { return false; }
+  }
+
+  async function heal(method, spec, selector, args, err, originAtStart) {
     const reject = (reason) => {
       o.logEvent('selector_heal_rejected', { original: selector, action: spec.kind, reason });
       return null;
     };
     if (heals >= o.maxHealsPerRun) return reject('heal budget exhausted');
     if (!o.allowDestructive && denyRe.test(selector)) return reject('original selector is deny-listed');
+    if (!(await canHealHere())) return reject('healing is not permitted on this page (canHeal)');
+    if (spec.kind === 'fill' || spec.kind === 'select') {
+      const here = originOf(page.url());
+      if (sensitiveInput(selector, args[0])) return reject('sensitive value or field: fill/select is never healed by the model');
+      if (!here || here !== originAtStart) return reject('page origin changed while the action ran: fill/select is not healed');
+      if (Array.isArray(o.expectedOrigins) && !o.expectedOrigins.includes(here)) return reject('page origin is not in expectedOrigins: fill/select is not healed');
+    }
     heals += 1;
     const snap = await o.snapshot(page, { maxChars: 10000 });
     const inputHash = shortHash(`${selector}\0${snap}`);
@@ -169,6 +204,7 @@ function resilientPage(page, opts = {}) {
     if (!verdict) return reject('LLM unavailable or returned nothing (fail safe)');
     const sv = schemaLib.validate(verdict, HEAL_SCHEMA);
     if (!sv.ok) return reject(`model output failed schema: ${sv.error.slice(0, 120)}`);
+    if (originOf(page.url()) !== originAtStart) return reject('page origin changed while the model was consulted');
     const check = await validateCandidate(page, verdict.selector, {
       deny: denyRe, allowDestructive: o.allowDestructive, expectKind: spec.kind, proposedKind: verdict.action,
     });
@@ -193,29 +229,46 @@ function resilientPage(page, opts = {}) {
       }
       return spec.run(locate(sel), args, o.timeoutMs);
     };
+    const originAtStart = originOf(page.url());
     const key = `${urlPattern(page.url())}|${selector}`;
-    const cached = cache.get(key);
+    const cached = (await canHealHere()) ? cache.get(key) : null;
     if (cached) {
-      try {
-        const r = await exec(cached.selector);
-        o.logEvent('selector_healed', { original: selector, healed: cached.selector, action: spec.kind, source: 'cache' });
-        return r;
-      } catch (_) {
-        cache.delete(key); // stale healing: fall through to original, then LLM
+      // a cached healing is only a hint: it must still pass every check a fresh model proposal would
+      let why = '';
+      if (!cached.selector || typeof cached.selector !== 'string') why = 'malformed cache entry';
+      else if (cached.origin && cached.origin !== originAtStart) why = 'cached for a different origin';
+      else if ((spec.kind === 'fill' || spec.kind === 'select') && sensitiveInput(selector, args[0])) why = 'sensitive value: cache not used for fill/select';
+      else {
+        const c = await validateCandidate(page, cached.selector, {
+          deny: denyRe, allowDestructive: o.allowDestructive, expectKind: spec.kind, proposedKind: spec.kind, requireVisible: spec.kind !== 'wait',
+        });
+        if (!c.ok) why = c.reason;
+      }
+      if (why) {
+        cache.delete(key);
+        o.logEvent('selector_cache_dropped', { original: selector, action: spec.kind, reason: why });
+      } else {
+        try {
+          const r = await exec(cached.selector);
+          o.logEvent('selector_healed', { original: selector, healed: cached.selector, action: spec.kind, source: 'cache' });
+          return r;
+        } catch (_) {
+          cache.delete(key); // stale healing: fall through to original, then LLM
+        }
       }
     }
     try {
       return await exec(selectorArg);
     } catch (err) {
       if (!isHealable(err)) throw err;
-      const healed = await heal(method, spec, selector, args, err);
+      const healed = await heal(method, spec, selector, args, err, originAtStart);
       if (!healed) {
         await o.captureEvidence(err, { reason: `selector ${selector.slice(0, 80)} not found and healing failed`, page });
         throw err;
       }
       try {
         const r = await exec(healed);
-        cache.set(key, healed);
+        cache.set(key, healed, { origin: originAtStart });
         o.logEvent('selector_healed', { original: selector, healed, action: spec.kind, url_pattern: urlPattern(page.url()), source: 'llm' });
         return r;
       } catch (retryErr) {

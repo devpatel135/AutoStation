@@ -102,15 +102,28 @@ code{font:12px var(--mono);background:var(--surface2);padding:1px 5px;border-rad
 """
 
 
+CSP_META = ('<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; img-src data:; style-src \'unsafe-inline\'; '
+            "font-src https://fonts.gstatic.com; style-src-elem 'unsafe-inline' https://fonts.googleapis.com; "
+            "script-src 'unsafe-inline'; base-uri 'none'; form-action 'none'\">")
+TELEMETRY_NOTICE = "Telemetry is submitted by installed clients and is not authenticated; treat numbers as advisory"
+TELEMETRY_BANNER = f'<div class="ok-note" role="note" style="margin-bottom:1rem"><b>Advisory data.</b> {TELEMETRY_NOTICE}.</div>'
+
+
+def quality_note(report: dict) -> str:
+    n = int(((report.get("data_quality") or {}).get("skipped_malformed")) or 0)
+    return f'<div class="ok-note" role="note">{n} malformed log record(s) were skipped and not counted.</div>' if n else ""
+
+
 def render(report: dict, runs_latest: list[dict], evidence_html: str = "") -> str:
     fleet = report["fleet"]
     sigs = report["signals"]
     parts: list[str] = []
     A = parts.append
-    A("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+    A("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">" + CSP_META + "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
       "<title>AUTOSTATION Fleet Dashboard</title>"
       "<link rel=\"stylesheet\" href=\"https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&family=IBM+Plex+Mono:wght@400;700&display=swap\">"
       f"<style>{CSS}</style></head><body><div class=\"page\">")
+    A(TELEMETRY_BANNER + quality_note(report))
     A(f"<header><div><div class=\"eyebrow\">AUTOSTATION &middot; Fleet dashboard</div><h1>Automation fleet health</h1>"
       f"<div class=\"sub\">Generated {esc(report['generated_at'])} &middot; last {esc(report['window_days'])} days &middot; "
       f"overall {pill(fleet['status'], {'healthy': 'ok', 'paused': 'paused', 'degraded': 'medium', 'attention': 'high', 'critical': 'critical'}.get(fleet['status'], 'unknown'))}"
@@ -139,7 +152,7 @@ def render(report: dict, runs_latest: list[dict], evidence_html: str = "") -> st
         for s in sigs:
             d = s.get("diagnosis")
             diag = (f"<div class=\"diag\"><b>{esc(d.get('root_cause'))}</b><br>Next: {esc(d.get('suggested_action'))} "
-                    f"({esc(d.get('confidence'))} confidence)</div>") if d else f"<span class=\"diag\">{esc(s.get('diagnosis_reason') or '-')}</span>"
+                    f"({esc(d.get('confidence'))} confidence)<br><i>unverified: model output over unauthenticated telemetry</i></div>") if d else f"<span class=\"diag\">{esc(s.get('diagnosis_reason') or '-')}</span>"
             who = s.get("automation") or ", ".join(s.get("automations") or []) or "-"
             A(f"<tr><td>{pill(s['severity'], s['severity'])}</td><td><code>{esc(s['type'])}</code></td><td>{esc(who)}</td><td>{esc(s.get('host') or '-')}</td>"
               f"<td>{esc(s.get('detail'))}</td><td>{diag}</td><td>{esc(s.get('first_seen'))}</td><td>{esc(s.get('owner') or '-')}</td></tr>")
@@ -237,10 +250,19 @@ def evidence_section(data: analytics.Data, out: Path, limit: int = 12) -> str:
              "Stored content is never rendered as a page: text is shown escaped, HTML is a plain-text download.</p>"]
     for rec in records:
         payload = None
+        if not isinstance(rec.get("_path"), str) or ".." in rec["_path"]:
+            continue
         try:
             payload = json.loads((Path(data.archive) / rec["_path"]).read_text(encoding="utf-8"))
         except (OSError, ValueError, KeyError):
             pass
+        if payload is not None:
+            try:
+                from .ingest import validate_evidence
+                if not isinstance(payload, dict) or validate_evidence(payload):
+                    payload = None  # the archive is re-validated on read: never render a payload that would not pass ingest
+            except Exception:  # noqa: BLE001
+                payload = None
         run = data.runs_by_id.get(rec.get("run_id")) or {}
         err = run.get("error") or {}
         head = (f"<div class=\"kv\"><b>Run</b><span><code>{esc(rec.get('run_id'))}</code></span><b>Automation</b><span>{esc(rec.get('automation'))}</span>"
@@ -275,7 +297,12 @@ def evidence_section(data: analytics.Data, out: Path, limit: int = 12) -> str:
 def build_site(report: dict, data: analytics.Data, out_dir: str | Path, signals: list[dict] | None = None) -> dict:
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
-    runs_latest = [analytics.run_summary(r) for r in sorted(data.runs, key=lambda r: r["started_at"], reverse=True)[:50]]
+    runs_latest = []
+    for r in sorted(data.runs, key=lambda r: r["started_at"], reverse=True)[:50]:
+        try:
+            runs_latest.append(analytics.run_summary(r))
+        except Exception:  # noqa: BLE001 - one malformed record is skipped, never fatal
+            continue
     (out / "index.html").write_text(render(report, runs_latest, evidence_section(data, out)), encoding="utf-8")
     write_json(out / "data.json", report)
     write_json(out / "signals.json", {"schema_version": 1, "generated_at": report["generated_at"],

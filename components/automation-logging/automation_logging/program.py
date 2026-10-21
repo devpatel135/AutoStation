@@ -23,7 +23,7 @@ from pathlib import Path
 
 from . import analytics
 from .common import iso, miniyaml, read_json, utcnow, write_json
-from .dashboard import CSS as DASH_CSS, esc, fmt_ms, pct, pill, spark
+from .dashboard import CSP_META, CSS as DASH_CSS, TELEMETRY_BANNER, esc, fmt_ms, pct, pill, spark
 
 DEFAULTS = {
     "currency": "USD", "hourly_cost": 0.0,
@@ -174,10 +174,11 @@ def render(p: dict) -> str:
     m = p["money"]
     A: list[str] = []
     ap = A.append
-    ap('<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
+    ap('<!doctype html><html lang="en"><head><meta charset="utf-8">' + CSP_META + '<meta name="viewport" content="width=device-width,initial-scale=1">'
        "<title>AUTOSTATION Program dashboard</title>"
        '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&family=IBM+Plex+Mono:wght@400;700&display=swap">'
        f"<style>{DASH_CSS}</style></head><body><div class=\"page\">")
+    ap(TELEMETRY_BANNER)
     ap(f'<header><div><div class="eyebrow">AUTOSTATION &middot; Program</div><h1>Automation programme: value &amp; health</h1>'
        f'<div class="sub">Generated {esc(p["generated_at"])} &middot; last {esc(p["window_days"])} days of run logs</div></div>'
        '<button class="theme" type="button" onclick="var r=document.documentElement;r.dataset.theme=(r.dataset.theme===\'light\'?\'dark\':\'light\')">toggle theme</button></header>')

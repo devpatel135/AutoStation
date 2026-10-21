@@ -108,3 +108,22 @@ def test_framework_zip_must_be_a_real_framework(tmp_path):
     cfg = config(tmp_path, framework_zip="bad.zip")
     with pytest.raises(bi.BuildError, match="framework_zip"):
         bi.stage_build(cfg, tmp_path / "s4", {}, allow_missing_secrets=True)
+
+
+def test_bundled_mingit_is_staged_and_skips_the_git_prerequisite(tmp_path):
+    with zipfile.ZipFile(tmp_path / "git.zip", "w") as z:
+        z.writestr("cmd/git.exe", "MZ-fake-git")
+        z.writestr("usr/bin/ssh.exe", "MZ-fake-ssh")
+    cfg = config(tmp_path, git_zip="git.zip", log_remote="git@github.com:o/r.git")
+    stage = tmp_path / "sg"
+    flags, wv = bi.stage_build(cfg, stage, {}, allow_missing_secrets=True)
+    assert flags["HAVE_GIT"] and (stage / "git" / "cmd" / "git.exe").exists()
+    text = bi.render_nsi(cfg, wv, flags, "o.exe", ".", icon="")
+    assert '!define GIT_ARG "-SkipGit"' in text and "!define HAVE_GIT" in text
+
+
+def test_git_zip_must_be_mingit(tmp_path):
+    with zipfile.ZipFile(tmp_path / "bad.zip", "w") as z:
+        z.writestr("readme.txt", "x")
+    with pytest.raises(bi.BuildError, match="git_zip"):
+        bi.stage_build(config(tmp_path, git_zip="bad.zip"), tmp_path / "sb", {}, allow_missing_secrets=True)

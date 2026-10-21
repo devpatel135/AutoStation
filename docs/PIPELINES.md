@@ -43,6 +43,7 @@ the enterprise option if you later move the control plane to GitLab; the manifes
 | `JIRA_TOKEN` | secret | analytics | Jira API token (alert channel `jira`) |
 | `TEAMS_WEBHOOK_URL` | secret | analytics | Teams incoming webhook (alert channel `teams`) |
 | `AUTOSTATION_LOG_REPO` | variable (optional) | installers, site | `owner/name` of the private logs repo (default `<owner>/AutoStation-logs`) |
+| `REGISTRY_SIGNING_SEED` | secret | site | Ed25519 private seed (hex) that signs `registry/manifest.yaml`; create with `tools/sign_registry.py --gen-key`, then pin the public key; unsigned until set |
 | `LOGGING_TOKEN` | secret | installers, site | fine-grained PAT (contents rw on `AutoStation-logs`): turns on connected installers and live dashboards, see [LIVE_LOGGING](LIVE_LOGGING.md) |
 | `AUTOSTATION_LOGGING_REPO` | variable | analytics | `owner/name` of the private logging repo |
 | `AUTOSTATION_ALLOW_PUBLIC_DASHBOARD` | variable | analytics | `true` lets analytics run in a **public** repo (see data exposure below) |

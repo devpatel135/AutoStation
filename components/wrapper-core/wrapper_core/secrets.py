@@ -112,22 +112,27 @@ def wipe_file(path: Path) -> None:
         pass
 
 
-def restrict_to_owner(path: Path) -> None:
-    """Owner-only ACL (icacls on Windows, chmod 600 elsewhere). Failure is non-fatal but logged by callers."""
+def restrict_to_owner(path: Path) -> bool:
+    """Owner-only ACL (icacls on Windows, chmod 600 elsewhere). Returns True only when the restriction was applied;
+    callers that are about to write key material must treat False as fatal."""
     try:
         if IS_WINDOWS:
             import subprocess
             user = os.environ.get("USERNAME", "")
-            if user:
-                subprocess.run(["icacls", str(path), "/inheritance:r", "/grant:r", f"{user}:F"],
+            if not user:
+                return False
+            r = subprocess.run(["icacls", str(path), "/inheritance:r", "/grant:r", f"{user}:F"],
                                capture_output=True, timeout=20, check=False)
-                # hardened hosts add explicit SYSTEM / Administrators / OWNER RIGHTS / Users / Everyone entries: owner-only means owner-only
-                subprocess.run(["icacls", str(path), "/remove:g", "*S-1-5-18", "*S-1-5-32-544", "*S-1-3-4", "*S-1-5-32-545",
-                                "*S-1-1-0", "*S-1-5-11"], capture_output=True, timeout=20, check=False)
-        else:
-            os.chmod(path, 0o600)
+            if r.returncode != 0:
+                return False
+            # hardened hosts add explicit SYSTEM / Administrators / OWNER RIGHTS / Users / Everyone entries: owner-only means owner-only
+            subprocess.run(["icacls", str(path), "/remove:g", "*S-1-5-18", "*S-1-5-32-544", "*S-1-3-4", "*S-1-5-32-545",
+                            "*S-1-1-0", "*S-1-5-11"], capture_output=True, timeout=20, check=False)
+            return True
+        os.chmod(path, 0o600)
+        return True
     except Exception:  # noqa: BLE001
-        pass
+        return False
 
 
 # --- Credential Manager ------------------------------------------------------------------------------
@@ -241,7 +246,10 @@ class TempPrivateKey:
         self.workdir.mkdir(parents=True, exist_ok=True)
         self.path = self.workdir / f".k{os.getpid()}-{os.urandom(4).hex()}"
         self.path.write_bytes(b"")
-        restrict_to_owner(self.path)  # ACL first, then write
+        if not restrict_to_owner(self.path):  # ACL first, then write; never put a private key in an unrestricted file
+            wipe_file(self.path)
+            self.path = None
+            raise SecretError("cannot restrict the temporary private key file to the owner; refusing to write it")
         self.path.write_bytes(key)
         return self.path
 

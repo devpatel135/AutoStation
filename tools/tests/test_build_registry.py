@@ -168,7 +168,7 @@ def test_new_automation_in_tree_is_registered_paused_in_dev(repo, tmp_path):
 
 
 def test_secret_looking_file_fails_the_build(repo, tmp_path):
-    (repo / "components" / "automations" / "automation-x" / "deploy.key").write_text("-----BEGIN PRIVATE KEY-----\n")
+    (repo / "components" / "automations" / "automation-x" / "deploy.key").write_text("-----BEGIN PRIVATE KEY-----\n")  # secret-scan: allow (fake fixture)
     res = run(repo, tmp_path / "out", bootstrap=True)
     assert not res["ok"] and any("secret-looking" in e for e in res["errors"])
 
@@ -228,4 +228,5 @@ def test_first_release_activates_a_new_automation_but_never_clears_an_operator_p
     assert not res["errors"], res["errors"]
     m = miniyaml.loads(manifest.read_text(encoding="utf-8"))
     a = m["automations"]["automation-certification-site"]
-    assert a["status"] == "active" and a["rings"] == {"dev": "1.0.0", "pilot": "1.0.0", "broad": "1.0.0"}
+    ver = miniyaml.loads((repo / "components" / "automations" / "automation-certification-site" / "automation.yaml").read_text(encoding="utf-8"))["version"]
+    assert a["status"] == "active" and a["rings"] == {"dev": ver, "pilot": ver, "broad": ver}

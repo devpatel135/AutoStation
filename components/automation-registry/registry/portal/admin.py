@@ -35,7 +35,7 @@ def build_links(config: dict, ci: dict, title: str, description: str, branch: st
     params = dict(ci)
     params["BRANCH"] = branch
     pipeline = f"{base}/-/pipelines/new?ref={_q(config.get('ops_ref', 'main'))}" + "".join(
-        f"&var[{k}]={_q(v)}" for k, v in params.items() if v != "")
+        f"&var[{_q(k)}]={_q(v)}" for k, v in params.items() if v != "")
     mr = (f"{base}/-/merge_requests/new?merge_request[source_branch]={_q(branch)}"
           f"&merge_request[target_branch]={_q(config.get('default_branch', 'main'))}"
           f"&merge_request[title]={_q(title)}&merge_request[description]={_q(description)}")
@@ -46,11 +46,32 @@ def build_links(config: dict, ci: dict, title: str, description: str, branch: st
 _REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _WF_RE = re.compile(r"^[A-Za-z0-9_.-]+\.ya?ml$")
 _PATH_RE = re.compile(r"^[A-Za-z0-9_./-]+$")
+_REF_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_./-]{0,100}$")
+_CTRL_RE = re.compile(r"[\x00-\x1f\x7f]")
+# PowerShell treats all of U+2018..U+201B as single-quote characters, so a "typographic" quote in a value ends a '...' string
+_PS_QUOTES = "'\u2018\u2019\u201a\u201b"
+
+
+def shell_quote(value, shell: str = "bash") -> str:
+    """Quote ``value`` as ONE literal word for bash/sh (``shell="bash"``) or PowerShell (``shell="ps"``).
+
+    The page script (``shq`` in ADMIN_JS) implements exactly the same rules; this is the reference the tests pin down.
+    bash: wrap in single quotes, each embedded ``'`` becomes ``'\\''`` (nothing else is special inside single quotes).
+    PowerShell: wrap in single quotes and double every quote character in U+2018..U+201B and ``'``.
+    Control characters (newlines included) are replaced by a space first: they can never be part of a single-line command.
+    """
+    s = _CTRL_RE.sub(" ", str(value))
+    if shell == "ps":
+        return "'" + "".join(c + c if c in _PS_QUOTES else c for c in s) + "'"
+    return "'" + s.replace("'", "'\\''") + "'"
 
 
 def github_config(cfg: dict) -> dict:
     """Validate the GitHub-mode settings (they end up in links); fall back to GitLab mode if anything looks off."""
     out = dict(cfg)
+    for key in ("ops_ref", "default_branch"):          # these end up in URLs and in the copy-paste gh command
+        if key in out and not (isinstance(out[key], str) and _REF_RE.match(out[key]) and ".." not in out[key]):
+            out[key] = "main"
     if out.get("platform") != "github":
         out["platform"] = "gitlab"
         return out
@@ -61,14 +82,18 @@ def github_config(cfg: dict) -> dict:
     return out
 
 
-def build_github_links(config: dict, ci: dict, title: str, description: str, branch: str) -> dict:
-    """Python reference implementation of the GitHub links the page script builds (kept in sync by tests)."""
+def build_github_links(config: dict, ci: dict, title: str, description: str, branch: str, shell: str = "bash") -> dict:
+    """Python reference implementation of the GitHub links the page script builds (kept in sync by tests).
+
+    Every value that reaches the shell command is quoted with ``shell_quote``; every value in a URL is percent-encoded."""
     cfg = github_config(config)
     base = f"https://github.com/{cfg['github_repo']}"
-    flags = " ".join(f"-f {k.lower()}={json.dumps(str(v))}" for k, v in {**ci, "BRANCH": branch}.items() if v != "")
+    flags = " ".join(f"-f {re.sub(r'[^a-z0-9_]', '_', str(k).lower())}={shell_quote(v, shell)}"
+                     for k, v in {**ci, "BRANCH": branch}.items() if v != "")
     return {
         "workflow": f"{base}/actions/workflows/{_q(cfg['ops_workflow'])}",
-        "gh_command": f"gh workflow run {cfg['ops_workflow']} --repo {cfg['github_repo']} --ref {cfg.get('ops_ref', 'main')} {flags}",
+        "gh_command": (f"gh workflow run {shell_quote(cfg['ops_workflow'], shell)} --repo {shell_quote(cfg['github_repo'], shell)} "
+                       f"--ref {shell_quote(cfg.get('ops_ref', 'main'), shell)} {flags}"),
         "pull_request": (f"{base}/compare/{_q(cfg.get('default_branch', 'main'))}...{_q(branch)}?quick_pull=1"
                          f"&title={_q(title)}&body={_q(description)}"),
         "edit": f"{base}/edit/{_q(cfg.get('default_branch', 'main'))}/" + "/".join(_q(p) for p in cfg["manifest_path"].split("/")),
@@ -86,8 +111,16 @@ def _diff(before: str, after: str) -> list[str]:
     return [ln for ln in out if not ln.startswith(("---", "+++"))]
 
 
+_SAFE_WORD = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.@:/+=-]*$")
+
+
 def _action(m: dict, action: str, target: str, label: str, *, needs_reason: bool, params: dict | None = None,
             flags: list[tuple[str, str]] | None = None) -> dict | None:
+    # the CLI command is precomputed and shown for bash AND PowerShell: only words that mean the same in both are allowed
+    words = [target] if target else []
+    words += [str(v) for _, v in (flags or [])]
+    if not all(_SAFE_WORD.match(w) for w in words):
+        return None
     try:
         res, before, after = ops.preview(m, ops.apply_action, action, target, SENTINEL, params or {})
     except OpError:
@@ -138,7 +171,11 @@ ADMIN_JS = r"""
   var data = JSON.parse(document.getElementById('admin-data').textContent);
   var SENT = data.sentinel, cfg = data.config, cur = null;
   function $(id) { return document.getElementById(id); }
-  function shq(s, sh) { return sh === 'ps' ? "'" + s.replace(/'/g, "''") + "'" : '"' + s.replace(/(["\\$`])/g, '\\$1') + '"'; }
+  function shq(s, sh) {
+    s = String(s).replace(/[\x00-\x1f\x7f]/g, ' ');
+    if (sh === 'ps') { return "'" + s.replace(/['\u2018-\u201b]/g, function (c) { return c + c; }) + "'"; }
+    return "'" + s.replace(/'/g, "'\\''") + "'";
+  }
   function yq(s) { return /^[A-Za-z_][A-Za-z0-9_.\/@ -]*$/.test(s) && s === s.trim() && !/(: | #)/.test(s) && !/^(true|false|null|yes|no|on|off|~)$/i.test(s) ? s : JSON.stringify(s); }
   function reason() { return ($('reason').value || '').replace(/\s+/g, ' ').trim().slice(0, 300); }
   function clear(el) { while (el.firstChild) el.removeChild(el.firstChild); }
@@ -166,7 +203,7 @@ ADMIN_JS = r"""
       var slot = $('slot').value, kv = {}, flags = '';
       ($('params').value || '').split(/\r?\n/).forEach(function (line) { var i = line.indexOf('='); if (i > 0) { kv[line.slice(0, i).trim()] = line.slice(i + 1).trim(); } });
       Object.keys(kv).forEach(function (k) { flags += ' --param ' + shq(k + '=' + kv[k], sh); });
-      cmd = 'python -m registry trigger-add ' + cur.target + ' --slot ' + slot + flags;
+      cmd = 'python -m registry trigger-add ' + shq(cur.target, sh) + ' --slot ' + shq(slot, sh) + flags;
       params = JSON.stringify({ slot: slot, params: kv });
       diff = ['+ (triggers branch) triggers.json: append', '+   automation: ' + cur.target, '+   slot: ' + slot, '+   params: ' + JSON.stringify(kv)];
       summary = ['No manifest change and no merge request: committed straight to the protected "triggers" branch, then Pages is republished.', 'The machine picks it up at its next poll run.'];
@@ -186,7 +223,7 @@ ADMIN_JS = r"""
     var s2 = section('Option A - CLI (in a clone of the registry repo, then open a merge request)');
     var p2 = document.createElement('pre'); p2.textContent = cmd; s2.appendChild(p2); s2.appendChild(copyBtn(cmd)); out.appendChild(s2);
     var ci = { ACTION: d.ci.ACTION, TARGET: d.ci.TARGET, REASON: r, PARAMS: params };
-    var branch = 'ops/' + d.ci.ACTION + '-' + (d.ci.TARGET || 'fleet') + '-' + cur.id;
+    var branch = 'ops/' + d.ci.ACTION + '-' + (d.ci.TARGET || 'fleet').replace(/[^A-Za-z0-9._-]/g, '-') + '-' + cur.id;
     var s3 = section(cfg.platform === 'github' ? 'Option B - ops-action workflow (GitHub Actions inputs)' : 'Option B - ops-action pipeline (CI variables)'); var tb = document.createElement('table');
     var vars = Object.keys(ci); if (d.kind !== 'trigger') { vars.push('BRANCH'); ci.BRANCH = branch; } var text = '';
     vars.forEach(function (k) { if (ci[k] === '') return; var tr = document.createElement('tr'), a = document.createElement('td'), b = document.createElement('td');
@@ -194,7 +231,7 @@ ADMIN_JS = r"""
     s3.appendChild(tb); s3.appendChild(copyBtn(text, 'Copy variables')); out.appendChild(s3);
     if (cfg.platform === 'github') {
       var gh = 'https://github.com/' + cfg.github_repo, ghdesc = 'ops-action ' + d.ci.ACTION + ' ' + (d.ci.TARGET || 'fleet') + '\nReason: ' + (r || '(none)');
-      var ghc = 'gh workflow run ' + cfg.ops_workflow + ' --repo ' + cfg.github_repo + ' --ref ' + cfg.ops_ref;
+      var ghc = 'gh workflow run ' + shq(cfg.ops_workflow, sh) + ' --repo ' + shq(cfg.github_repo, sh) + ' --ref ' + shq(cfg.ops_ref, sh);
       vars.forEach(function (k) { if (ci[k] !== '') ghc += ' -f ' + k.toLowerCase() + '=' + shq(ci[k], sh); });
       var s3g = section('GitHub CLI (same thing as the workflow form)'); var p3 = document.createElement('pre'); p3.textContent = ghc; s3g.appendChild(p3); s3g.appendChild(copyBtn(ghc)); out.appendChild(s3g);
       var s4g = section('GitHub links'); var rowg = document.createElement('div'); rowg.className = 'actions';

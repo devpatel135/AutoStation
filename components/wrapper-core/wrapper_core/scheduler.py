@@ -19,7 +19,7 @@ from typing import Callable
 from xml.sax.saxutils import escape
 
 from . import manifest as mf
-from .paths import Paths, get_logger
+from .paths import Paths, check_name, get_logger
 from .util import atomic_write_text, read_json, write_json
 
 IS_WINDOWS = sys.platform == "win32"
@@ -28,8 +28,15 @@ _DAY_TAG = {"Monday": "Monday", "Tuesday": "Tuesday", "Wednesday": "Wednesday", 
             "Friday": "Friday", "Saturday": "Saturday", "Sunday": "Sunday"}
 
 
+def _cmd_safe(value: str, what: str) -> str:
+    """Values interpolated into the generated .cmd/.vbs must not break out of their quotes or trigger %var% expansion."""
+    if any(c in value for c in '"%\r\n\0'):
+        raise ValueError(f"{what} contains a character that is unsafe in a launcher script: {value!r}")
+    return value
+
+
 def task_name(automation: str, slot_id: str) -> str:
-    return f"{TASK_FOLDER}\\{automation}-{slot_id}"
+    return f"{TASK_FOLDER}\\{check_name(automation)}-{check_name(slot_id)}"
 
 
 def _local_time(hhmm: str, tz_name: str | None) -> str:
@@ -67,6 +74,8 @@ def slot_trigger_xml(slot: dict, tz_name: str | None) -> str:
 
 
 def task_xml(paths: Paths, automation: str, slot: dict, tz_name: str | None) -> str:
+    check_name(automation)
+    check_name(str(slot["id"]))  # the slot id travels through wscript -> cmd.exe: only [A-Za-z0-9._-] may get there
     vbs = paths.bin / f"run-{automation}.vbs"
     return f"""<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
@@ -88,8 +97,9 @@ def task_xml(paths: Paths, automation: str, slot: dict, tz_name: str | None) -> 
 
 
 def launcher_cmd(paths: Paths, automation: str, python_exe: str | None = None) -> str:
-    py = python_exe or sys.executable
-    root = str(paths.root)
+    py = _cmd_safe(python_exe or sys.executable, "python path")
+    root = _cmd_safe(str(paths.root), "AUTOMAGIX_HOME")
+    check_name(automation)
     return (
         "@echo off\r\n"
         "setlocal\r\n"
@@ -102,20 +112,20 @@ def launcher_cmd(paths: Paths, automation: str, python_exe: str | None = None) -
         f'  if exist "{root}\\wrapper-core.old" rmdir /s /q "{root}\\wrapper-core.old"\r\n'
         ")\r\n"
         f'set "PYTHONPATH={root}\\wrapper-core"\r\n'
-        f'"{py}" -m wrapper_core run {automation} --slot %1\r\n'
+        f'"{py}" -m wrapper_core run "{automation}" --slot "%~1"\r\n'
         "exit /b %ERRORLEVEL%\r\n")
 
 
 def launcher_vbs(paths: Paths, automation: str) -> str:
-    cmd = paths.bin / f"run-{automation}.cmd"
+    cmd = Path(_cmd_safe(str(paths.bin / f"run-{check_name(automation)}.cmd"), "launcher path"))
     return ('Set sh = CreateObject("WScript.Shell")\r\n'
             f'rc = sh.Run("cmd.exe /c """"{cmd}"""" " & WScript.Arguments(0), 0, True)\r\n'
             "WScript.Quit rc\r\n")
 
 
 def maintain_cmd(paths: Paths, python_exe: str | None = None) -> str:
-    py = python_exe or sys.executable
-    root = str(paths.root)
+    py = _cmd_safe(python_exe or sys.executable, "python path")
+    root = _cmd_safe(str(paths.root), "AUTOMAGIX_HOME")
     return ("@echo off\r\n"
             f'set "AUTOMAGIX_HOME={root}"\r\n'
             f'set "PYTHONPATH={root}\\wrapper-core"\r\n'
@@ -166,37 +176,59 @@ class Scheduler:
     def _save_state(self, st: dict) -> None:
         write_json(self.paths.state / "tasks.json", st)
 
+    @staticmethod
+    def _owned(st: dict, automation: str) -> list:
+        """Task names that belong to exactly this automation (``a`` must not match ``a-b``'s tasks)."""
+        owners = st.get("_owners") or {}
+        prefix = f"{TASK_FOLDER}\\{automation}-"
+        return [n for n in st if n != "_owners" and (owners.get(n) == automation or (n not in owners and n.startswith(prefix)))]
+
     def register(self, automation: str, schedule: dict | None, force: bool = False) -> list[str]:
-        """Create/refresh one task per slot. Returns the task names touched. Idempotent via an XML hash."""
+        """Create/refresh one task per slot. Returns the task names touched. Idempotent via an XML hash.
+        Slots with an unsafe id or unreadable fields are skipped (logged), never passed on to Task Scheduler / cmd.exe."""
+        check_name(automation)
         slots = (schedule or {}).get("slots") or []
         tz_name = (schedule or {}).get("timezone")
         self.write_launchers(automation)
         st = self._state()
+        owners = st.setdefault("_owners", {})
         touched: list[str] = []
         wanted = set()
         for slot in slots:
-            name = task_name(automation, str(slot["id"]))
+            try:
+                name = task_name(automation, str(slot["id"]))
+                xml = task_xml(self.paths, automation, slot, tz_name)
+            except (ValueError, KeyError, TypeError, AttributeError) as exc:
+                self.log.error("skipping slot of %s: %s", automation, exc)
+                continue
+            if owners.get(name) not in (None, automation):  # ``a`` + slot ``b-daily`` and ``a-b`` + ``daily`` share a name
+                self.log.error("task %s already belongs to automation %s: slot %s of %s skipped", name, owners[name], slot.get("id"), automation)
+                continue
             wanted.add(name)
-            xml = task_xml(self.paths, automation, slot, tz_name)
             digest = hashlib.sha256(xml.encode("utf-8")).hexdigest()
             if not force and st.get(name) == digest and self.exists(name):
+                owners[name] = automation
                 continue
             if self._create(name, xml):
                 st[name] = digest
+                owners[name] = automation
                 touched.append(name)
-        for name in [n for n in st if n.startswith(f"{TASK_FOLDER}\\{automation}-") and n not in wanted]:
+        for name in [n for n in self._owned(st, automation) if n not in wanted]:
             self._delete(name)
             st.pop(name, None)
+            owners.pop(name, None)
             touched.append(f"-{name}")
         self._save_state(st)
         return touched
 
     def unregister(self, automation: str) -> list[str]:
+        check_name(automation)
         st = self._state()
         gone = []
-        for name in [n for n in st if n.startswith(f"{TASK_FOLDER}\\{automation}-")]:
+        for name in self._owned(st, automation):
             self._delete(name)
             st.pop(name, None)
+            (st.get("_owners") or {}).pop(name, None)
             gone.append(name)
         self._save_state(st)
         for ext in ("cmd", "vbs"):

@@ -18,10 +18,19 @@ from pathlib import Path
 
 from .common import fingerprint, iso, parse_iso, read_json, write_json
 from . import analytics
+from .validate import NAME_RE
 
 MAX_CHAIN_DEPTH = 3
 RETENTION = timedelta(days=7)
 RUN_WINDOW = timedelta(hours=24)
+
+
+def _safe_params(params) -> bool:
+    """Params from run telemetry: a small flat object of scalars (no nesting, no oversized strings)."""
+    if not isinstance(params, dict) or len(params) > 20:
+        return False
+    return all(isinstance(k, str) and len(k) <= 64 and (v is None or isinstance(v, (bool, int, float)) or (isinstance(v, str) and len(v) <= 200))
+               for k, v in params.items())
 
 
 def _entry(automation, slot, params, now, source, depth, **extra) -> dict:
@@ -35,7 +44,7 @@ def compute(existing: dict | list | None, data: analytics.Data, manifest: dict, 
     items = (existing.get("triggers") if isinstance(existing, dict) else existing) or []
     by_id = {t["id"]: t for t in items if isinstance(t, dict) and t.get("id")}
     autos = manifest.get("automations") or {}
-    stats = {"added": 0, "pruned": 0, "ignored_requests": [], "depth_limited": 0}
+    stats = {"added": 0, "pruned": 0, "ignored_requests": [], "depth_limited": 0, "skipped_malformed": 0, "rejected_events": 0}
 
     def add(t: dict, key_parts: tuple) -> None:
         t["id"] = fingerprint(*key_parts)
@@ -49,9 +58,9 @@ def compute(existing: dict | list | None, data: analytics.Data, manifest: dict, 
         return int((by_id.get(tid) or {}).get("depth", 0)) if tid else 0
 
     window_start = now - RUN_WINDOW
-    for run in data.runs:
+    def process(run: dict) -> None:
         if analytics._end(run) < window_start or run["status"] in ("halted_paused", "skipped_maintenance"):
-            continue
+            return
         depth = depth_of(run) + 1
         # 1. manifest rules
         for target, entry in autos.items():
@@ -66,7 +75,7 @@ def compute(existing: dict | list | None, data: analytics.Data, manifest: dict, 
                 add(_entry(target, rule.get("slot", "poll"), dict(rule.get("params") or {}), now,
                            f"rule:{run['automation']}:{run['run_id']}", depth, source_run_id=run["run_id"]),
                     ("rule", target, run["run_id"], i))
-        # 2. payload-emitted events
+        # 2. payload-emitted events. Run telemetry is attacker-authored, so an emitted trigger may only carry plain scalar params
         for ev in run.get("events", []):
             if ev.get("event") != "trigger":
                 continue
@@ -74,12 +83,22 @@ def compute(existing: dict | list | None, data: analytics.Data, manifest: dict, 
             target = d.get("target")
             if target not in autos or run["status"] not in ("success", "partial"):
                 continue
+            params, slot = d.get("params") or {}, d.get("slot", "poll")
+            if not _safe_params(params) or not isinstance(slot, str) or not NAME_RE.match(slot):
+                stats["rejected_events"] = stats.get("rejected_events", 0) + 1
+                continue
             if depth > MAX_CHAIN_DEPTH:
                 stats["depth_limited"] += 1
                 continue
-            add(_entry(target, d.get("slot", "poll"), dict(d.get("params") or {}), now, f"event:{run['automation']}:{run['run_id']}",
+            add(_entry(target, slot, dict(params), now, f"event:{run['automation']}:{run['run_id']}",
                        depth, source_run_id=run["run_id"], reason=str(d.get("reason", ""))[:200]),
-                ("event", target, run["run_id"], ev.get("ts"), json.dumps(d.get("params") or {}, sort_keys=True)))
+                ("event", target, run["run_id"], ev.get("ts"), json.dumps(params, sort_keys=True)))
+
+    for run in data.runs:
+        try:
+            process(run)
+        except Exception:  # noqa: BLE001 - one malformed run must not stop trigger evaluation
+            stats["skipped_malformed"] = stats.get("skipped_malformed", 0) + 1
 
     # 3. operator requests
     if requests_dir and Path(requests_dir).exists():

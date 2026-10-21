@@ -35,7 +35,7 @@ def test_rendered_installer_validates_and_has_expected_content(build_dir, tmp_pa
     cfg, stage, nsi, flags = render_sample(build_dir, tmp_path)
     assert vn.validate(nsi) == []
     text = nsi.read_text(encoding="utf-8")
-    assert flags == {"HAVE_FRAMEWORK": False, "HAVE_LOG_TOKEN": False, "HAVE_PAYLOAD": False, "HAVE_ICON": True, "HAVE_PYTHON_EMBED": True, "HAVE_SSH_KEY": True, "HAVE_TOKEN": True, "HAVE_KNOWN_HOSTS": True}
+    assert flags == {"HAVE_FRAMEWORK": False, "HAVE_GIT": False, "HAVE_LOG_TOKEN": False, "HAVE_PAYLOAD": False, "HAVE_ICON": True, "HAVE_PYTHON_EMBED": True, "HAVE_SSH_KEY": True, "HAVE_TOKEN": True, "HAVE_KNOWN_HOSTS": True}
     for needle in ['RequestExecutionLevel user', '!define AUTOMATION      "automation-example-hello"', '!define VERSION         "1.2.3"',
                    'VIProductVersion "1.2.3.0"', '!define DEFAULT_RING    "pilot"', 'wrapper_core install ${AUTOMATION}',
                    'wrapper_core uninstall ${AUTOMATION}', 'AUTOMAGIX/registry_token', '/RING=', '/NORUN',
@@ -151,7 +151,7 @@ def mutated(build_dir, tmp_path, fn) -> list[str]:
     (lambda t: t.replace('!define AUTOMATION      "automation-example-hello"', '!define AUTOMATION "@@OOPS@@"'), "unresolved token"),
     (lambda t: t.replace('File "./scripts/protect-secret.ps1"', 'File "./scripts/nope.ps1"').replace('File ".\\scripts\\protect-secret.ps1"', 'File ".\\scripts\\nope.ps1"'), "does not exist"),
     (lambda t: t.replace("wrapper_core uninstall", "something else"), "uninstall"),
-    (lambda t: t + "\n; -----BEGIN OPENSSH PRIVATE KEY-----\n", "secret-looking"),
+    (lambda t: t + "\n; -----BEGIN OPENSSH PRIVATE KEY-----\n", "secret-looking"),  # secret-scan: allow (fake fixture)
 ])
 def test_validator_detects_defects(build_dir, tmp_path, fn, expect):
     errs = mutated(build_dir, tmp_path, fn)

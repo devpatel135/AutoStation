@@ -22,15 +22,23 @@ class ManifestError(ValueError):
 
 
 def parse(text: str) -> dict:
+    """Parse + sanity-check a manifest. Anything that is not a well-formed manifest raises ManifestError (never anything else)."""
     try:
         data = miniyaml.loads(text)
     except miniyaml.YamlError as exc:
         raise ManifestError(f"manifest is not valid YAML (supported subset): {exc}") from exc
+    except Exception as exc:  # noqa: BLE001 - a hostile document must never crash the caller
+        raise ManifestError(f"manifest cannot be parsed: {type(exc).__name__}") from exc
     if not isinstance(data, dict):
         raise ManifestError("manifest root must be a mapping")
     major = data.get("schema_version")
     if major != SUPPORTED_SCHEMA:
         raise ManifestError(f"unsupported manifest schema_version {major!r} (this wrapper supports {SUPPORTED_SCHEMA})")
+    for key in ("fleet", "components", "automations", "assets"):
+        if data.get(key) is not None and not isinstance(data[key], dict):
+            raise ManifestError(f"manifest {key!r} must be a mapping")
+    if data.get("compatibility") is not None and not isinstance(data["compatibility"], list):
+        raise ManifestError("manifest 'compatibility' must be a list")
     return data
 
 
@@ -45,7 +53,8 @@ def fleet_paused(m: dict) -> tuple[bool, str]:
 
 
 def automation(m: dict, name: str) -> dict | None:
-    return (m.get("automations") or {}).get(name)
+    a = (m.get("automations") or {}).get(name)
+    return a if isinstance(a, dict) else None
 
 
 def paused(m: dict, name: str) -> tuple[bool, str]:
@@ -84,7 +93,8 @@ def compatible(m: dict, wrapper_version: str, framework_version: str) -> bool:
     if not matrix:
         return True
     return any(versions.satisfies(wrapper_version, row.get("wrapper_core")) and
-               versions.satisfies(framework_version, row.get("execution_framework")) for row in matrix)
+               versions.satisfies(framework_version, row.get("execution_framework"))
+               for row in matrix if isinstance(row, dict))
 
 
 # --- schedule / maintenance windows -------------------------------------------------------------

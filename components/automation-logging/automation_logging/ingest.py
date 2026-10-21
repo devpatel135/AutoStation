@@ -23,8 +23,7 @@ import tempfile
 from pathlib import Path
 
 from .common import KINDS, iso, parse_iso, utcnow
-
-_SAFE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
+from .validate import MAX_BYTES, check_name_matches_record, check_path_parts, ref_digest, validate_record
 
 
 class IngestError(RuntimeError):
@@ -90,53 +89,49 @@ def archive_path(archive: Path, kind: str, name: str, art_id: str, rec: dict) ->
 
 
 def _validate(rec, kind: str, name: str, art_id: str) -> str | None:
-    """Return a rejection reason or None."""
-    if not isinstance(rec, dict):
-        return "not a JSON object"
-    if rec.get("schema_version") != 1:
-        return f"unsupported schema_version {rec.get('schema_version')!r}"
-    if rec.get("kind") != kind:
-        return f"kind mismatch: path says {kind!r}, content says {rec.get('kind')!r}"
-    if kind not in KINDS:
-        return f"unknown kind {kind!r}"
-    for label, val in (("name", name), ("id", art_id)):
-        if not _SAFE.match(val):
-            return f"unsafe {label} {val!r}"
-    if kind == "run" and (not rec.get("automation") or not rec.get("run_id") or not rec.get("started_at")):
-        return "run artefact missing automation/run_id/started_at"
-    if kind in ("heartbeat", "lifecycle", "evidence") and not rec.get("ts"):
-        return f"{kind} artefact missing ts"
+    """Return a rejection reason or None. Everything in ``rec`` is attacker-authored (see validate.py)."""
+    bad = validate_record(rec, kind)
+    if bad:
+        return bad
+    bad = check_name_matches_record(kind, name, rec)
+    if bad:
+        return bad
     if kind == "evidence":
         bad = validate_evidence(rec)
         if bad:
             return bad
-    try:
-        artefact_time(rec)
-    except ValueError:
-        return "unparseable timestamp"
     return None
 
 
-def _reject(archive: Path, ring: str, kind: str, name: str, art_id: str, raw: bytes, reason: str, stats: dict) -> None:
-    rej = Path(archive) / "_rejected" / f"{ring}-{kind}-{name}-{art_id}.json.txt"
+def _reject(archive: Path, ref: str, raw: bytes, reason: str, stats: dict) -> None:
+    """Quarantine under a name derived only from a hash of the (untrusted) ref - never from the ref text itself."""
+    stem = ref_digest(ref)
+    rej = Path(archive) / "_rejected" / f"{stem}.txt"
     rej.parent.mkdir(parents=True, exist_ok=True)
-    rej.write_bytes(raw[:200_000])
-    rej.with_suffix(".reason").write_text(reason + chr(10), encoding="utf-8")
+    rej.write_bytes(raw[:50_000])
+    (Path(archive) / "_rejected" / f"{stem}.reason").write_text(
+        "".join(c if c.isprintable() else "?" for c in f"{ref[:200]}: {reason}") + chr(10), encoding="utf-8")
     stats["rejected"] += 1
 
 
 def _store(archive: Path, ring: str, kind: str, name: str, art_id: str, raw: bytes, stats: dict, source_label: str) -> None:
-    try:
-        rec = json.loads(raw.decode("utf-8"))
-    except (ValueError, UnicodeDecodeError):
-        rec = None
-    reason = _validate(rec, kind, name, art_id) if rec is not None else "invalid JSON"
+    ref = f"{ring}/{kind}/{name}/{art_id}"
+    reason = check_path_parts(ring, kind, name, art_id)
+    rec = None
+    if not reason and len(raw) > MAX_BYTES[kind]:
+        reason = f"artefact is {len(raw)} bytes (limit {MAX_BYTES[kind]})"
+    if not reason:
+        try:
+            rec = json.loads(raw.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError, RecursionError):
+            reason = "invalid JSON"
+    if not reason:
+        try:
+            reason = _validate(rec, kind, name, art_id)
+        except Exception as exc:  # a forged record must never abort the whole ingest run
+            reason = f"validator error: {type(exc).__name__}"
     if reason:
-        rej = Path(archive) / "_rejected" / f"{ring}-{kind}-{name}-{art_id}.json.txt"
-        rej.parent.mkdir(parents=True, exist_ok=True)
-        rej.write_bytes(raw[:200_000])
-        (rej.with_suffix(".reason")).write_text(f"{source_label}: {reason}\n", encoding="utf-8")
-        stats["rejected"] += 1
+        _reject(archive, source_label if source_label else ref, raw, reason, stats)
         return
     rec.setdefault("ring", ring)
     target = archive_path(archive, kind, name, art_id, rec)
@@ -164,7 +159,13 @@ def ingest_dir(src: str | Path, archive: str | Path, keep_source: bool = False) 
     for f in sorted(root.glob("*/*/*/*.json")):
         ring, kind, name = f.relative_to(root).parts[:3]
         art_id = f.stem
-        _store(archive, ring, kind, name, art_id, f.read_bytes(), stats, str(f))
+        try:
+            limit = MAX_BYTES.get(kind, 1_000_000)
+            with open(f, "rb") as fh:
+                raw = fh.read(limit + 1)  # never read an unbounded file into memory
+            _store(archive, ring, kind, name, art_id, raw, stats, f"{ring}/{kind}/{name}/{art_id}")
+        except OSError as exc:
+            stats["errors"].append(f"cannot read {ref_digest(str(f))}: {type(exc).__name__}")
         if not keep_source:
             try:
                 f.unlink()
@@ -182,15 +183,19 @@ def _git(args: list[str], cwd: Path, env: dict, timeout: int = 300) -> subproces
 
 
 def _git_env(remote: str, token: str | None) -> tuple[list[str], dict]:
+    """The token travels in the environment (GIT_CONFIG_*), never on the command line where ``ps`` would show it."""
     env = dict(os.environ, GIT_TERMINAL_PROMPT="0")
-    prefix: list[str] = []
     if token and remote.startswith(("http://", "https://")):
-        prefix = ["-c", f"http.extraHeader=PRIVATE-TOKEN: {token}"]
-    return prefix, env
+        env.update(GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0="http.extraHeader", GIT_CONFIG_VALUE_0=f"PRIVATE-TOKEN: {token}")
+    return [], env
 
 
-def ingest_git(remote: str, archive: str | Path, delete: bool = True, token: str | None = None) -> dict:
-    """Fetch ingest/* refs from ``remote``, archive their artefacts, then delete the processed refs (batched)."""
+def ingest_git(remote: str, archive: str | Path, delete: bool = True, token: str | None = None, max_refs: int = 2000) -> dict:
+    """Fetch ingest/* refs from ``remote``, archive their artefacts, then delete the processed refs (batched).
+
+    At most ``max_refs`` refs are processed per run (the rest stay for the next run); malformed or hostile refs are
+    quarantined and *deleted* like any other, so poison is never re-fetched forever.
+    """
     archive = Path(archive)
     token = token or os.environ.get("GITLAB_READ_TOKEN")
     stats = _stats()
@@ -206,20 +211,33 @@ def ingest_git(remote: str, archive: str | Path, delete: bool = True, token: str
             raise IngestError(f"git fetch failed: {msg[:300]}")
         refs = _git(["for-each-ref", "--format=%(refname)", "refs/ingest/"], work, env).stdout.decode().split()
         to_delete: list[str] = []
+        if len(refs) > max_refs:
+            stats["deferred_refs"] = len(refs) - max_refs  # left for the next run; not an error
+            refs = refs[:max_refs]
         for ref in refs:
-            parts = ref[len("refs/ingest/"):].split("/")
-            if len(parts) != 4:
-                stats["errors"].append(f"unexpected ref shape {ref}")
-                continue
-            ring, kind, name, art_id = parts
-            show = _git(["show", f"{ref}:{kind}/{name}/{art_id}.json"], work, env)
-            if show.returncode != 0:
-                # strict: the commit must hold exactly <kind>/<name>/<id>.json. Quarantine whatever it holds, then drop the ref.
-                ls = _git(["ls-tree", "-r", "--name-only", ref], work, env).stdout.decode().split()
-                raw = _git(["show", f"{ref}:{ls[0]}"], work, env).stdout if ls else b""
-                _reject(archive, ring, kind, name, art_id, raw, f"{ref}: unexpected layout {ls[:3]}", stats)
-            else:
-                _store(archive, ring, kind, name, art_id, show.stdout, stats, ref)
+            try:
+                parts = ref[len("refs/ingest/"):].split("/")
+                if len(parts) != 4:
+                    # wrong shape: quarantine the ref name only and drop it, otherwise it is fetched again on every run
+                    _reject(archive, ref, b"", "unexpected ref shape", stats)
+                else:
+                    ring, kind, name, art_id = parts
+                    problem = check_path_parts(ring, kind, name, art_id)
+                    if problem:
+                        _reject(archive, ref, b"", problem, stats)
+                    else:
+                        # never `git show` an unbounded blob: ask for its size first
+                        size = _git(["cat-file", "-s", f"{ref}:{kind}/{name}/{art_id}.json"], work, env)
+                        if size.returncode != 0:
+                            ls = _git(["ls-tree", "-r", "--name-only", ref], work, env).stdout.decode("utf-8", "replace").split()
+                            _reject(archive, ref, b"", f"unexpected layout ({len(ls)} entries)", stats)
+                        elif int(size.stdout.decode().strip() or 0) > MAX_BYTES[kind]:
+                            _reject(archive, ref, b"", f"artefact is {size.stdout.decode().strip()} bytes (limit {MAX_BYTES[kind]})", stats)
+                        else:
+                            show = _git(["show", f"{ref}:{kind}/{name}/{art_id}.json"], work, env)
+                            _store(archive, ring, kind, name, art_id, show.stdout, stats, ref)
+            except Exception as exc:  # one poisoned ref must not stop the run or leave it undeleted
+                stats["errors"].append(f"{ref_digest(ref)}: {type(exc).__name__}")
             to_delete.append("refs/heads/" + ref[len("refs/"):])
         if delete and to_delete:
             # delete only after everything above is safely on disk; batches keep the command line short

@@ -178,9 +178,284 @@ function unquote(raw) {
   return out;
 }
 
-/** JS single-quoted literal for any string. */
+/**
+ * JS single-quoted literal for any string. Everything that could end the literal, start a new line, or terminate an enclosing
+ * <script> is escaped (control chars, U+2028/U+2029, `<`), so the result is always exactly one inert string token.
+ */
 function jsStr(s) {
-  return `'${String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/\n/g, '\\n').replace(/\r/g, '\\r')}'`;
+  const body = String(s).replace(/[\\'\u0000-\u001f\u007f\u2028\u2029<]/g, (c) => {
+    if (c === '\\') return '\\\\';
+    if (c === "'") return "\\'";
+    if (c === '\n') return '\\n';
+    if (c === '\r') return '\\r';
+    if (c === '\t') return '\\t';
+    return `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`;
+  });
+  return `'${body}'`;
+}
+
+/** JSON.stringify whose output is also a safe JS expression (U+2028/U+2029 and `<` are escaped, which JSON itself does not do). */
+function safeJson(v) {
+  return JSON.stringify(v).replace(/[\u2028\u2029<]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
+}
+
+/** Text that is safe inside a `//` or `/** *\/` comment: no line terminators, no comment delimiters, bounded length. */
+function commentText(s, max = 200) {
+  let t = String(s === undefined || s === null ? '' : s).replace(/[\u0000-\u001f\u007f\u2028\u2029]+/g, ' ');
+  while (/\*\/|\/\*/.test(t)) t = t.replace(/\*\//g, '').replace(/\/\*/g, '');
+  t = t.trim();
+  return t.length > max ? `${t.slice(0, max)}...` : t;
+}
+
+// ---- strict literal-argument parser -----------------------------------------------------------------------
+// Recorded text is untrusted (a codegen file can come from anywhere). Nothing from it is ever copied into generated JS verbatim:
+// arguments are parsed with this tiny grammar (strings, numbers, true/false/null, arrays, allow-listed-key objects, regex
+// literals) and RE-EMITTED canonically. Anything outside the grammar - calls, identifiers, operators, templates - is rejected.
+const OPTION_KEYS = new Set(['timeout', 'force', 'delay', 'button', 'clickCount', 'position', 'modifiers', 'noWaitAfter', 'trial']);
+const LOCATOR_KEYS = new Set(['name', 'exact', 'hasText', 'hasNotText', 'level', 'checked', 'disabled', 'expanded', 'pressed', 'selected', 'includeHidden']);
+const SELECT_KEYS = new Set(['value', 'label', 'index']);
+const NAV_KEYS = new Set(['timeout', 'waitUntil']);
+const ALL_KEYS = new Set([...OPTION_KEYS, ...LOCATOR_KEYS, ...SELECT_KEYS, ...NAV_KEYS, 'x', 'y']);
+const MAX_ARG_TEXT = 4000;
+
+function parseLiteralArgs(text, { regex = false } = {}) {
+  const src = String(text === undefined || text === null ? '' : text);
+  if (src.length > MAX_ARG_TEXT) return null;
+  let i = 0;
+  let budget = 200;
+  const ws = () => { while (i < src.length && /[ \t\r\n]/.test(src[i])) i += 1; };
+  const fail = () => { throw new Error('literal-args'); };
+  const value = (depth) => {
+    budget -= 1;
+    if (budget < 0 || depth > 4) fail();
+    ws();
+    const c = src[i];
+    if (c === "'" || c === '"') {
+      i += 1;
+      let out = '';
+      for (;;) {
+        if (i >= src.length) fail();
+        const ch = src[i];
+        if (ch === c) { i += 1; return { t: 'str', v: out }; }
+        if (/[\n\r\u2028\u2029]/.test(ch)) fail();
+        if (ch !== '\\') { out += ch; i += 1; continue; }
+        const nx = src[i + 1];
+        if (nx === undefined || /[\n\r\u2028\u2029]/.test(nx)) fail();
+        i += 2;
+        if (nx === 'n') out += '\n';
+        else if (nx === 't') out += '\t';
+        else if (nx === 'r') out += '\r';
+        else if (nx === 'u') {
+          const hex = src.slice(i, i + 4);
+          if (!/^[0-9a-fA-F]{4}$/.test(hex)) fail();
+          out += String.fromCharCode(parseInt(hex, 16));
+          i += 4;
+        } else if (nx === 'x') {
+          const hex = src.slice(i, i + 2);
+          if (!/^[0-9a-fA-F]{2}$/.test(hex)) fail();
+          out += String.fromCharCode(parseInt(hex, 16));
+          i += 2;
+        } else if (/[0-9bfv]/.test(nx)) fail();
+        else out += nx;
+      }
+    }
+    if (c === '-' || (c >= '0' && c <= '9')) {
+      const m = /^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/.exec(src.slice(i));
+      if (!m) fail();
+      i += m[0].length;
+      const v = Number(m[0]);
+      if (!Number.isFinite(v)) fail();
+      return { t: 'num', v };
+    }
+    if (c === '/' && regex) {
+      let j = i + 1;
+      let inClass = false;
+      let body = '';
+      for (;;) {
+        if (j >= src.length) fail();
+        const ch = src[j];
+        if (/[\n\r\u2028\u2029'"`]/.test(ch)) fail();
+        if (ch === '\\') {
+          const nx = src[j + 1];
+          if (nx === undefined || /[\n\r\u2028\u2029'"`]/.test(nx)) fail();
+          body += ch + nx;
+          j += 2;
+          continue;
+        }
+        if (ch === '[') inClass = true;
+        else if (ch === ']') inClass = false;
+        else if (ch === '/' && !inClass) break;
+        body += ch;
+        j += 1;
+      }
+      const fm = /^[dgimsuvy]*/.exec(src.slice(j + 1));
+      const flags = fm[0];
+      if (!body || body[0] === '*') fail();
+      try { new RegExp(body, flags); } catch (_) { fail(); } // eslint-disable-line no-new
+      i = j + 1 + flags.length;
+      return { t: 're', body, flags };
+    }
+    if (c === '[') {
+      i += 1;
+      const items = [];
+      for (;;) {
+        ws();
+        if (src[i] === ']') { i += 1; return { t: 'arr', items }; }
+        items.push(value(depth + 1));
+        ws();
+        if (src[i] === ',') i += 1;
+        else if (src[i] !== ']') fail();
+      }
+    }
+    if (c === '{') {
+      i += 1;
+      const entries = [];
+      for (;;) {
+        ws();
+        if (src[i] === '}') { i += 1; return { t: 'obj', entries }; }
+        let key;
+        if (src[i] === "'" || src[i] === '"') key = value(depth + 1).v;
+        else {
+          const km = /^[A-Za-z_$][\w$]*/.exec(src.slice(i));
+          if (!km) fail();
+          key = km[0];
+          i += key.length;
+        }
+        if (!ALL_KEYS.has(key)) fail();
+        ws();
+        if (src[i] !== ':') fail();
+        i += 1;
+        entries.push([key, value(depth + 1)]);
+        ws();
+        if (src[i] === ',') i += 1;
+        else if (src[i] !== '}') fail();
+      }
+    }
+    const im = /^[A-Za-z_$][\w$]*/.exec(src.slice(i));
+    if (im && (im[0] === 'true' || im[0] === 'false' || im[0] === 'null')) {
+      i += im[0].length;
+      return { t: im[0] === 'null' ? 'null' : 'bool', v: im[0] === 'true' };
+    }
+    return fail();
+  };
+  try {
+    const list = [];
+    ws();
+    while (i < src.length) {
+      list.push(value(0));
+      ws();
+      if (i < src.length) {
+        if (src[i] !== ',') fail();
+        i += 1;
+        ws();
+      }
+    }
+    return list;
+  } catch (err) {
+    if (err.message === 'literal-args') return null;
+    throw err;
+  }
+}
+
+function emitLiteral(node) {
+  switch (node.t) {
+    case 'str': return jsStr(node.v);
+    case 'num': return String(node.v);
+    case 'bool': return node.v ? 'true' : 'false';
+    case 'null': return 'null';
+    case 're': return `/${node.body}/${node.flags}`;
+    case 'arr': return `[${node.items.map(emitLiteral).join(', ')}]`;
+    case 'obj': return node.entries.length ? `{ ${node.entries.map(([k, v]) => `${k}: ${emitLiteral(v)}`).join(', ')} }` : '{}';
+    default: throw new Error('cannot emit literal');
+  }
+}
+
+/** Strict shape check of a Playwright options object: only allow-listed keys with correctly typed literal values. */
+function optionsOk(node, keys = OPTION_KEYS) {
+  if (!node || node.t !== 'obj') return false;
+  return node.entries.every(([k, v]) => {
+    if (!keys.has(k)) return false;
+    switch (k) {
+      case 'timeout': case 'delay': case 'clickCount': case 'x': case 'y': case 'index': case 'level': return v.t === 'num';
+      case 'force': case 'noWaitAfter': case 'trial': case 'exact': case 'checked': case 'disabled': case 'expanded': case 'pressed': case 'selected': case 'includeHidden': return v.t === 'bool';
+      case 'button': return v.t === 'str' && /^(?:left|right|middle)$/.test(v.v);
+      case 'modifiers': return v.t === 'arr' && v.items.every((m) => m.t === 'str' && /^(?:Alt|Control|ControlOrMeta|Meta|Shift)$/.test(m.v));
+      case 'position': return v.t === 'obj' && v.entries.every(([pk, pv]) => (pk === 'x' || pk === 'y') && pv.t === 'num');
+      case 'waitUntil': return v.t === 'str' && /^(?:load|domcontentloaded|networkidle|commit)$/.test(v.v);
+      default: return v.t === 'str' || v.t === 're';
+    }
+  });
+}
+
+const LOCATOR_SEGS = new Set(['getByRole', 'getByLabel', 'getByText', 'getByPlaceholder', 'getByAltText', 'getByTitle', 'getByTestId', 'locator', 'frameLocator', 'contentFrame', 'filter', 'first', 'last', 'nth']);
+
+/** Re-render one locator-chain segment from parsed literals, or null if it is not a plain locator call. */
+function canonSeg(seg) {
+  if (!LOCATOR_SEGS.has(seg.name)) return null;
+  if (seg.name === 'first' || seg.name === 'last' || seg.name === 'contentFrame') {
+    return seg.args === null || seg.args === '' ? { ...seg, args: '', src: `${seg.name}()` } : null;
+  }
+  if (seg.args === null) return null;
+  const list = parseLiteralArgs(seg.args, { regex: true });
+  if (!list || list.length < 1 || list.length > 2) return null;
+  const [a, b] = list;
+  if (seg.name === 'nth') { if (list.length !== 1 || a.t !== 'num' || !Number.isInteger(a.v)) return null; } else if (seg.name === 'filter') {
+    if (list.length !== 1 || !optionsOk(a, LOCATOR_KEYS)) return null;
+  } else if (seg.name === 'getByRole') {
+    if (a.t !== 'str' || (b && !optionsOk(b, LOCATOR_KEYS))) return null;
+  } else if (seg.name === 'locator') {
+    if (a.t !== 'str' || (b && !optionsOk(b, LOCATOR_KEYS))) return null;
+  } else if (seg.name === 'frameLocator') {
+    if (list.length !== 1 || a.t !== 'str') return null;
+  } else if ((a.t !== 'str' && a.t !== 're') || (b && !optionsOk(b, LOCATOR_KEYS))) return null; // getByText/getByLabel/...
+  const args = list.map(emitLiteral).join(', ');
+  return { ...seg, args, src: `${seg.name}(${args})` };
+}
+
+const SAFE_VAR = /^[A-Za-z][A-Za-z0-9_]{0,30}$/;
+// names the generated main.js already uses (or that would be dangerous to shadow) can never become page variables
+const RESERVED_IDENTS = new Set(['require', 'process', 'module', 'exports', 'fw', 'framework', 'w', 'sso', 'P', 'L', 'rp', 'session', 'path', 'NAME', 'eval',
+  'Function', 'constructor', 'globalThis', 'global', 'console', 'Buffer', 'import', 'await', 'async', 'undefined', 'arguments', 'ROWS', 'row']);
+const OPTIONS_ONLY = new Set(['click', 'dblclick', 'check', 'uncheck', 'hover', 'focus', 'blur', 'clear', 'tap', 'scrollIntoViewIfNeeded']);
+
+/**
+ * Re-render an action's argument text from parsed literals. -> {text, dropped} or null when the step cannot be kept.
+ * Option-only methods (click, hover, ...) drop a non-literal / non-allow-listed options argument (dropped=true) and keep the action.
+ */
+function sanitizeActionArgs(method, argsText) {
+  const raw = String(argsText || '').trim();
+  const list = parseLiteralArgs(raw);
+  if (OPTIONS_ONLY.has(method)) {
+    if (list && list.length === 0) return { text: '', dropped: false };
+    if (list && list.length === 1 && optionsOk(list[0])) return { text: emitLiteral(list[0]), dropped: false };
+    return { text: '', dropped: true };
+  }
+  if (!list || list.length < 1 || list.length > 2) return null;
+  const [a, b] = list;
+  if (b && !optionsOk(b)) return null;
+  switch (method) {
+    case 'fill': case 'press': case 'type': case 'dispatchEvent':
+      if (a.t !== 'str' || (method === 'dispatchEvent' && b)) return null;
+      break;
+    case 'selectOption':
+      if (!(a.t === 'str' || (a.t === 'arr' && a.items.every((x) => x.t === 'str')) || (a.t === 'obj' && optionsOk(a, SELECT_KEYS)))) return null;
+      break;
+    case 'setInputFiles':
+      if (!(a.t === 'str' || (a.t === 'arr' && a.items.every((x) => x.t === 'str')))) return null;
+      break;
+    default: return null; // dragTo (takes a locator expression) and anything else
+  }
+  return { text: list.map(emitLiteral).join(', '), dropped: false };
+}
+
+function canonLocSegs(segs) {
+  const out = [];
+  for (const s of segs) {
+    const c = canonSeg(s);
+    if (!c) return null;
+    out.push(c);
+  }
+  return out;
 }
 
 function parseChain(expr) {
@@ -294,7 +569,9 @@ function parseStatement(raw, line) {
   return { ...base, kind: 'unknown' };
 }
 
-function makeAction(base, pageVar, locSegs, method, argsText) {
+function makeAction(base, pageVar, rawLocSegs, method, argsText) {
+  const locSegs = canonLocSegs(rawLocSegs); // locator text is re-rendered from parsed literals, never copied verbatim
+  if (!locSegs) return { ...base, kind: 'unknown' };
   const locSrc = locatorSource(locSegs);
   const desc = locSegs.map(describeSeg).join(' > ');
   return { ...base, kind: 'action', pageVar, method, locSegs, locSrc, desc, argsText: argsText || '' };
@@ -372,61 +649,90 @@ function buildModel(statements, { url }) {
   let gotoSeen = false;
   let fieldN = 0;
 
+  const todo = (s, why) => {
+    steps.push({ kind: 'todo', text: String(s.source || '').replace(/^await\s+/, ''), line: s.line });
+    warnings.push(`line ${s.line}: ${why} (kept as a TODO comment): ${commentText(s.source, 80)}`);
+  };
+  const knownVar = (v) => SAFE_VAR.test(v) && !RESERVED_IDENTS.has(v) && pageVars.has(v);
+
   for (const st of statements) {
     const s = parseStatement(st.text, st.line);
     switch (s.kind) {
       case 'unknown':
-        steps.push({ kind: 'todo', text: s.source.replace(/^await\s+/, ''), line: s.line });
-        warnings.push(`line ${s.line}: statement not converted (kept as a TODO comment): ${s.source.slice(0, 80)}`);
+        todo(s, 'statement not converted');
         break;
       case 'assert':
-        steps.push({ kind: 'comment', text: `recorded assertion (not converted): ${s.source.replace(/^await\s+/, '')}`, line: s.line });
+        steps.push({ kind: 'comment', text: `recorded assertion (not converted): ${String(s.source).replace(/^await\s+/, '')}`, line: s.line });
         warnings.push(`line ${s.line}: assertion not converted - add an explicit check if the flow depends on it`);
         break;
       case 'noop': break;
       case 'popup-wait':
+        if (!SAFE_VAR.test(s.promiseVar) || RESERVED_IDENTS.has(s.promiseVar) || !/Promise$/.test(s.promiseVar) || !knownVar(s.from)
+          || RESERVED_IDENTS.has(s.promiseVar.replace(/Promise$/, ''))) { todo(s, 'popup wait on an unexpected variable not converted'); break; }
         pageVars.add(s.promiseVar.replace(/Promise$/, ''));
         steps.push({ kind: 'raw', text: `const ${s.promiseVar} = ${s.from}.waitForEvent('popup');`, line: s.line });
         break;
       case 'popup-bind':
+        if (!SAFE_VAR.test(s.pageVar) || RESERVED_IDENTS.has(s.pageVar) || !SAFE_VAR.test(s.promiseVar)) { todo(s, 'popup binding not converted'); break; }
         pageVars.add(s.pageVar);
         steps.push({ kind: 'popup', pageVar: s.pageVar, promiseVar: s.promiseVar, line: s.line });
         break;
       case 'goto': {
-        const lit = stringLiterals(s.argsText)[0];
-        let urlExpr = s.argsText;
-        const isFirst = !gotoSeen;
-        if (isFirst && lit !== undefined) {
+        const args = knownVar(s.pageVar) ? parseLiteralArgs(s.argsText) : null;
+        const lit = args && args.length >= 1 && args.length <= 2 && args[0].t === 'str' && (!args[1] || optionsOk(args[1], NAV_KEYS)) ? args[0].v : undefined;
+        let parsed = null;
+        try { parsed = lit !== undefined ? new URL(lit) : null; } catch (_) { parsed = null; }
+        if (!parsed || !/^https?:$/.test(parsed.protocol) || parsed.username || parsed.password) {
+          todo(s, 'goto not converted (only literal http/https URLs without credentials are accepted)');
+          break;
+        }
+        let urlExpr = jsStr(lit);
+        if (!gotoSeen) {
           gotoSeen = true;
           const pn = unique('start_url', usedParams);
           params.push({ name: pn, default: lit, source: 'first navigation', sensitive: false });
           urlExpr = `P.${pn}`;
         }
-        let origin = null;
-        try { origin = lit !== undefined ? new URL(lit).origin : null; } catch (_) { origin = null; }
-        steps.push({ kind: 'goto', pageVar: s.pageVar, urlExpr, origin, desc: lit !== undefined ? lit : s.argsText, line: s.line });
+        steps.push({ kind: 'goto', pageVar: s.pageVar, urlExpr, origin: parsed.origin, desc: lit, line: s.line });
         break;
       }
-      case 'waitForURL':
-        steps.push({ kind: 'waitForURL', pageVar: s.pageVar, argsText: s.argsText, line: s.line });
+      case 'waitForURL': {
+        const args = knownVar(s.pageVar) ? parseLiteralArgs(s.argsText, { regex: true }) : null;
+        if (!args || args.length < 1 || args.length > 2 || (args[0].t !== 'str' && args[0].t !== 're') || (args[1] && !optionsOk(args[1], NAV_KEYS))) { todo(s, 'waitForURL not converted'); break; }
+        steps.push({ kind: 'waitForURL', pageVar: s.pageVar, argsText: args.map(emitLiteral).join(', '), line: s.line });
         break;
+      }
       case 'sleep':
-        steps.push({ kind: 'sleep', pageVar: s.pageVar, argsText: s.argsText, line: s.line });
-        warnings.push(`line ${s.line}: fixed sleep (${s.argsText} ms) replaced by a network-idle wait - fixed sleeps are fragile`);
+        if (!knownVar(s.pageVar) || !/^\d{1,7}$/.test(s.argsText.trim())) { todo(s, 'sleep not converted'); break; }
+        steps.push({ kind: 'sleep', pageVar: s.pageVar, argsText: s.argsText.trim(), line: s.line });
+        warnings.push(`line ${s.line}: fixed sleep (${s.argsText.trim()} ms) replaced by a network-idle wait - fixed sleeps are fragile`);
         break;
-      case 'loadstate':
-        steps.push({ kind: 'loadstate', pageVar: s.pageVar, argsText: s.argsText, line: s.line });
+      case 'loadstate': {
+        const args = knownVar(s.pageVar) ? parseLiteralArgs(s.argsText) : null;
+        if (!args || args.length > 2 || (args[0] && (args[0].t !== 'str' || !/^(?:load|domcontentloaded|networkidle)$/.test(args[0].v))) || (args[1] && !optionsOk(args[1], NAV_KEYS))) { todo(s, 'waitForLoadState not converted'); break; }
+        steps.push({ kind: 'loadstate', pageVar: s.pageVar, argsText: args.map(emitLiteral).join(', '), line: s.line });
         break;
+      }
       case 'keyboard': {
-        const lit = stringLiterals(s.argsText)[0];
+        const args = knownVar(s.pageVar) ? parseLiteralArgs(s.argsText) : null;
+        if (!args || args.length < 1 || args.length > 2 || args[0].t !== 'str' || (args[1] && !optionsOk(args[1]))) { todo(s, 'keyboard step not converted'); break; }
+        const lit = args[0].v;
         if (s.method === 'type' && (looksSensitiveValue(lit || '') )) {
           steps.push({ kind: 'sensitive', desc: 'keyboard.type (sensitive value)', line: s.line });
           warnings.push(`line ${s.line}: typed value looks like a secret - not recorded`);
-        } else steps.push({ kind: 'keyboard', pageVar: s.pageVar, method: s.method, argsText: s.argsText, desc: `keyboard.${s.method} ${lit !== undefined ? lit : s.argsText}`, line: s.line });
+        } else steps.push({ kind: 'keyboard', pageVar: s.pageVar, method: s.method, argsText: args.map(emitLiteral).join(', '), desc: `keyboard.${s.method} ${lit}`, line: s.line });
         break;
       }
       case 'action': {
         const step = { ...s };
+        if (!knownVar(step.pageVar)) { todo(s, `unknown page variable ${commentText(step.pageVar, 30)}`); break; }
+        const sanitized = sanitizeActionArgs(step.method, step.argsText);
+        if (!sanitized) { todo(s, `${step.method} arguments are not plain literals`); break; }
+        if (sanitized.dropped) {
+          steps.push({ kind: 'todo', text: `options dropped (not a plain literal options object): ${step.argsText}`, line: s.line });
+          warnings.push(`line ${s.line}: ${step.method} options were not a strict literal options object and were dropped (see TODO)`);
+        }
+        step.argsText = sanitized.text;
         const valueMethods = step.method === 'fill' || step.method === 'selectOption';
         const argLit = valueMethods ? stringLiterals(step.argsText)[0] : undefined;
         const argRaw = step.argsText.trim();
@@ -589,7 +895,7 @@ function renderMain(model, { name, url, stamp }) {
     const label = `step ${n}`;
     switch (step.kind) {
       case 'goto':
-        lines.push(`${indent}// ${label}: open ${step.desc}`);
+        lines.push(`${indent}// ${label}: open ${commentText(step.desc)}`);
         lines.push(`${indent}await ${step.pageVar}.goto(${step.urlExpr}, { waitUntil: 'domcontentloaded' });`);
         lines.push(`${indent}await sso.assertSession(${step.pageVar}, ${step.origin ? `{ expectedOrigin: ${jsStr(step.origin)} }` : '{}'});`);
         table.push([n, 'goto', step.desc, step.urlExpr.startsWith('P.') ? `param ${step.urlExpr.slice(2)}` : '', 'sso-detect assertion added']);
@@ -611,12 +917,12 @@ function renderMain(model, { name, url, stamp }) {
         table.push([n, 'waitForLoadState', step.argsText, '', '']);
         break;
       case 'keyboard':
-        lines.push(`${indent}// ${label}: ${step.desc}`);
+        lines.push(`${indent}// ${label}: ${commentText(step.desc)}`);
         lines.push(`${indent}await ${step.pageVar}.keyboard.${step.method}(${step.argsText});`);
         table.push([n, `keyboard.${step.method}`, step.desc, '', '']);
         break;
       case 'sensitive':
-        lines.push(`${indent}// ${label}: ${step.desc} - SENSITIVE: the recorded value was NOT kept`);
+        lines.push(`${indent}// ${label}: ${commentText(step.desc)} - SENSITIVE: the recorded value was NOT kept`);
         lines.push(`${indent}${CREDENTIAL_THROW}`);
         table.push([n, 'fill', step.desc.replace(/^fill /, ''), '(not recorded)', 'throws until credentials are wired in']);
         break;
@@ -630,17 +936,17 @@ function renderMain(model, { name, url, stamp }) {
         n -= 1;
         break;
       case 'comment':
-        lines.push(`${indent}// ${step.text}`);
+        lines.push(`${indent}// ${commentText(step.text)}`);
         n -= 1;
         break;
       case 'todo':
-        lines.push(`${indent}// TODO(unconverted): ${step.text.replace(/\n/g, ' ')}`);
+        lines.push(`${indent}// TODO(unconverted): ${commentText(step.text)}`);
         n -= 1;
         break;
       case 'action': {
         const info = ctx.info || stepTemplate(step);
         const valueNote = step.paramName ? `param ${step.paramName}` : (ctx.loop ? 'from ROWS' : '');
-        lines.push(`${indent}// ${label}: ${step.method} ${step.desc}`);
+        lines.push(`${indent}// ${label}: ${step.method} ${commentText(step.desc)}`);
         lines.push(...renderAction(step, info, { subst: ctx.subst, inLoop: Boolean(ctx.loop), indent }));
         table.push([n, step.method, step.desc, valueNote, [step.healable ? 'self-healing' : 'plain call', step.irreversible ? 'skipped in dry-run' : '', ctx.loop ? `loop ${ctx.loop}` : ''].filter(Boolean).join('; ')]);
         break;
@@ -654,7 +960,7 @@ function renderMain(model, { name, url, stamp }) {
     loopN += 1;
     const rowsName = `ROWS_${loopN}`;
     lines.push(`${I}// Repeated pattern (${b.repeats}x ${b.steps.length} step(s)) detected: one runItem per row. Edit ROWS_${loopN} or load it from a file/param.`);
-    lines.push(`${I}const ${rowsName} = ${JSON.stringify(b.rows)};`);
+    lines.push(`${I}const ${rowsName} = ${safeJson(b.rows)};`);
     lines.push(`${I}for (const row of ${rowsName}) {`);
     lines.push(`${I}  await w.runItem(String(row.v0), async () => {`);
     b.steps.forEach((st, j) => {
@@ -676,7 +982,7 @@ function renderMain(model, { name, url, stamp }) {
   const head = [];
   head.push("'use strict';");
   head.push('/**');
-  head.push(` * ${name}: GENERATED by amx-record from a Playwright codegen recording of ${url || '(unknown url)'} on ${stamp}.`);
+  head.push(` * ${name}: GENERATED by amx-record from a Playwright codegen recording of ${commentText(url) || '(unknown url)'} on ${commentText(stamp)}.`);
   head.push(' * REVIEW EVERY STEP before releasing: see README.md (checklist + recorded steps) and params.suggested.yaml.');
   head.push(' * Credentials are never recorded: sensitive steps throw until you use the user profile / Credential Manager.');
   head.push(' */');
@@ -729,11 +1035,11 @@ function renderParamsYaml(params) {
 }
 
 function renderReadme({ name, url, table, warnings, params }) {
-  const esc = (v) => String(v === undefined ? '' : v).replace(/\|/g, '\\|').replace(/\n/g, ' ');
+  const esc = (v) => String(v === undefined ? '' : v).replace(/\|/g, '\\|').replace(/[\r\n\u2028\u2029]+/g, ' ');
   const rows = table.map((r) => `| ${r.map(esc).join(' | ')} |`).join('\n');
   return `# ${name}
 
-> **Generated by \`amx-record\` from a Playwright codegen recording of ${url || '(unknown url)'} - NOT production-ready until reviewed.**
+> **Generated by \`amx-record\` from a Playwright codegen recording of ${commentText(url).replace(/[\x60*|]/g, '') || '(unknown url)'} - NOT production-ready until reviewed.**
 
 ## Review checklist
 - [ ] Every recorded step below is what you intended (codegen cannot record conditions or loops; add them by hand).
@@ -837,4 +1143,5 @@ function writeProject(files, outDir, { fs = nodeFs, force = false } = {}) {
 module.exports = {
   convert, writeProject, extractBody, splitStatements, parseStatement, parseChain, scanLiterals, mask, detectRepeats, buildModel,
   looksSensitiveValue, tokenizeLits, jsStr, unquote, stringLiterals, describeSeg, CREDENTIAL_THROW, SENSITIVE_NAME,
+  commentText, parseLiteralArgs, emitLiteral, optionsOk, sanitizeActionArgs, canonLocSegs,
 };

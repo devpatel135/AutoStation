@@ -75,6 +75,7 @@ class Config:
     icon: str = ""
     wrapper_core_zip: str = ""
     framework_zip: str = ""       # optional: execution-framework (Node + node_modules) bundled in the installer
+    git_zip: str = ""             # optional: MinGit (git + ssh) bundled so the ssh log transport needs no pre-installed git
     automation_zip: str = ""      # optional: payload bundled INSIDE the installer (offline-capable first install)
     python_embed_zip: str = ""
     known_hosts_file: str = ""
@@ -125,7 +126,7 @@ def load_config(src: Path | dict, base_dir: Path | None = None) -> Config:
     return Config(automation=name, version=version, registry_url=registry, log_remote=log_remote, ring=ring,
                   llm_endpoint=llm, llm_model=_clean("llm_model", raw.get("llm_model", ""), allow_empty=True),
                   publisher=_clean("publisher", raw.get("publisher", "AUTOMAGIX")), icon=raw.get("icon", "") or "",
-                  wrapper_core_zip=raw.get("wrapper_core_zip", "") or "", automation_zip=raw.get("automation_zip", "") or "", framework_zip=raw.get("framework_zip", "") or "", python_embed_zip=raw.get("python_embed_zip", "") or "",
+                  wrapper_core_zip=raw.get("wrapper_core_zip", "") or "", automation_zip=raw.get("automation_zip", "") or "", framework_zip=raw.get("framework_zip", "") or "", git_zip=raw.get("git_zip", "") or "", python_embed_zip=raw.get("python_embed_zip", "") or "",
                   known_hosts_file=raw.get("known_hosts_file", "") or "", base_dir=base)
 
 
@@ -155,7 +156,7 @@ def render_nsi(cfg: Config, wrapper_version: str, flags: dict[str, bool], outfil
         "PUBLISHER": cfg.publisher, "DEFAULT_RING": cfg.ring, "REGISTRY_URL": cfg.registry_url, "LOG_REMOTE": cfg.log_remote,
         "LLM_ENDPOINT": cfg.llm_endpoint, "LLM_MODEL": cfg.llm_model, "WRAPPER_VERSION": numeric_version(wrapper_version),
         "STAGE_DIR": stage_dir, "OUTFILE": outfile, "ICON": icon,
-        "GIT_ARG": "" if cfg.log_remote.startswith(("git@", "ssh://")) else "-SkipGit",
+        "GIT_ARG": "" if cfg.log_remote.startswith(("git@", "ssh://")) and not flags.get("HAVE_GIT") else "-SkipGit",
     }
     out = tpl
     for key, val in values.items():
@@ -222,7 +223,7 @@ def stage_build(cfg: Config, stage: Path, env: dict, allow_missing_secrets: bool
     if stage.exists():
         shutil.rmtree(stage)
     stage.mkdir(parents=True)
-    flags = {"HAVE_FRAMEWORK": False, "HAVE_LOG_TOKEN": False, "HAVE_PAYLOAD": False, "HAVE_ICON": False, "HAVE_PYTHON_EMBED": False, "HAVE_SSH_KEY": False, "HAVE_TOKEN": False, "HAVE_KNOWN_HOSTS": False}
+    flags = {"HAVE_FRAMEWORK": False, "HAVE_GIT": False, "HAVE_LOG_TOKEN": False, "HAVE_PAYLOAD": False, "HAVE_ICON": False, "HAVE_PYTHON_EMBED": False, "HAVE_SSH_KEY": False, "HAVE_TOKEN": False, "HAVE_KNOWN_HOSTS": False}
 
     # scripts
     (stage / "scripts").mkdir()
@@ -254,6 +255,15 @@ def stage_build(cfg: Config, stage: Path, env: dict, allow_missing_secrets: bool
         if not (stage / "execution-framework" / "VERSION").exists() or not (stage / "execution-framework" / "index.js").exists():
             raise BuildError("framework_zip must contain VERSION and index.js (use package.py component execution-framework ...)")
         flags["HAVE_FRAMEWORK"] = True
+
+    if cfg.git_zip:
+        gz = _resolve(cfg, cfg.git_zip)
+        if not gz.is_file():
+            raise BuildError(f"git_zip not found: {gz}")
+        safe_extract(gz, stage / "git")
+        if not (stage / "git" / "cmd" / "git.exe").exists():
+            raise BuildError("git_zip must be a MinGit archive (cmd/git.exe) - use tools/fetch_mingit.py")
+        flags["HAVE_GIT"] = True
 
     # bundled automation payload: the installer itself is the trust root, so a first install works with no registry
     if cfg.automation_zip:

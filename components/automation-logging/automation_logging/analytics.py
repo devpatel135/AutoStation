@@ -12,6 +12,7 @@ from pathlib import Path
 
 from .common import (SEVERITY_ORDER, error_fingerprint, fingerprint, iso, parse_iso, percentile, read_json, utcnow,
                      wc_manifest)
+from .validate import MAX_BYTES, check_name_matches_record, validate_record
 
 DEFAULTS = {
     "window_days": 30,        # how much archive history is loaded/aggregated
@@ -34,14 +35,20 @@ class Data:
         self.evidence: list[dict] = sorted(evidence or [], key=lambda r: r["ts"])
         self.archive = archive  # archive root, so the dashboard can read an evidence payload on demand
         self.runs_by_id = {r["run_id"]: r for r in self.runs}
+        self.skipped_malformed = 0  # archive files that failed re-validation (set by load_archive)
 
 
 def load_archive(archive, now: datetime | None = None, window_days: int = DEFAULTS["window_days"]) -> Data:
-    """Read the archive. Date folders older than the window are skipped without being opened."""
+    """Read the archive. Date folders older than the window are skipped without being opened.
+
+    The archive is re-validated on read (an archive written by an older ingest, or edited by hand, is not trusted):
+    a malformed record is skipped and counted in ``Data.skipped_malformed``, never allowed to crash the build.
+    """
     archive = Path(archive)
     now = now or utcnow()
     cutoff = (now - timedelta(days=window_days)).date()
     out: dict[str, list] = {"run": [], "heartbeat": [], "lifecycle": [], "evidence": []}
+    skipped = 0
     for kind in out:
         for f in (archive / kind).glob("*/*/*/*/*.json") if (archive / kind).exists() else []:
             rel = f.relative_to(archive / kind).parts
@@ -51,14 +58,25 @@ def load_archive(archive, now: datetime | None = None, window_days: int = DEFAUL
                 continue
             if d < cutoff:
                 continue
-            rec = read_json(f)
-            if not isinstance(rec, dict) or rec.get("kind") != kind:
+            try:
+                if f.stat().st_size > MAX_BYTES[kind]:
+                    raise ValueError("oversized")
+                rec = read_json(f)
+                if not isinstance(rec, dict) or rec.get("kind") != kind:
+                    raise ValueError("not a record")
+                if validate_record(rec, kind) or check_name_matches_record(kind, rel[0], rec):
+                    raise ValueError("invalid")
+                rec["_path"] = f.relative_to(archive).as_posix()
+                if kind == "evidence":  # keep the index light: payloads are read on demand
+                    files = rec.get("files") if isinstance(rec.get("files"), list) else []
+                    rec["files"] = [{k: v for k, v in fl.items() if k != "data_b64"} for fl in files if isinstance(fl, dict)]
+            except Exception:  # noqa: BLE001 - any failure to read/validate one file only skips that file
+                skipped += 1
                 continue
-            rec["_path"] = f.relative_to(archive).as_posix()
-            if kind == "evidence":  # keep the index light: payloads are read on demand
-                rec["files"] = [{k: v for k, v in (fl or {}).items() if k != "data_b64"} for fl in (rec.get("files") or []) if isinstance(fl, dict)]
             out[kind].append(rec)
-    return Data(out["run"], out["heartbeat"], out["lifecycle"], out["evidence"], archive)
+    data = Data(out["run"], out["heartbeat"], out["lifecycle"], out["evidence"], archive)
+    data.skipped_malformed = skipped
+    return data
 
 
 # ---------------------------------------------------------------------------------------------- helpers
@@ -478,6 +496,7 @@ def compute(data: Data, manifest: dict | None, now: datetime | None = None, conf
     report = {
         "schema_version": 1, "generated_at": iso(now), "window_days": cfg["window_days"], "config": cfg, "fleet": fleet,
         "fleet_paused": bool((manifest.get("fleet") or {}).get("paused")),
+        "data_quality": {"skipped_malformed": int(getattr(data, "skipped_malformed", 0))},
         "automations": automations, "signals": signals, "by_ring": by_ring, "by_host": by_host,
         "items": item_metrics(runs), "retries": retry_stats(runs), "llm": llm_stats(runs),
         "trend": _daily(runs, now, cfg["trend_days"]), "versions": versions,

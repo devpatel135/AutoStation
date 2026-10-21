@@ -248,7 +248,7 @@ def test_poll_slot_runs_once_per_trigger(registry):
 def test_concurrent_run_is_refused(registry):
     setup_reg(registry)
     p = Paths().ensure()
-    p.lock_file("auto-a").write_text("123 0")
+    p.lock_file("auto-a").write_text(f"{__import__('os').getpid()} 0")  # a live owner (own pid)
     assert run().record is None
     p.lock_file("auto-a").unlink()
     assert run().record["status"] == "success"
@@ -324,14 +324,15 @@ def test_token_is_only_sent_to_the_registry_origin(monkeypatch):
         def __exit__(self, *a):
             return False
 
-        def read(self):
-            return b"x"
+        def read(self, n=-1):
+            data, self._done = (b"" if getattr(self, "_done", False) else b"x"), True
+            return data
 
-    def fake_urlopen(req, timeout=0):
+    def fake_open(req, timeout=0, allow_http_origin=None):
         seen.append((req.full_url, req.get_header("Private-token")))
         return FakeResp()
 
-    monkeypatch.setattr(selfheal.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(selfheal, "_open", fake_open)
     base = "https://registry.example.internal/pages"
     selfheal.fetch_bytes(base + "/manifest.yaml", "tok", trusted_base=base)
     selfheal.fetch_bytes("https://evil.example.com/pkg.zip", "tok", trusted_base=base)

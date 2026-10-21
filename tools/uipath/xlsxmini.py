@@ -14,11 +14,18 @@ import zipfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
+from xmlsafe import read_member, safe_xml_root
+
 _COL = re.compile(r"^([A-Z]+)(\d+)$")
 
 
 def _local(tag: str) -> str:
     return tag.rsplit("}", 1)[-1]
+
+
+def _xml(z: zipfile.ZipFile, name: str):
+    """Parse a workbook part: size-capped (streamed) and DTD/entity-free, because the workbook is attacker-supplied."""
+    return safe_xml_root(read_member(z, name))
 
 
 def _col_index(ref: str) -> int:
@@ -50,12 +57,12 @@ def read_xlsx(src) -> dict:
         names = set(z.namelist())
         shared: list[str] = []
         if "xl/sharedStrings.xml" in names:
-            root = ET.fromstring(z.read("xl/sharedStrings.xml"))
+            root = _xml(z, "xl/sharedStrings.xml")
             shared = [_text(si) for si in root if _local(si.tag) == "si"]
-        wb = ET.fromstring(z.read("xl/workbook.xml"))
+        wb = _xml(z, "xl/workbook.xml")
         rels = {}
         if "xl/_rels/workbook.xml.rels" in names:
-            for r in ET.fromstring(z.read("xl/_rels/workbook.xml.rels")):
+            for r in _xml(z, "xl/_rels/workbook.xml.rels"):
                 rels[r.get("Id")] = r.get("Target")
         out: dict = {}
         sheets = [s for el in wb.iter() if _local(el.tag) == "sheets" for s in el if _local(s.tag) == "sheet"]
@@ -67,7 +74,7 @@ def read_xlsx(src) -> dict:
             if path not in names:
                 continue
             rows: list[list] = []
-            for row in ET.fromstring(z.read(path)).iter():
+            for row in _xml(z, path).iter():
                 if _local(row.tag) != "row":
                     continue
                 cells: list = []

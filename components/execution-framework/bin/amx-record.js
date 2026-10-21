@@ -46,7 +46,14 @@ function parseArgs(argv) {
   if (!o.name) throw new Error('--name automation-<kebab-name> is required');
   if (!/^automation-[a-z0-9]+(?:-[a-z0-9]+)*$/.test(o.name)) throw new Error(`--name must look like automation-some-name (got ${o.name})`);
   if (!o.url && !o.fromFile) throw new Error('give the start URL to record, or --from-file <codegen.js>');
-  if (o.url && !/^https?:\/\//i.test(o.url)) throw new Error('the URL must start with http:// or https://');
+  if (o.url) {
+    if (!/^https?:\/\//i.test(o.url)) throw new Error('the URL must start with http:// or https://');
+    let u = null;
+    try { u = new URL(o.url); } catch (_) { u = null; }
+    if (!u || !/^https?:$/.test(u.protocol) || /[\u0000- \u007f\u2028\u2029]/.test(o.url) || u.username || u.password) {
+      throw new Error('the URL must be a valid http(s) URL without spaces, control characters or embedded credentials');
+    }
+  }
   if (o.profile) {
     const p = o.profile.toLowerCase();
     if (p === 'edge') o.channel = 'msedge';

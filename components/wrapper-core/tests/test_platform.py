@@ -77,7 +77,7 @@ def test_launchers_apply_pending_before_python_and_hide_window():
     p = Paths()
     cmd = launcher_cmd(p, "auto-a", "C:/py/python.exe")
     assert cmd.index("wrapper-core.pending") < cmd.index("-m wrapper_core run")
-    assert "PYTHONPATH" in cmd and "--slot %1" in cmd
+    assert "PYTHONPATH" in cmd and '--slot "%~1"' in cmd
     vbs = launcher_vbs(p, "auto-a")
     assert ", 0, True" in vbs                                         # window style 0 = hidden
     assert "maintain" in maintain_cmd(p, "C:/py/python.exe")
@@ -92,7 +92,7 @@ def test_startup_script_written(tmp_path):
 # ---- secrets -------------------------------------------------------------------------------------
 def test_protect_roundtrip_and_acl(tmp_path):
     src = tmp_path / "key"
-    src.write_bytes(b"-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----")
+    src.write_bytes(b"-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----")  # secret-scan: allow (fake fixture)
     dst = tmp_path / "secrets" / "logging_key.dpapi"
     secrets.protect_file(src, dst, delete_input=True)
     assert not src.exists()                                           # plaintext wiped
@@ -155,6 +155,7 @@ def test_git_transport_pushes_orphan_refs_without_fetching(tmp_path, monkeypatch
     secrets.protect_file(key, p.secrets / "logging_key.dpapi")
     monkeypatch.setenv("AUTOMAGIX_LOG_TRANSPORT", "git-ssh")
     monkeypatch.setenv("AUTOMAGIX_LOG_REMOTE", str(bare))   # local path works with the same push command
+    monkeypatch.setenv("AUTOMAGIX_LOG_GIT_MODE", "refs")
     assert transport.emit("run", "auto-a", "RID1", {"hello": "world"}, p) is True
     assert transport.emit("run", "auto-a", "RID2", {"hello": "again"}, p) is True
     refs = subprocess.run(["git", "--git-dir", str(bare), "for-each-ref", "--format=%(refname)"], capture_output=True, text=True).stdout.split()
@@ -162,6 +163,29 @@ def test_git_transport_pushes_orphan_refs_without_fetching(tmp_path, monkeypatch
     blob = subprocess.run(["git", "--git-dir", str(bare), "show", "ingest/pilot/run/auto-a/RID1:run/auto-a/RID1.json"], capture_output=True, text=True).stdout
     assert json.loads(blob) == {"hello": "world"}
     assert not list((p.secrets / "tmp").glob(".k*"))          # temp key wiped
+
+
+def test_git_transport_branch_mode_appends_to_one_branch(tmp_path, monkeypatch):
+    import shutil
+    import subprocess
+    if not shutil.which("git"):
+        pytest.skip("git not available")
+    bare = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "--bare", "-q", str(bare)], check=True)
+    p = Paths().ensure()
+    key = tmp_path / "k"
+    key.write_bytes(b"fake-key")
+    secrets.protect_file(key, p.secrets / "logging_key.dpapi")
+    monkeypatch.setenv("AUTOMAGIX_LOG_TRANSPORT", "git-ssh")
+    monkeypatch.setenv("AUTOMAGIX_LOG_REMOTE", str(bare))
+    assert transport.emit("run", "auto-a", "RID1", {"n": 1}, p) is True
+    assert transport.emit("run", "auto-a", "RID2", {"n": 2}, p) is True
+    assert transport.emit("run", "auto-a", "RID2", {"n": 2}, p) is True   # idempotent resend
+    refs = subprocess.run(["git", "--git-dir", str(bare), "for-each-ref", "--format=%(refname)"], capture_output=True, text=True).stdout.split()
+    assert refs == ["refs/heads/ingest"]
+    blob = subprocess.run(["git", "--git-dir", str(bare), "show", "ingest:ingest/pilot/run/auto-a/RID2.json"], capture_output=True, text=True).stdout
+    assert json.loads(blob) == {"n": 2}
+    assert subprocess.run(["git", "--git-dir", str(bare), "rev-list", "--count", "ingest"], capture_output=True, text=True).stdout.strip() == "2"
 
 
 def test_git_transport_failure_spools(tmp_path, monkeypatch):

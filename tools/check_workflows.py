@@ -6,7 +6,7 @@
 Checks (errors fail the exit code):
   * no tabs, trailing newline; parses with wrapper_core.miniyaml (keep workflows to that simple YAML subset)
   * required keys: name, on (>=1 trigger), jobs; every job has runs-on + steps (or uses); every step has exactly one of uses/run
-  * ``uses:`` actions are pinned to a version tag or SHA (never @main/@master)
+  * ``uses:`` actions are pinned to a full commit SHA; every job has timeout-minutes; no inputs./github.event.* inside a run: script
   * ``${{ }}`` expressions are balanced and only reference known contexts; ``inputs.X`` exists in workflow_dispatch.inputs
   * ``secrets.*`` is never used inside an ``if:`` (not available there - a classic silent failure)
   * ``needs:`` points at real jobs
@@ -27,6 +27,7 @@ from wrapper_core import miniyaml  # noqa: E402
 
 CONTEXTS = {"github", "inputs", "secrets", "vars", "env", "steps", "needs", "matrix", "runner", "job", "strategy", "jobs"}
 FUNCS = {"hashFiles", "format", "contains", "startsWith", "endsWith", "success", "failure", "always", "cancelled", "fromJSON", "toJSON", "join"}
+UNTRUSTED = re.compile(r"(?<![\w.])(inputs\.|github\.event\.(?!repository\.default_branch|workflow_run\.conclusion)|github\.head_ref)")
 EXPR = re.compile(r"\$\{\{(.*?)\}\}", re.S)
 PATH_RE = re.compile(r"(?<![\w$./{-])((?:tools|components|docs|\.github)/[A-Za-z0-9_./-]+\.(?:py|ps1|sh|yml|yaml|json|mjs|js|md|txt|in))")
 
@@ -80,17 +81,22 @@ def check_text(text: str, name: str = "workflow.yml", repo: Path = ROOT) -> list
                     errs.append(f"{label}: needs exactly one of 'uses' / 'run'")
                 if "uses" in st:
                     u = str(st["uses"])
-                    if not u.startswith("./") and not re.search(r"@(v\d+(\.\d+){0,2}|[0-9a-f]{40})$", u):
-                        errs.append(f"{label}: action '{u}' must be pinned to a version tag or commit SHA")
+                    if not u.startswith("./") and not re.search(r"@[0-9a-f]{40}$", u):
+                        errs.append(f"{label}: action '{u}' must be pinned to a full commit SHA (tools/pin_actions.py)")
                 if "if" in st and "secrets." in str(st["if"]):
                     errs.append(f"{label}: 'secrets.*' is not available in 'if:' (copy it to env first)")
                 if st.get("shell") not in (None, "bash", "pwsh", "powershell", "python", "sh", "cmd"):
                     errs.append(f"{label}: unknown shell {st.get('shell')!r}")
                 if "run" in st:
+                    for em in EXPR.finditer(str(st["run"])):
+                        if UNTRUSTED.search(em.group(1)):
+                            errs.append(f"{label}: untrusted '${{{{ {em.group(1).strip()[:40]} }}}}' interpolated into a shell script (pass it via env:)")
                     for m in PATH_RE.finditer(str(st["run"])):
                         rel = m.group(1)
                         if not any(c in rel for c in "*{$") and not (repo / rel).exists():
                             errs.append(f"{label}: references {rel}, which does not exist")
+        if "uses" not in job and "timeout-minutes" not in job:
+            errs.append(f"{name}: job '{jid}' needs timeout-minutes (a hung job burns minutes and holds secrets)")
         if "if" in (job or {}) and "secrets." in str(job["if"]):
             errs.append(f"{name}: job '{jid}' uses secrets.* in 'if:'")
         needs = job.get("needs")

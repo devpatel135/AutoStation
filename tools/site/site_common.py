@@ -171,6 +171,30 @@ def write_assets(out: Path) -> None:
     write(out, ".nojekyll", "")
 
 
+# Pages load only same-origin CSS/JS (plus the small inline theme bootstrap) and fetch only the same-origin search index.
+CSP = ("default-src 'none'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; "
+       "connect-src 'self'; base-uri 'none'; form-action 'none'")
+CSP_META = f'<meta http-equiv="Content-Security-Policy" content="{CSP}">'
+TELEMETRY_NOTICE = "Telemetry is submitted by installed clients and is not authenticated; treat numbers as advisory"
+TELEMETRY_BANNER = f'<div class="banner" role="note"><strong>Advisory data.</strong> {TELEMETRY_NOTICE}.</div>'
+
+
+# Hand-authored standalone pages copied into the site (docs/assessment.html): inline style/script and Google Fonts, nothing else.
+CSP_STANDALONE = ("default-src 'none'; img-src data:; style-src 'unsafe-inline'; font-src https://fonts.gstatic.com; "
+                  "style-src-elem 'unsafe-inline' https://fonts.googleapis.com; script-src 'unsafe-inline'; base-uri 'none'; form-action 'none'")
+
+
+def harden_html(text: str) -> str:
+    """Add the CSP meta tag and the advisory banner to a standalone HTML page we did not render ourselves (idempotent)."""
+    if "Content-Security-Policy" in text:
+        return text
+    meta = f'<meta http-equiv="Content-Security-Policy" content="{CSP_STANDALONE}">'
+    head = re.search(r"<head[^>]*>", text, re.I)
+    text = text[:head.end()] + meta + text[head.end():] if head else meta + text
+    body = re.search(r"<body[^>]*>", text, re.I)
+    return text[:body.end()] + TELEMETRY_BANNER + text[body.end():] if body else text
+
+
 def layout(title: str, body: str, *, cfg: SiteConfig, depth: int = 0, active: str = "", description: str = "", extra_head: str = "",
           extra_js: str = "") -> str:
     base = "../" * depth
@@ -180,6 +204,7 @@ def layout(title: str, body: str, *, cfg: SiteConfig, depth: int = 0, active: st
         banner = '<div class="demo-banner"><strong>DEMO DATA.</strong> Dashboards on this site are generated from synthetic fleet history until live analytics is enabled (see docs/PIPELINES.md).</div>'
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
+{CSP_META}
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{esc(title)} - {esc(cfg.title)}</title>
 {f'<meta name="description" content="{esc(description)}">' if description else ''}
@@ -191,7 +216,7 @@ def layout(title: str, body: str, *, cfg: SiteConfig, depth: int = 0, active: st
   <div class="brand">{theme.LOGO_SVG}<div><div class="eyebrow">{esc(cfg.title)} &middot; UiPath replacement platform</div><div style="font-weight:700">{esc(title)}</div></div></div>
   <nav class="main" aria-label="Main">{links}<button id="theme-toggle" type="button" title="Toggle light/dark theme" aria-label="Toggle theme">Theme</button></nav>
 </header>
-<main id="main">{banner}{body}</main>
+<main id="main">{TELEMETRY_BANNER}{banner}{body}</main>
 <footer class="foot">{esc(cfg.title)} &middot; built {esc(cfg.built_at)} {('&middot; commit ' + esc(cfg.commit)) if cfg.commit else ''} &middot;
 <a href="{esc(cfg.repo_url)}">{esc(cfg.repo)}</a> &middot; static site: no server, no tracking.</footer>
 </div><script src="{base}assets/site.js"></script>{extra_js}</body></html>

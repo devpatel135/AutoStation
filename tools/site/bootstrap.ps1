@@ -8,10 +8,19 @@
   What it does
     1. reads the install catalog published on the AutoStation site (install/catalog.json)
     2. downloads the installer for the automation (a GitHub Release asset)
-    3. computes the installer's SHA-256 and compares it with the hash published on the site (an independent origin) and,
-       when reachable, with the .sha256 file next to the release asset. Any mismatch deletes the file and stops.
-    4. shows the Authenticode signature status (unsigned dev builds are allowed but called out)
+    3. computes the installer's SHA-256 and compares it with the hash published on the site and, when reachable, with the
+       .sha256 file next to the release asset. Any mismatch deletes the file and stops.
+       WHAT THIS PROVES: a SHA-256 detects a corrupted or mis-delivered download. It does NOT prove who built the file: the site
+       and the release asset both come from the same GitHub repository (and the same publishing workflow), so someone who can
+       change one can change the other. Treat the hash as an integrity check, not as an independent source of trust.
+    4. checks the Authenticode signature. For ring 'broad' anything other than 'Valid' STOPS the install (override: -AllowUnsigned);
+       for 'dev' and 'pilot' an unsigned build only produces a warning.
     5. runs the per-user installer silently: /S /RING=<ring>   (use -NoRun to stop after verification)
+
+  PROVENANCE (recommended; needs the GitHub CLI, https://cli.github.com): the release workflow attests every installer. Verify
+  that the file was built by this repository's workflow, not merely that it matches a hash:
+      gh attestation verify <file> --repo <owner>/<repo>
+  This script prints the exact command for the downloaded file; pass -RequireAttestation to run it and stop if it fails.
 
 .EXAMPLE
   .\bootstrap.ps1 -Automation automation-hello-world -Ring pilot
@@ -21,12 +30,15 @@
 #>
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory = $true)][string]$Automation,
+    [Parameter(Mandatory = $true)][ValidatePattern('^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$')][string]$Automation,
     [ValidateSet('dev', 'pilot', 'broad')][string]$Ring = 'broad',
     [string]$CatalogUrl = '@@PAGES_URL@@install/catalog.json',
+    [string]$Repo = '@@REPO@@',
     [string]$InstallerPath,
     [switch]$NoRun,
-    [switch]$AllowUnverified
+    [switch]$AllowUnverified,
+    [switch]$AllowUnsigned,
+    [switch]$RequireAttestation
 )
 $ErrorActionPreference = 'Stop'
 
@@ -103,12 +115,41 @@ try {
         throw 'No published SHA-256 is available for this installer, so it cannot be verified. Ask the platform team, or re-run with -AllowUnverified if you accept that risk.'
     }
 
+    # Authenticode: fail closed for the production ring. A non-'Valid' status (unsigned, hash mismatch, untrusted root, or no way
+    # to check) stops 'broad' installs unless the operator explicitly passes -AllowUnsigned; dev/pilot builds only warn.
+    $sigProblem = $null
     try {
         $sig = Get-AuthenticodeSignature -LiteralPath $file
         if ($sig.Status -eq 'Valid') { Write-Host "Signature: valid ($($sig.SignerCertificate.Subject))" -ForegroundColor Green }
-        else { Write-Warning "Signature status: $($sig.Status). Unsigned dev builds show 'Unknown publisher'; production releases should be signed." }
+        else { $sigProblem = "Signature status: $($sig.Status). Unsigned dev builds show 'Unknown publisher'; production releases must be signed." }
     } catch {
-        Write-Warning "Authenticode check is not available on this platform: $($_.Exception.Message)"
+        $sigProblem = "Authenticode check is not available on this platform: $($_.Exception.Message)"
+    }
+    if ($sigProblem) {
+        if ($Ring -eq 'broad' -and -not $AllowUnsigned) {
+            if ($downloaded) { Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue }
+            throw "$sigProblem Refusing to install into ring 'broad' without a valid signature (re-run with -AllowUnsigned only if your security team approves)."
+        }
+        Write-Warning $sigProblem
+    }
+
+    # Provenance: a hash only detects corruption; the attestation proves the file was built by this repository's workflow.
+    if ($Repo -and $Repo -notmatch '^@@') {
+        $attest = "gh attestation verify `"$file`" --repo $Repo"
+        if ($RequireAttestation) {
+            if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
+                if ($downloaded) { Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue }
+                throw 'The GitHub CLI (gh) is required for -RequireAttestation: https://cli.github.com'
+            }
+            & gh attestation verify $file --repo $Repo
+            if ($LASTEXITCODE -ne 0) {
+                if ($downloaded) { Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue }
+                throw "Attestation verification FAILED for $file. Not installing."
+            }
+            Write-Host 'Build provenance verified (GitHub attestation).' -ForegroundColor Green
+        } else {
+            Write-Host "Provenance (recommended): $attest" -ForegroundColor Yellow
+        }
     }
 
     if ($NoRun) {

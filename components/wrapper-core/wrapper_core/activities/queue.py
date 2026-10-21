@@ -299,7 +299,10 @@ class Queue:
             log_event("queue_requeue_stale", {"queue": self.name, "items": touched})
         return touched
 
-    def export_csv(self, path: "str | Path") -> str:
+    def export_csv(self, path: "str | Path", escape_formulas: bool = True) -> str:
+        """Dump all items. Text that Excel would evaluate as a formula (``= + - @ tab CR``) is prefixed with ``'`` unless
+        ``escape_formulas=False`` (queue payloads/errors can contain attacker-supplied text)."""
+        from .excel import csv_safe
         conn = self._connect()
         try:
             rows = conn.execute("SELECT * FROM items ORDER BY id").fetchall()
@@ -311,7 +314,7 @@ class Queue:
             w = csv.writer(f)
             w.writerow(_COLUMNS)
             for r in rows:
-                w.writerow([r[c] for c in _COLUMNS])
+                w.writerow([csv_safe(r[c], escape_formulas) for c in _COLUMNS])
         return str(dest)
 
 

@@ -108,9 +108,12 @@ permissions:
 jobs:
   a:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      WHO: ${{ inputs.who }}
     steps:
-      - uses: actions/checkout@v4
-      - run: echo "${{ inputs.who }} ${{ github.sha }}"
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - run: echo "$WHO ${{ github.sha }}"
 """
 
 
@@ -120,15 +123,18 @@ def test_checker_accepts_a_good_workflow():
 
 @pytest.mark.parametrize("mutate,expect", [
     (lambda t: t.replace("  push:", "\tpush:"), "tab"),
-    (lambda t: t.replace("actions/checkout@v4", "actions/checkout@main"), "pinned"),
+    (lambda t: t.replace("actions/checkout@11d5960a326750d5838078e36cf38b85af677262", "actions/checkout@main"), "pinned"),
+    (lambda t: t.replace("actions/checkout@11d5960a326750d5838078e36cf38b85af677262", "actions/checkout@v4"), "full commit SHA"),
+    (lambda t: t.replace("    timeout-minutes: 5\n", ""), "timeout-minutes"),
+    (lambda t: t.replace("echo \"$WHO", "echo \"${{ inputs.who }}"), "untrusted"),
     (lambda t: t.replace("permissions:\n  contents: read\n", ""), "permissions"),
-    (lambda t: t.replace("${{ inputs.who }}", "${{ inputs.nope }}"), "inputs.nope"),
+    (lambda t: t.replace("WHO: ${{ inputs.who }}", "WHO: ${{ inputs.nope }}"), "inputs.nope"),
     (lambda t: t.replace("${{ github.sha }}", "${{ gitub.sha }}"), "unknown context"),
     (lambda t: t.replace("${{ github.sha }}", "${{ github.sha"), "unbalanced"),
     (lambda t: t.replace("- run: echo", "- if: ${{ secrets.X == 'a' }}\n        run: echo"), "secrets"),
     (lambda t: t.replace("- run: echo", "- run: python tools/does_not_exist.py\n      - run: echo"), "does_not_exist"),
     (lambda t: t.replace("runs-on: ubuntu-latest", "needs: ghost\n    runs-on: ubuntu-latest"), "unknown job"),
-    (lambda t: t.replace("      - uses: actions/checkout@v4\n", "      - uses: actions/checkout@v4\n        run: echo both\n"), "exactly one"),
+    (lambda t: t.replace("      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262\n", "      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262\n        run: echo both\n"), "exactly one"),
     (lambda t: t.replace("name: x\n", ""), "missing top-level 'name'"),
 ])
 def test_checker_catches_common_mistakes(mutate, expect):

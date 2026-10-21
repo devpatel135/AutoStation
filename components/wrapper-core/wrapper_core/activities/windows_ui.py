@@ -92,10 +92,13 @@ function Do-Find($a) {
     $scope = if ($a.scope) { Get-El $a.scope } else { [System.Windows.Automation.AutomationElement]::RootElement }
     $ts = if ($a.children_only) { [System.Windows.Automation.TreeScope]::Children } else { [System.Windows.Automation.TreeScope]::Descendants }
     $cond = Get-Conds $a
+    # a caller-supplied regex gets a match timeout: a pathological pattern must not hang the UI host (ReDoS)
+    $rx = $null
+    if ($a.name_regex) { $rx = New-Object System.Text.RegularExpressions.Regex([string]$a.name_regex, [System.Text.RegularExpressions.RegexOptions]::None, [TimeSpan]::FromSeconds(2)) }
     $deadline = [DateTime]::UtcNow.AddMilliseconds([int]$a.timeout_ms)
     do {
         foreach ($el in $scope.FindAll($ts, $cond)) {
-            if ($a.name_regex -and -not [regex]::IsMatch([string]$el.Current.Name, [string]$a.name_regex)) { continue }
+            if ($rx -and -not $rx.IsMatch([string]$el.Current.Name)) { continue }
             return $el
         }
         Start-Sleep -Milliseconds 200
@@ -492,8 +495,21 @@ def get_text(element: Element) -> str:
     return str(element.session.call("get_text", handle=element.handle).get("text", ""))
 
 
-def send_keys(keys: str, element: Optional[Element] = None, session: Optional[Session] = None) -> None:
-    """Send keystrokes using .NET SendKeys syntax (``^c`` Ctrl+C, ``%{F4}`` Alt+F4, ``{ENTER}``, ``{TAB}``). Focuses `element` first."""
+_SENDKEYS_SPECIAL = set("+^%~(){}[]")
+
+
+def escape_keys(text: str) -> str:
+    """Escape SendKeys metacharacters so `text` is typed literally (``+ ^ % ~ ( ) { } [ ]`` become ``{x}``)."""
+    return "".join("{" + c + "}" if c in _SENDKEYS_SPECIAL else c for c in text)
+
+
+def send_keys(keys: str, element: Optional[Element] = None, session: Optional[Session] = None, literal: bool = False) -> None:
+    """Send keystrokes using .NET SendKeys syntax (``^c`` Ctrl+C, ``%{F4}`` Alt+F4, ``{ENTER}``, ``{TAB}``). Focuses `element` first.
+
+    `keys` is interpreted as key *commands* (``%{F4}`` closes a window): never pass scraped or user-supplied text as-is.
+    For plain text pass ``literal=True`` (metacharacters escaped) or use :func:`set_text`."""
+    if literal:
+        keys = escape_keys(keys)
     s = element.session if element is not None else _sess(session)
     s.call("send_keys", handle=element.handle if element else None, keys=keys)
     emit("windows_ui.send_keys", chars=len(keys))

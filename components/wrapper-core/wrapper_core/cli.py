@@ -16,6 +16,9 @@ def main(argv: list[str] | None = None) -> int:
     if argv and argv[0] == "doctor":
         from . import doctor
         return doctor.main(argv[1:])
+    if argv and argv[0] == "trust":
+        from . import trust
+        return trust.main(argv[1:])
     if argv and argv[0] == "assist":
         from . import assist
         return assist.main(argv[1:])

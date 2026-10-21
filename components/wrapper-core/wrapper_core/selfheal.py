@@ -7,6 +7,7 @@ already installed: the last cached manifest is used (and the run log records it)
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -19,9 +20,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import manifest as mf
-from . import miniyaml, secrets, versions
+from . import miniyaml, secrets, trust, versions
 from ._version import __version__ as WRAPPER_VERSION
-from .paths import Paths, get_logger
+from .paths import Paths, check_name, get_logger
 from .util import atomic_write_text, read_json, sha256_file, write_json
 
 COMPONENTS = ("wrapper-core", "execution-framework")
@@ -46,6 +47,13 @@ class HealResult:
 
 
 # --- transport ---------------------------------------------------------------------------------------
+MAX_MANIFEST_BYTES = 4 * 1024 * 1024
+MAX_DOWNLOAD_BYTES = 600 * 1024 * 1024
+MAX_EXTRACT_BYTES = 500 * 1024 * 1024  # total uncompressed size of one package
+MAX_EXTRACT_MEMBERS = 20_000
+_AUTH_HEADERS = ("Private-token", "Authorization", "Cookie")
+
+
 def _is_url(s: str) -> bool:
     return s.startswith(("http://", "https://"))
 
@@ -66,18 +74,80 @@ def _same_origin(a: str, b: str | None) -> bool:
     return (x.scheme, x.netloc.lower()) == (y.scheme, y.netloc.lower())
 
 
+def _is_loopback(host: str | None) -> bool:
+    return (host or "").lower() in ("localhost", "127.0.0.1", "::1", "[::1]")
+
+
+def check_url(url: str, allow_http_origin: str | None = None) -> str:
+    """URL policy for everything self-heal downloads: http(s) only, no embedded credentials, and plain http only for
+    loopback or for the operator-configured registry origin itself. Returns the URL or raises HealError."""
+    from urllib.parse import urlsplit
+    try:
+        sp = urlsplit(url)
+        host, _ = sp.hostname, sp.port
+    except ValueError as exc:
+        raise HealError(f"malformed URL {url[:80]!r}") from exc
+    if sp.scheme not in ("http", "https") or not host:
+        raise HealError(f"refusing URL with scheme {sp.scheme or '(none)'!r}: {url[:80]}")
+    if sp.username or sp.password:
+        raise HealError("refusing URL with embedded credentials")
+    if sp.scheme == "http" and not _is_loopback(host) and not (allow_http_origin and _same_origin(url, allow_http_origin)):
+        raise HealError(f"refusing non-https URL {url[:80]}")
+    return url
+
+
+class _SafeRedirect(urllib.request.HTTPRedirectHandler):
+    """Follow redirects only to URLs that pass ``check_url``, and never carry credentials to a different origin."""
+
+    def __init__(self, allow_http_origin: str | None = None):
+        self.allow_http_origin = allow_http_origin
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        check_url(newurl, self.allow_http_origin)
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new is not None and not _same_origin(newurl, req.full_url):
+            for h in _AUTH_HEADERS:
+                new.headers.pop(h, None)
+                new.unredirected_hdrs.pop(h, None)
+                new.headers.pop(h.lower(), None)
+        return new
+
+
+def _open(req: urllib.request.Request, timeout: int, allow_http_origin: str | None = None):
+    return urllib.request.build_opener(_SafeRedirect(allow_http_origin)).open(req, timeout=timeout)
+
+
+def _read_capped(resp, max_bytes: int) -> bytes:
+    chunks, total = [], 0
+    while True:
+        chunk = resp.read(1 << 20)
+        if not chunk:
+            return b"".join(chunks)
+        total += len(chunk)
+        if total > max_bytes:
+            raise HealError(f"response larger than {max_bytes} bytes")
+        chunks.append(chunk)
+
+
 def fetch_bytes(location: str, token: str | None = None, retries: int = 3, timeout_s: int = 60,
-                trusted_base: str | None = None) -> bytes:
+                trusted_base: str | None = None, max_bytes: int = MAX_DOWNLOAD_BYTES) -> bytes:
     """Read a registry file from an http(s) URL (GitLab read token) or a local path/UNC share.
 
-    The token is only sent to the registry's own origin (``trusted_base``): a manifest entry pointing at another
-    host must never receive it.
+    The token is only sent to the registry's own origin (``trusted_base``), also across redirects: a manifest entry
+    pointing at another host must never receive it. Non-https URLs and non-http(s) schemes are refused (``check_url``).
     """
     if not _is_url(location):
+        if "://" in location and not location.lower().startswith("file://"):
+            raise HealError(f"refusing URL with unsupported scheme: {location[:80]}")
         try:
-            return Path(location.replace("file://", "")).read_bytes()
+            path = Path(location.replace("file://", ""))
+            if path.stat().st_size > max_bytes:
+                raise HealError(f"{location} larger than {max_bytes} bytes")
+            return path.read_bytes()
         except OSError as exc:
             raise HealError(f"cannot read {location}: {exc}") from exc
+    http_origin = trusted_base if trusted_base and trusted_base.startswith("http://") else None
+    check_url(location, http_origin)
     headers = {"User-Agent": f"wrapper-core/{WRAPPER_VERSION}"}
     if token and _same_origin(location, trusted_base):
         headers["PRIVATE-TOKEN"] = token
@@ -85,10 +155,10 @@ def fetch_bytes(location: str, token: str | None = None, retries: int = 3, timeo
     for attempt in range(retries):
         try:
             req = urllib.request.Request(location, headers=headers)
-            with urllib.request.urlopen(req, timeout=timeout_s) as resp:  # noqa: S310 - operator-configured registry
-                return resp.read()
+            with _open(req, timeout_s, http_origin) as resp:  # noqa: S310 - scheme/host policy enforced by check_url
+                return _read_capped(resp, max_bytes)
         except urllib.error.HTTPError as exc:
-            if exc.code in (401, 403, 404):  # not retryable
+            if exc.code in (301, 302, 303, 307, 308, 401, 403, 404):  # redirects land here only when refused; not retryable
                 raise HealError(f"HTTP {exc.code} fetching {location}") from exc
             last = exc
         except (urllib.error.URLError, OSError) as exc:
@@ -97,15 +167,52 @@ def fetch_bytes(location: str, token: str | None = None, retries: int = 3, timeo
     raise HealError(f"cannot fetch {location}: {last}")
 
 
-def safe_extract(zip_path: Path, dest: Path) -> None:
+def _member_is_unsafe(info: zipfile.ZipInfo) -> bool:
+    name = info.filename
+    if not name or name.startswith(("/", "\\")) or "\\" in name or ":" in name or "\x00" in name:
+        return True
+    if any(part == ".." for part in name.split("/")):
+        return True
+    mode = (info.external_attr >> 16) & 0xFFFF
+    return (mode & 0o170000) == 0o120000  # symlink
+
+
+def safe_extract(zip_path: Path, dest: Path, max_total: int = MAX_EXTRACT_BYTES, max_members: int = MAX_EXTRACT_MEMBERS) -> None:
+    """Extract a package: zip-slip, symlink and drive/ADS names rejected; member count and the *actual* decompressed byte
+    count capped (the declared sizes in the zip header are attacker-controlled, so they are not trusted). On any failure
+    the partial extraction is removed."""
     dest.mkdir(parents=True, exist_ok=True)
     root = dest.resolve()
-    with zipfile.ZipFile(zip_path) as z:
-        for info in z.infolist():
-            target = (dest / info.filename).resolve()
-            if root != target and root not in target.parents:
-                raise HealError(f"unsafe path in archive: {info.filename}")
-        z.extractall(dest)
+    try:
+        with zipfile.ZipFile(zip_path) as z:
+            infos = z.infolist()
+            if len(infos) > max_members:
+                raise HealError(f"archive has more than {max_members} members")
+            for info in infos:
+                target = (dest / info.filename).resolve()
+                if _member_is_unsafe(info) or (root != target and root not in target.parents):
+                    raise HealError(f"unsafe path in archive: {info.filename}")
+            if sum(i.file_size for i in infos) > max_total * 8:  # cheap pre-check; the streaming count below is authoritative
+                raise HealError("archive declares an implausible uncompressed size")
+            total = 0
+            for info in infos:
+                target = dest / info.filename
+                if info.is_dir():
+                    target.mkdir(parents=True, exist_ok=True)
+                    continue
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with z.open(info) as src, open(target, "wb") as out:
+                    while True:
+                        chunk = src.read(1 << 20)
+                        if not chunk:
+                            break
+                        total += len(chunk)
+                        if total > max_total:
+                            raise HealError(f"archive expands beyond {max_total} bytes (zip bomb?)")
+                        out.write(chunk)
+    except (HealError, zipfile.BadZipFile, OSError, RuntimeError, NotImplementedError):
+        shutil.rmtree(dest, ignore_errors=True)
+        raise
 
 
 # --- installation ------------------------------------------------------------------------------------
@@ -159,6 +266,8 @@ def _swap(staging: Path, target: Path) -> None:
 
 
 def download_and_stage(location: str, expected_sha: str, staging: Path, token: str | None, base: str | None = None) -> None:
+    if base and _is_url(base) and not _is_url(location):
+        raise HealError(f"manifest points a URL registry at a local path: {location[:80]}")  # a manifest must not read local files
     data = fetch_bytes(location, token, trusted_base=base)
     with tempfile.TemporaryDirectory(prefix="amx-dl-") as tmp:
         zp = Path(tmp) / "pkg.zip"
@@ -275,27 +384,132 @@ def install_bundled(paths: Paths, name: str) -> str | None:
 
 
 # --- the pass ----------------------------------------------------------------------------------------
-def fetch_manifest(paths: Paths, base: str, token: str | None) -> tuple[dict, bool]:
-    """Return (manifest, offline). Falls back to the cached copy when the registry is unreachable."""
-    log = get_logger(paths)
+class _Untrusted(Exception):
+    """The fetched manifest failed signature policy (reason in ``str(exc)``)."""
+
+
+def _read_cached_manifest(paths: Paths, keys: list) -> tuple[bytes, dict]:
+    """The cached manifest bytes + parsed manifest, re-verified against the pinned keys when any are configured
+    (a tampered cache, or one saved before a key was pinned, is ignored: fail closed)."""
+    raw = paths.manifest_cache.read_bytes()
+    if keys:
+        try:
+            trust.verify_manifest(raw, paths.manifest_sig_cache.read_bytes(), keys)
+        except OSError as exc:
+            raise HealError("cached manifest has no signature") from exc
+        except trust.TrustError as exc:
+            raise HealError(f"cached manifest signature invalid: {exc}") from exc
     try:
-        text = fetch_bytes(resolve_location("manifest.yaml", base), token, trusted_base=base).decode("utf-8")
+        return raw, mf.parse(raw.decode("utf-8"))
+    except ValueError as exc:  # ManifestError and UnicodeDecodeError
+        raise HealError(f"cached manifest unusable: {exc}") from exc
+
+
+def _check_rollback(paths: Paths, signed_at: str, sha: str) -> None:
+    try:
+        last = paths.manifest_signed_at.read_text(encoding="utf-8").strip()
+    except OSError:
+        return
+    try:
+        newer = trust.parse_iso(signed_at) > trust.parse_iso(last)
+        older = trust.parse_iso(signed_at) < trust.parse_iso(last)
+    except trust.TrustError:
+        return  # corrupt high-water mark: do not lock the fleet out; the signature itself still has to verify
+    if older:
+        raise _Untrusted(f"rollback refused: signed_at {signed_at} is older than the newest accepted {last}")
+    if not newer:  # same timestamp: only the exact manifest we already accepted
+        try:
+            cached = json.loads(paths.manifest_sig_cache.read_text(encoding="utf-8"))
+            if str(cached.get("manifest_sha256", "")).lower() != sha.lower():
+                raise _Untrusted(f"a different manifest carries the already-accepted signed_at {signed_at}")
+        except (OSError, ValueError, AttributeError):
+            pass
+
+
+def fetch_manifest(paths: Paths, base: str, token: str | None, notes: list | None = None, cfg: dict | None = None) -> tuple[dict, bool]:
+    """Return (manifest, offline). Falls back to the cached copy when the registry is unreachable or its manifest is
+    rejected (bad YAML, bad/missing signature, rollback). With a pinned key (``trust``) an unverified manifest is NEVER
+    used and never replaces the cache; rejection reasons are appended to ``notes``."""
+    log = get_logger(paths)
+    keys = trust.configured_keys(cfg)
+    try:
+        raw = fetch_bytes(resolve_location("manifest.yaml", base), token, trusted_base=base, max_bytes=MAX_MANIFEST_BYTES)
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise mf.ManifestError("manifest is not UTF-8") from exc
         m = mf.parse(text)
-        atomic_write_text(paths.manifest_cache, text)
+        sig_raw = None
+        signed_at = ""
+        if keys:
+            try:
+                sig_raw = fetch_bytes(resolve_location("manifest.yaml.sig", base), token, retries=1, trusted_base=base,
+                                      max_bytes=64 * 1024)
+            except HealError as exc:
+                raise _Untrusted(f"signature file unavailable ({exc})") from exc
+            try:
+                signed_at = trust.verify_manifest(raw, sig_raw, keys)
+            except trust.TrustError as exc:
+                raise _Untrusted(str(exc)) from exc
+            _check_rollback(paths, signed_at, hashlib.sha256(raw).hexdigest())
+        else:
+            log.warning("registry manifest is unsigned and no registry key is pinned (set registry_pubkeys in platform.json)")
+        try:
+            if sig_raw is not None:
+                atomic_write_text(paths.manifest_sig_cache, sig_raw.decode("utf-8"))
+            else:
+                paths.manifest_sig_cache.unlink(missing_ok=True)
+            atomic_write_text(paths.manifest_cache, text)
+            if keys:
+                atomic_write_text(paths.manifest_signed_at, signed_at + "\n")
+        except OSError as exc:
+            log.warning("cannot cache manifest: %s", exc)
         return m, False
+    except _Untrusted as exc:
+        log.error("manifest signature invalid: %s", exc)
+        if notes is not None:
+            notes.append(f"manifest signature invalid: {exc}")
+        failure: Exception = exc
     except (HealError, mf.ManifestError) as exc:
         log.warning("manifest fetch failed: %s", exc)
-        if paths.manifest_cache.exists():
-            return mf.parse(paths.manifest_cache.read_text(encoding="utf-8")), True
-        raise HealError(f"registry unreachable and no cached manifest: {exc}") from exc
+        failure = exc
+    if paths.manifest_cache.exists():
+        try:
+            return _read_cached_manifest(paths, keys)[1], True
+        except HealError as exc:
+            log.error("cached manifest rejected: %s", exc)
+            if notes is not None:
+                notes.append(str(exc))
+            failure = exc
+    raise HealError(f"registry unreachable or untrusted and no usable cached manifest: {failure}") from failure
 
 
 def run(paths: Paths, cfg: dict, automation: str | None) -> HealResult:
-    """The self-heal pass for one automation (or just the shared components when `automation` is None)."""
+    """The self-heal pass for one automation (or just the shared components when `automation` is None).
+    Never raises: a hostile/garbled registry degrades to an error note and the installed payload keeps running."""
+    res = HealResult(ring=str(cfg.get("ring", "")))
+    try:
+        return _run(paths, cfg, automation, res)
+    except Exception as exc:  # noqa: BLE001
+        get_logger(paths).error("self-heal crashed: %s: %s", type(exc).__name__, exc)
+        res.errors.append(f"self-heal crashed: {type(exc).__name__}: {str(exc)[:200]}")
+        try:
+            res.versions = _versions_snapshot(paths)
+        except Exception:  # noqa: BLE001
+            res.versions = {}
+        return res
+
+
+def _run(paths: Paths, cfg: dict, automation: str | None, res: HealResult) -> HealResult:
     ring = cfg["ring"]
-    res = HealResult(ring=ring)
     log = get_logger(paths)
     if automation:
+        try:
+            check_name(automation)
+        except ValueError as exc:
+            res.errors.append(str(exc))
+            res.versions = _versions_snapshot(paths)
+            return res
         try:
             note = install_bundled(paths, automation)
             if note:
@@ -310,7 +524,7 @@ def run(paths: Paths, cfg: dict, automation: str | None) -> HealResult:
         return res
     token = secrets.get_registry_token(paths)
     try:
-        m, offline = fetch_manifest(paths, base, token)
+        m, offline = fetch_manifest(paths, base, token, notes=res.errors, cfg=cfg)
     except HealError as exc:
         res.errors.append(str(exc))
         res.versions = _versions_snapshot(paths)

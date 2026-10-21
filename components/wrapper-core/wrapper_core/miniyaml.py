@@ -105,9 +105,19 @@ def _scalar(text: str) -> Any:
     return t
 
 
+MAX_DEPTH = 50
+MAX_BYTES = 2_000_000
+
+
 class _Flow:
     def __init__(self, text: str):
-        self.s, self.i = text, 0
+        self.s, self.i, self.depth = text, 0, 0
+
+    def _cur(self) -> str:
+        """Current character; an unterminated flow collection is a YamlError, never an IndexError."""
+        if self.i >= len(self.s):
+            raise YamlError("unterminated flow collection (missing ] or })")
+        return self.s[self.i]
 
     def _ws(self):
         while self.i < len(self.s) and self.s[self.i] in " \t\r\n":
@@ -124,39 +134,50 @@ class _Flow:
         self._ws()
         if self.i >= len(self.s):
             raise YamlError("unexpected end of flow value")
-        c = self.s[self.i]
+        c = self._cur()
+        if c in "[{":
+            self.depth += 1
+            if self.depth > MAX_DEPTH:
+                raise YamlError(f"flow collections nested deeper than {MAX_DEPTH}")
+            try:
+                return self._collection(c)
+            finally:
+                self.depth -= 1
+        return _scalar(self._token(stop=",]}"))
+
+    def _collection(self, c: str):
         if c == "[":
             self.i += 1
             out = []
             while True:
                 self._ws()
-                if self.s[self.i] == "]":
+                if self._cur() == "]":
                     self.i += 1
                     return out
                 out.append(self._value())
                 self._ws()
-                if self.s[self.i] == ",":
+                if self._cur() == ",":
                     self.i += 1
-                elif self.s[self.i] != "]":
+                elif self._cur() != "]":
                     raise YamlError(f"expected , or ] in flow sequence near {self.s[self.i:]!r}")
         if c == "{":
             self.i += 1
             out = {}
             while True:
                 self._ws()
-                if self.s[self.i] == "}":
+                if self._cur() == "}":
                     self.i += 1
                     return out
                 key = self._token(stop=":")
                 self._ws()
-                if self.s[self.i] != ":":
+                if self._cur() != ":":
                     raise YamlError(f"expected : in flow mapping near {self.s[self.i:]!r}")
                 self.i += 1
                 out[str(_scalar(key))] = self._value()
                 self._ws()
-                if self.s[self.i] == ",":
+                if self._cur() == ",":
                     self.i += 1
-                elif self.s[self.i] != "}":
+                elif self._cur() != "}":
                     raise YamlError(f"expected , or }} in flow mapping near {self.s[self.i:]!r}")
         return _scalar(self._token(stop=",]}"))
 
@@ -205,13 +226,19 @@ class _Parser:
         return v
 
     def _block(self, indent: int):
-        content = self.lines[self.pos][1]
-        if content == "-" or content.startswith("- "):
-            return self._seq(indent)
-        if _split_key(content) is not None:
-            return self._map(indent)
-        self.pos += 1
-        return _value(content)
+        self.depth = getattr(self, "depth", 0) + 1
+        try:
+            if self.depth > MAX_DEPTH:
+                raise YamlError(f"blocks nested deeper than {MAX_DEPTH}")
+            content = self.lines[self.pos][1]
+            if content == "-" or content.startswith("- "):
+                return self._seq(indent)
+            if _split_key(content) is not None:
+                return self._map(indent)
+            self.pos += 1
+            return _value(content)
+        finally:
+            self.depth -= 1
 
     def _child(self, parent_indent: int, allow_same_indent_seq: bool = False):
         """Parse the nested block (or None) that follows a ``key:`` / ``-`` with an empty value."""
@@ -303,7 +330,14 @@ class _Parser:
 def loads(text: str) -> Any:
     if text.startswith("﻿"):
         text = text[1:]
-    return _Parser(text).parse()
+    if len(text) > MAX_BYTES:
+        raise YamlError(f"document larger than {MAX_BYTES} characters")
+    try:
+        return _Parser(text).parse()
+    except YamlError:
+        raise
+    except (RecursionError, IndexError, ValueError, TypeError) as exc:  # hostile input must never escape as a crash
+        raise YamlError(f"cannot parse document: {type(exc).__name__}") from exc
 
 
 def load(path) -> Any:

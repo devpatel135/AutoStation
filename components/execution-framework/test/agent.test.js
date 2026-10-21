@@ -233,3 +233,68 @@ test('checkOrigin / isIrreversible / StallDetector units', () => {
   assert.equal(d2.record('c', 'h'), null);
   assert.match(d2.record('d', 'h'), /unchanged for 4/);
 });
+
+test('irreversible gate: every Enter/Return press is blocked (with or without a selector, any modifier), unless allowed', async () => {
+  for (const key of ['Enter', 'Return', 'NumpadEnter', 'Control+Enter', 'shift+enter']) {
+    for (const args of [{ key }, { key, selector: '#q' }]) {
+      const r = await run([call('press', args), call('done', { result: 1 })], {}, {});
+      assert.deepEqual(r.io.acts, [], `${key} ${JSON.stringify(args)}`);
+      assert.equal(r.log.named('agent_step')[0].data.gate_reason, 'enter_key');
+    }
+  }
+  const ok = await run([call('press', { key: 'Tab' }), call('done', { result: 1 })], {}, {});
+  assert.deepEqual(ok.io.acts, [['press', 'Tab', undefined]]);
+  const allowed = await run([call('press', { key: 'Enter' }), call('done', { result: 1 })], { params: { allow_irreversible: 'true' } }, {});
+  assert.deepEqual(allowed.io.acts, [['press', 'Enter', undefined]]);
+});
+
+test('classifyElement: structurally submit-like elements are blocked whatever their label says', () => {
+  const blocked = [
+    [{ tag: 'button', type: 'submit', text: 'Next' }, 'submit_type'],
+    [{ tag: 'input', type: 'submit', text: 'Continue' }, 'submit_input'],
+    [{ tag: 'input', type: 'image', text: '' }, 'submit_input'],
+    [{ tag: 'button', type: 'button', inForm: true, text: 'Next' }, 'button_in_form'],
+    [{ tag: 'button', type: 'button', formAssoc: true, text: 'Next' }, 'button_in_form'],
+    [{ tag: 'div', role: 'button', inForm: true, text: 'Go' }, 'form_button'],
+    [{ tag: 'input', type: 'button', inForm: true, text: 'Go' }, 'form_button'],
+  ];
+  for (const [info, reason] of blocked) assert.deepEqual(agent.classifyElement(info, '#x'), { irreversible: true, reason }, JSON.stringify(info));
+  assert.equal(agent.classifyElement({ tag: 'button', type: 'button', text: 'Next page' }, '#n').irreversible, false);
+  assert.equal(agent.classifyElement({ tag: 'a', type: '', role: '', text: 'Reports' }, 'a.nav').irreversible, false);
+  assert.equal(agent.classifyElement('Next page', '#n').irreversible, false);
+});
+
+test('classifyElement: broadened label list matches text, value, aria-label, title; look-alike words do not', () => {
+  const words = ['Submit', 'Send', 'Confirm', 'Place order', 'Place the order', 'Buy now', 'Purchase', 'Pay', 'Payment', 'Checkout', 'Check out', 'Delete',
+    'Remove', 'Accept all', 'I agree', 'Allow', 'Grant access', 'Approve', 'Authorize', 'Authorise', 'Sign', 'Sign up', 'Transfer', 'Publish', 'Post', 'Apply', 'Applying', 'Subscribe', 'Deleted'];
+  for (const w of words) {
+    assert.equal(agent.classifyElement({ tag: 'button', type: 'button', text: w }, '#b').irreversible, true, w);
+    assert.equal(agent.classifyElement({ tag: 'button', type: 'button', text: `Icon ${w.toLowerCase()} button` }, '#b').irreversible, true, w);
+  }
+  for (const w of ['Sender name', 'Spaying', 'Postal code', 'Payroll', 'Reports', 'Next', 'Search', 'Download', 'Application form']) {
+    assert.equal(agent.classifyElement({ tag: 'button', type: 'button', text: w }, '#b').irreversible, false, w);
+  }
+});
+
+test('irreversible gate: default-deny when the element cannot be described or classified', async () => {
+  const throwing = await run([call('click', { selector: '#mystery' }), call('done', { result: 1 })], {}, { describe: () => { throw new Error('detached'); } });
+  assert.deepEqual(throwing.io.acts, []);
+  assert.equal(throwing.log.named('agent_step')[0].data.gate_reason, 'unclassifiable');
+  for (const info of [null, undefined, '', '   ', {}, { text: '' }]) {
+    const r = await run([call('click', { selector: '#mystery' }), call('done', { result: 1 })], {}, { describe: () => info });
+    assert.deepEqual(r.io.acts, [], JSON.stringify(info));
+  }
+  const allowed = await run([call('click', { selector: '#mystery' }), call('done', { result: 1 })], { params: { allow_irreversible: 'true' } }, { describe: () => null });
+  assert.deepEqual(allowed.io.acts, [['click', '#mystery']]);
+});
+
+test('createPageIo.describe reports structure and label of the element (real page IO shape)', async () => {
+  const el = { tagName: 'BUTTON', type: 'submit', innerText: 'Go', value: '', title: '', id: 'b1', form: {}, closest: (t) => (t === 'form' ? {} : null), getAttribute: (n) => ({ role: '', 'aria-label': 'Go now' }[n] || null) };
+  const page = { locator: () => ({ first: () => ({ evaluate: async (fn) => fn(el) }) }), url: () => START };
+  const info = await agent.createPageIo(page).describe('#b1');
+  assert.deepEqual(Object.keys(info).sort(), ['formAssoc', 'inForm', 'role', 'tag', 'text', 'type']);
+  assert.equal(info.tag, 'button');
+  assert.equal(info.type, 'submit');
+  assert.equal(info.inForm, true);
+  assert.equal(agent.classifyElement(info, '#b1').irreversible, true);
+});

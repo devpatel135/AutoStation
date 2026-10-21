@@ -5,6 +5,7 @@ import json
 import re
 import urllib.request
 from pathlib import Path
+from urllib.parse import quote
 
 from site_common import SiteConfig, esc, layout, write
 
@@ -15,6 +16,15 @@ from wrapper_core import versions
 HERE = Path(__file__).resolve().parent
 SHA_RE = re.compile(r"(?i)\b[0-9a-f]{64}\b")
 PLACEHOLDER = "0" * 64
+# automation names end up in file names, URLs and copy-paste PowerShell/cmd commands: only plain names get an install page
+SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
+HEX64 = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _sha_or_none(value) -> str | None:
+    """A SHA-256 is only ever embedded in a page/command when it is exactly 64 hex digits."""
+    v = str(value).strip().lower() if value else ""
+    return v if HEX64.match(v) else None
 
 # user-facing symptom -> cause -> fix (hand-written: these are what people actually hit on a VDI)
 USER_TROUBLE = [
@@ -86,9 +96,12 @@ def _cmd_block(bid: str, text: str, ring_template: bool = False) -> str:
 def build_catalog_json(m: dict, cfg: SiteConfig, shas: dict[str, str | None]) -> dict:
     autos = {}
     for name, e in (m.get("automations") or {}).items():
+        if not SAFE_NAME.match(str(name)):
+            cfg.notes.append(f"install: automation name {str(name)[:40]!r} is not a plain name; skipped in the catalog")
+            continue
         e = e or {}
         autos[name] = {"status": e.get("status", "active"), "paused_reason": e.get("paused_reason") or "", "rings": e.get("rings") or {},
-                       "installer": {"url": cfg.installer_url(name), "sha256": shas.get(name)},
+                       "installer": {"url": cfg.installer_url(name), "sha256": _sha_or_none(shas.get(name))},
                        "package_sha256": {v: (r or {}).get("sha256") for v, r in (e.get("versions") or {}).items()}}
     return {"schema_version": 1, "generated_at": cfg.built_at, "registry_url": cfg.registry_url, "automations": autos}
 
@@ -99,12 +112,12 @@ def build_install_center(out: Path, m: dict, cfg: SiteConfig, *, runbooks_md: st
     runtimes = runtimes or {}
     shas = shas if shas is not None else {}
     order = rings_of(m)
-    autos = m.get("automations") or {}
+    autos = {n: e for n, e in (m.get("automations") or {}).items() if SAFE_NAME.match(str(n))}
     pages = []
 
     catalog = build_catalog_json(m, cfg, shas)
     write(out, "install/catalog.json", json.dumps(catalog, indent=2, sort_keys=True) + "\n")
-    boot = (HERE / "bootstrap.ps1").read_text(encoding="utf-8").replace("@@PAGES_URL@@", cfg.pages_url)
+    boot = (HERE / "bootstrap.ps1").read_text(encoding="utf-8").replace("@@PAGES_URL@@", cfg.pages_url).replace("@@REPO@@", cfg.repo)
     write(out, "install/bootstrap.ps1", boot)
 
     # ---- index ----------------------------------------------------------------------------------------
@@ -115,7 +128,7 @@ def build_install_center(out: Path, m: dict, cfg: SiteConfig, *, runbooks_md: st
         summary = cat.get("summary") or e.get("description") or ""
         dr = _default_ring(e, order)
         v = (e.get("rings") or {}).get(dr)
-        sha = shas.get(name)
+        sha = _sha_or_none(shas.get(name))
         rv = e.get("rings") or {}
         dl = (f'<a class="btn primary" href="{esc(cfg.installer_url(name))}">Download installer</a>' if v and e.get("status") != "paused"
               else '<span class="btn disabled">Not available</span>')
@@ -142,7 +155,8 @@ what is missing, registers the schedule, and keeps itself up to date from the re
 <h2>Automations</h2>
 <div class="grid">{''.join(cards) or '<p class="empty">No automations are registered yet.</p>'}</div>
 <h2>Prefer a script?</h2>
-<p><a href="bootstrap.ps1" download>bootstrap.ps1</a> downloads the installer, <strong>verifies its SHA-256</strong> against the hash published here and on the release, then installs
+<p><a href="bootstrap.ps1" download>bootstrap.ps1</a> downloads the installer, <strong>verifies its SHA-256</strong> against the hash published here and on the release (an integrity check, not proof of who built it),
+requires a valid code signature for the <code>broad</code> ring, can check the build attestation with <code>-RequireAttestation</code>, then installs
 for you. Download it, read it, then run: <code>.\\bootstrap.ps1 -Automation &lt;name&gt; -Ring broad</code>. (We deliberately do not recommend piping a web request into <code>iex</code>.)</p>
 <h2>Rolling out to a team?</h2>
 <p>Each install guide has Intune and SCCM settings (install/uninstall command lines and detection rules). The catalog is also available as
@@ -166,7 +180,7 @@ for you. Download it, read it, then run: <code>.\\bootstrap.ps1 -Automation &lt;
         cat = e.get("catalog") or {}
         rings = e.get("rings") or {}
         dr = _default_ring(e, order)
-        sha = shas.get(name)
+        sha = _sha_or_none(shas.get(name))
         paused = e.get("status") == "paused"
         runtime = runtimes.get(name)
         needs_edge = runtime == "node" or "browser" in " ".join(map(str, cat.get("tags") or [])).lower()
@@ -177,7 +191,8 @@ for you. Download it, read it, then run: <code>.\\bootstrap.ps1 -Automation &lt;
         sha_line = (f'<div class="sha">installer SHA-256: <span id="sha-{esc(name)}">{esc(sha)}</span></div>' if sha else
                     f'<div class="sha">installer SHA-256: not available at build time - open the <a href="{esc(cfg.repo_url)}/releases/tag/installers-latest">release page</a> and compare the <code>{esc(fname)}.sha256</code> asset.</div>')
         verify_cmd = (f'$expected = "{sha}"\n' if sha else '$expected = "<paste the SHA-256 from the release page>"\n') + \
-                     f'$actual = (Get-FileHash .\\{fname} -Algorithm SHA256).Hash.ToLower()\nif ($actual -eq $expected) {{ "OK - hash matches" }} else {{ "MISMATCH - do not run it" }}\nGet-AuthenticodeSignature .\\{fname} | Format-List Status, SignerCertificate'
+                     f'$actual = (Get-FileHash .\\{fname} -Algorithm SHA256).Hash.ToLower()\nif ($actual -eq $expected) {{ "OK - hash matches" }} else {{ "MISMATCH - do not run it" }}\nGet-AuthenticodeSignature .\\{fname} | Format-List Status, SignerCertificate\n' + \
+                     f'# provenance (needs the GitHub CLI): proves the file was built by this repository\'s release workflow\ngh attestation verify .\\{fname} --repo {cfg.repo}'
         silent = f".\\{fname} /S /RING={{ring}}"
         uninst = f'"%LOCALAPPDATA%\\AUTOMAGIX\\uninstall-{name}.exe" /S'
         key = f"HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\AUTOMAGIX-{name}"
@@ -223,7 +238,9 @@ for you. Download it, read it, then run: <code>.\\bootstrap.ps1 -Automation &lt;
   {sha_line}
   <ol class="steps" style="margin-top:1rem">
     <li><div><strong>Download</strong> the installer with the button above (a GitHub Release asset).</div></li>
-    <li><div><strong>Verify</strong> it (30 seconds; do this - it is how you know the file is the one we published):{verify_block}</div></li>
+    <li><div><strong>Verify</strong> it (30 seconds; do this). The SHA-256 detects a corrupted or mis-delivered download; it does <em>not</em> prove who built the
+    file, because this page and the release come from the same repository. <code>gh attestation verify</code> checks the build provenance
+    (that the file was produced by this repository's release workflow); production installers must also show a <code>Valid</code> signature:{verify_block}</div></li>
     <li><div><strong>Run</strong> it by double-clicking, or silently for your ring:{silent_block}</div></li>
     <li><div><strong>That is all.</strong> It registers its schedule and runs once. Updates arrive on their own; you never download it again.</div></li>
   </ol>
@@ -231,7 +248,7 @@ for you. Download it, read it, then run: <code>.\\bootstrap.ps1 -Automation &lt;
 </div>
 <h2>What this automation does</h2>
 <dl class="kv">
-<dt>Owner</dt><dd><a href="mailto:{esc(e.get("owner"))}">{esc(e.get("owner"))}</a>{(" / " + esc(e.get("owner_team"))) if e.get("owner_team") else ""}</dd>
+<dt>Owner</dt><dd><a href="mailto:{esc(quote(str(e.get("owner") or ""), safe="@.+-_"))}">{esc(e.get("owner"))}</a>{(" / " + esc(e.get("owner_team"))) if e.get("owner_team") else ""}</dd>
 <dt>Process owner</dt><dd>{esc(cat.get("process_owner") or "-")}</dd>
 <dt>Systems it touches</dt><dd>{esc(", ".join(map(str, cat.get("systems") or e.get("systems") or [])) or "none")}</dd>
 <dt>Data classification</dt><dd>{classification_pill(e.get("data_classification"))} <span class="sub">LLM use is approved up to: {esc(e.get("llm_allowed_classification") or "internal")}</span></dd>
@@ -240,7 +257,7 @@ for you. Download it, read it, then run: <code>.\\bootstrap.ps1 -Automation &lt;
 {('<h3>Links</h3><ul style="margin-left:1.2rem">' + links + "</ul>") if links else ""}
 <h2>When it runs</h2>
 <div class="tbl-wrap"><table><tr><th>Slot</th><th>Schedule</th><th>Parameters</th></tr>{slot_rows or '<tr><td colspan="3" class="empty">No schedule</td></tr>'}</table></div>
-<p class="summary">{("Maintenance windows (it will not run): " + esc(describe_windows(e)) + ". ") if describe_windows(e) else ""}{("Typical duration " + esc(round(baseline / 60000, 1)) + " min. ") if baseline else ""}On failure it retries up to {esc(eh.get("max_retries", 3))} times for network/availability problems and skips bad data items instead of failing the whole run.{" It shows a notification when it completes." if e.get("notify_on_complete") else ""}</p>
+<p class="summary">{("Maintenance windows (it will not run): " + esc(describe_windows(e)) + ". ") if describe_windows(e) else ""}{("Typical duration " + esc(round(baseline / 60000, 1)) + " min. ") if isinstance(baseline, (int, float)) and not isinstance(baseline, bool) and baseline else ""}On failure it retries up to {esc(eh.get("max_retries", 3))} times for network/availability problems and skips bad data items instead of failing the whole run.{" It shows a notification when it completes." if e.get("notify_on_complete") else ""}</p>
 <h2>Requirements</h2>
 <ul style="margin-left:1.2rem">{"".join(f"<li>{r}</li>" for r in reqs)}</ul>
 <h2>What the installer changes on your machine</h2>
@@ -268,7 +285,7 @@ for you. Download it, read it, then run: <code>.\\bootstrap.ps1 -Automation &lt;
 {ops_table}
 <h2>Get help</h2>
 <p><a class="btn primary" href="{esc(issue)}" rel="noopener">Report a problem with {esc(name)}</a>
-<a class="btn" href="mailto:{esc(e.get("owner"))}?subject={esc(name)}">Email the owner</a> <a class="btn" href="../docs/RUNBOOKS.html">Runbooks</a>
+<a class="btn" href="mailto:{esc(quote(str(e.get("owner") or ""), safe="@.+-_"))}?subject={esc(quote(name, safe=""))}">Email the owner</a> <a class="btn" href="../docs/RUNBOOKS.html">Runbooks</a>
 <a class="btn" href="../portal/automation/{esc(name)}.html">Catalog entry</a></p>
 """
         write(out, f"install/{name}.html", layout(f"Install {name}", body, cfg=cfg, depth=1, active="install",

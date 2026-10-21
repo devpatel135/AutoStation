@@ -83,9 +83,9 @@ VDIs are airgapped, so nothing is downloaded at runtime or at install time:
 | LLM key exposure | The framework never reads a key. `llmCall` POSTs to the wrapper-core loopback broker with a per-run bearer token; the broker holds auth. |
 | Prompt injection | Page text, logs and scraped data go only in `llmCall({ context })` (delimited as untrusted by the broker). Instructions (`prompt`) are author-written. Agent goal is the only instruction; tool calls are schema-validated against a closed tool set. |
 | Selector-healing abuse | LLM never supplies values; proposed action must match; selector must match exactly one visible element; destructive/payment targets deny-listed (`allowDestructive` opt-in); per-run budget; DOM never logged (template name + input hash only). |
-| Agent blast radius | Origin allow-list (default: starting origin only, re-checked after every step), irreversible-action gate (`params.allow_irreversible=true` required for submit/send/delete/pay), step budget, stall detection, fail-safe on LLM unavailability. |
+| Agent blast radius | Origin allow-list (default: starting origin only, re-checked after every step), irreversible-action gate (`params.allow_irreversible=true` required for: EVERY Enter/Return press, clicks on structurally submit-like elements - `button[type=submit]`, `input[type=submit\|image]`, any button / `role=button` inside or associated with a form - and clicks whose text/value/aria-label/title reads like submit/send/confirm/place order/buy/purchase/pay/checkout/delete/remove/accept/agree/allow/grant/approve/authorize/sign/transfer/publish/post/apply/subscribe; an element that cannot be classified is DENIED), step budget, stall detection, fail-safe on LLM unavailability. |
 | Sensitive data | `sensitive`/`sensitiveKeys` on `logEvent`/`logItem`: kept in the raw run log, replaced by `[REDACTED]` before any LLM context. DOM snapshots never include form values; URL query values are masked. |
-| MCP server | stdio only, no network listener. `navigate` is http(s) only + optional `AMX_MCP_ALLOWED_ORIGINS`. `evaluate` is not even listed unless `AMX_MCP_ALLOW_EVALUATE=1`. |
+| MCP server | stdio only, no network listener. **Deny by default:** with `AMX_MCP_ALLOWED_ORIGINS` empty every tool refuses. Loopback / private / link-local / cloud-metadata addresses (IPv4 in any notation, IPv6, mapped/NAT64/6to4, intranet names) are blocked even when listed unless `AMX_MCP_ALLOW_PRIVATE=1`; a name must also resolve only to public addresses. The page origin is checked before every tool and after navigate/click/press (out-of-policy pages are reset to `about:blank`), and navigations / private requests are aborted at request level (redirect hops included). `evaluate` is not even listed unless `AMX_MCP_ALLOW_EVALUATE=1`. |
 | HTTP client | Cross-origin request targets rejected (no SSRF-by-parameter). Response bodies never appear in error messages. PFX + passphrase come from `scripts/export-cert.ps1`, which writes an owner-only temp file. |
 | Supply chain | One runtime dependency, internal mirror only, lock-file installs, `--ignore-scripts`. |
 
@@ -133,6 +133,7 @@ Every session is registered for **failure evidence** (below). `session.guard(asy
 `resilience.resilientPage(page, { caller, maxHealsPerRun = 5, denyPatterns, allowDestructive, cachePath })` wraps `click / fill / selectOption / check / uncheck / textContent / innerText / getAttribute / waitFor / press / hover`
 (other members pass through to the real page; `rp.raw` is the page). On a selector failure it heals once, verifies the proposal in the live DOM, retries, logs `llm_decision` + `selector_healed`, and caches the result per
 (URL pattern, original selector) in `%LOCALAPPDATA%\AUTOMAGIX\state\selector-cache\<automation>.json`.
+Hardening: the default deny-list also covers send/approve/buy/purchase/accept/allow/grant/authorize/agree/confirm/transfer/publish targets; `fill`/`selectOption` are never healed when the value or field looks sensitive (password, token, card, ...) or when the page origin changed while the action ran or while the model was consulted (optional `expectedOrigins`); cached healings are re-validated on every use (exactly one visible element, not deny-listed, same origin as when cached, sane syntax - otherwise dropped with `selector_cache_dropped`); optional `canHeal(page)` lets the caller restrict healing to a context (the certification automation allows it only on Microsoft sign-in hosts).
 
 ### `fw.agent` — Pattern 4
 
@@ -143,7 +144,7 @@ Add domain tools with `tools: { lookup_vendor: { description, args: { vendor: 's
 ### `fw.mcp`
 
 `node bin/mcp-browser.js` is a stdio MCP server (JSON-RPC 2.0, protocol `2024-11-05`) with tools `navigate, snapshot, click, fill, press, screenshot, extract_table` (+ `evaluate` only when explicitly enabled).
-Env: `AMX_MCP_HEADLESS=0`, `AMX_MCP_ALLOWED_ORIGINS`, `AMX_MCP_ALLOW_EVALUATE=1`, `AMX_MCP_CDP_URL`, `AMX_MCP_PROFILE`.
+Env: `AMX_MCP_HEADLESS=0`, `AMX_MCP_ALLOWED_ORIGINS` (required - deny by default), `AMX_MCP_ALLOW_PRIVATE=1`, `AMX_MCP_ALLOW_EVALUATE=1`, `AMX_MCP_CDP_URL`, `AMX_MCP_PROFILE`.
 `lib/mcp-server.js` exports `createToolRegistry`, `createServer`, `serveStdio` for embedding/testing.
 
 ### `fw.adapters`
@@ -170,6 +171,7 @@ Adapters shared across automations belong in `lib/adapters/` and in `registerBui
 `node bin/amx-record.js https://portal.internal.example.com --name automation-foo` is the UiPath-Recorder equivalent: it records with codegen, then **converts** the recording into a complete AUTOSTATION payload
 (`main.js`, `automation.yaml`, `README.md` with the recorded steps table, `params.suggested.yaml`, `tests/test_lifecycle.py`). Resilient `rp.*` calls, params instead of literals, `sso-detect` assertions after navigations,
 `runItem` loops for repeated row patterns, dry-run guards on irreversible-looking clicks — and **credentials are never recorded** (the step throws `credential required: use the user profile / Credential Manager`).
+**A recording is untrusted text** (`--from-file` may point at a file from anywhere), so nothing from it is copied into the generated `main.js` verbatim: locator chains, option objects, URLs and values are parsed with a strict literal grammar (strings, numbers, booleans, arrays, allow-listed option keys, regex literals) and re-emitted canonically (`jsStr` escapes quotes, control characters, U+2028/U+2029 and `<`); text placed in comments has line terminators and `*/` `/*` removed; `goto` accepts only literal `http(s)` URLs without credentials; option objects that are not strict literals (`timeout`, `force`, `delay`, `button`, `clickCount`, `position`, `modifiers`, `noWaitAfter`, `trial` only) are dropped with a `TODO(unconverted)` comment; value-carrying calls with non-literal arguments, unknown/reserved page variables and anything else outside the grammar become a TODO comment, never code.
 `--from-file recording.js` converts an existing codegen file without a browser. Full workflow and limits: [`docs/RECORDER.md`](../../docs/RECORDER.md).
 
 ### Failure evidence (UiPath's "screenshot on error")

@@ -153,6 +153,16 @@ Rules enforced by `registry validate`: every ring version exists in `versions`; 
 **Resolution (wrapper-core):** version for a component/automation = `rings[ring]`. Kill-switch halts if `fleet.paused` or
 `automations[name].status == paused`. Dynamic `assets` = `assets.default` ⊕ `assets[ring]`.
 
+**Signed manifests.** `manifest.yaml` is published with a detached Ed25519 signature, `manifest.yaml.sig` (JSON: `v`, `key_id` = first 8 hex
+of the public key, `signed_at` ISO-8601 UTC, `manifest_sha256` of the exact manifest bytes, `sig` = base64 over the UTF-8 message
+`autostation-manifest-v1\n<manifest_sha256>\n<signed_at>`). Endpoints pin the operator's public key(s) in `wrapper_core/trust.py`
+(`PINNED_REGISTRY_KEYS`), `registry_pubkeys` in `platform.json`, or env `AUTOMAGIX_REGISTRY_PUBKEYS`. Once any key is configured, self-heal
+refuses a manifest whose signature is missing, made by another key, or does not match the bytes, and one whose `signed_at` is older than the
+newest it has accepted (anti-rollback, `state/manifest.signed_at`). A refused manifest never updates anything and never replaces the cache:
+the run continues from the last verified cached manifest (re-verified on every read) and records `manifest signature invalid: <reason>` in
+`self_heal.errors`. With no key configured, unsigned manifests are accepted with a logged warning (bootstrap). `python -m wrapper_core trust --show`
+lists the pinned key ids; the operator signs with `tools/sign_registry.py` (private seed never leaves the operator's machine).
+
 ## 5. Payload descriptor (`automation.yaml`, inside every automation payload)
 
 ```yaml

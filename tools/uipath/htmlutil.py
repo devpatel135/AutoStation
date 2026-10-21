@@ -32,6 +32,9 @@ button.theme{float:right;background:var(--surface2);color:var(--fg);border:1px s
 @media (max-width:640px){body{padding:16px}.tile .v{font-size:1.2rem}}
 """
 
+CSP = "default-src 'none'; img-src data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; form-action 'none'"
+CSP_META = f'<meta http-equiv="Content-Security-Policy" content="{CSP}">'
+
 THEME_JS = ("<script>(function(){var b=document.getElementById('theme');if(!b)return;b.addEventListener('click',function(){"
             "var r=document.documentElement;var d=r.getAttribute('data-theme');var dark=d?d==='dark':matchMedia('(prefers-color-scheme:dark)').matches;"
             "r.setAttribute('data-theme',dark?'light':'dark')})})();</script>")
@@ -42,7 +45,7 @@ def esc(v) -> str:
 
 
 def page(title: str, eyebrow: str, subtitle: str, body: str) -> str:
-    return (f'<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
+    return (f'<!doctype html><html lang="en"><head><meta charset="utf-8">{CSP_META}<meta name="viewport" content="width=device-width,initial-scale=1">'
             f"<title>{esc(title)}</title><style>{CSS}</style></head><body><div class=\"page\"><button class=\"theme\" id=\"theme\" type=\"button\">Theme</button>"
             f'<div class="eyebrow">{esc(eyebrow)}</div><h1>{esc(title)}</h1><p class="sub">{esc(subtitle)}</p>{body}</div>{THEME_JS}</body></html>\n')
 

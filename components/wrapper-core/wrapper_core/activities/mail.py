@@ -47,10 +47,17 @@ def _resolve_login(username, password, credential):
     return username, (str(password) if password is not None else None)
 
 
+_RESERVED_NAME = re.compile(r"^(CON|PRN|AUX|NUL|CONIN\$|CONOUT\$|COM[0-9]|LPT[0-9])(\..*)?$", re.I)
+
+
 def safe_filename(name: str, default: str = "attachment") -> str:
+    """File name for an attachment received from the outside: no directories, no characters Windows forbids, no trailing
+    dots/spaces, and never a DOS device name (``NUL``, ``COM1``, ``CON.txt`` would write to the device, not a file)."""
     name = os.path.basename((name or "").replace("\\", "/"))
-    name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name).strip(". ")
-    return name[:150] or default
+    name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name).strip(". ")[:150].rstrip(". ")
+    if not name:
+        return default
+    return "_" + name if _RESERVED_NAME.match(name) else name
 
 
 def _unique(directory: Path, name: str) -> Path:
@@ -248,6 +255,10 @@ while ($it -ne $null -and $out.Count -lt [int]$A.limit) {
         foreach ($att in $it.Attachments) {
             $name = [string]$att.FileName
             foreach ($c in $bad) { $name = $name.Replace([string]$c, '_') }
+            $name = $name.Trim().TrimEnd('.', ' ')
+            if ($name.Length -gt 150) { $name = $name.Substring(0, 150).TrimEnd('.', ' ') }
+            if ($name -eq '') { $name = 'attachment' }
+            if ($name -match '^(?i)(CON|PRN|AUX|NUL|CONIN\$|CONOUT\$|COM[0-9]|LPT[0-9])(\..*)?$') { $name = '_' + $name }
             $path = $null
             if ($A.save_to) {
                 [void](New-Item -ItemType Directory -Force -Path $A.save_to)
