@@ -242,3 +242,5 @@ jobs:
             case " $KEEP " in *" $a "*) ;; *) echo "deleting stale asset $a"; gh release delete-asset installers-latest "$a" -y ;; esac
           done
           gh release view installers-latest --json assets --jq '.assets[].name'
+
+# rebuilt after LOGGING_TOKEN was added (connected build)
