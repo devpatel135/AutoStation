@@ -138,3 +138,4 @@ jobs:
           if ($LASTEXITCODE -eq 0) { throw 'scheduled task still registered after uninstall' }
           if (Test-Path (Join-Path $home_ "automations\$env:AUTOMATION")) { throw 'payload still present after uninstall' }
           Write-Host 'uninstall OK'
+          exit 0   # schtasks /Query legitimately leaves LASTEXITCODE=1 (task is gone); the pwsh wrapper would propagate it
