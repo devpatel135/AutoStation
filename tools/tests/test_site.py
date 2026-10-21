@@ -453,6 +453,7 @@ def test_verification_wording_is_honest_and_attestation_is_documented(demo_site)
 
 
 @pytest.mark.skipif(PS is None, reason="PowerShell not available")
+@pytest.mark.skipif(sys.platform != "win32", reason="Authenticode checks exist only on Windows PowerShell")
 def test_bootstrap_fails_closed_on_an_unsigned_installer_for_broad_only(boot, tmp_path):
     script, exe, sha, catalog = boot
     base = ["-Automation", "automation-certification-site", "-CatalogUrl", catalog(), "-InstallerPath", str(exe), "-NoRun"]

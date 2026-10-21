@@ -259,7 +259,13 @@ def test_unsigned_registry_accepted_when_no_key_configured(registry, caplog):
     registry.add_component("wrapper-core", "0.1.0")
     _publish(registry, sign=False)
     p = Paths().ensure()
-    m, offline = selfheal.fetch_manifest(p, str(registry.root), None, cfg={})
+    import logging
+    wlog = logging.getLogger("wrapper_core")             # propagate=False: attach caplog's handler directly
+    wlog.addHandler(caplog.handler)
+    try:
+        m, offline = selfheal.fetch_manifest(p, str(registry.root), None, cfg={})
+    finally:
+        wlog.removeHandler(caplog.handler)
     assert not offline and "wrapper-core" in m["components"]
     assert "unsigned" in caplog.text
 

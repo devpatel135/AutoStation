@@ -415,10 +415,11 @@ def test_restrict_to_owner_reports_success_and_failure(tmp_path, monkeypatch):
     assert secrets.restrict_to_owner(f) is False
 
 
+@pytest.mark.skipif(os.name != "nt", reason="DPAPI-protected key blobs are Windows-only")
 def test_temp_private_key_fails_closed_when_acl_cannot_be_set(tmp_path, monkeypatch):
     blob = tmp_path / "key.dpapi"
     src = tmp_path / "key"
-    src.write_bytes(b"-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----")
+    src.write_bytes(b"-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----")  # secret-scan: allow (fake fixture)
     secrets.protect_file(src, blob)
     work = tmp_path / "work"
     monkeypatch.setattr(secrets, "restrict_to_owner", lambda p: False)

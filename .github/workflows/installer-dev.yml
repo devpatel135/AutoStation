@@ -222,7 +222,7 @@ jobs:
         with:
           name: installer
           path: dist
-      - name: Attest build provenance (verify with: gh attestation verify <file> --repo ${{ github.repository }})
+      - name: Attest build provenance (verify with gh attestation verify, see docs/SECURITY.md)
         uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
         with:
           subject-path: dist/*.exe

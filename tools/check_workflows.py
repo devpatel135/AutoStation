@@ -126,7 +126,15 @@ def collect_usage(text: str) -> dict:
 def check_file(path: Path, repo: Path = ROOT) -> list[str]:
     with open(path, "r", encoding="utf-8", newline="") as fh:  # Path.read_text(newline=) only exists on Python 3.13+
         text = fh.read()
-    return check_text(text, Path(path).name, repo)
+    errs = check_text(text, Path(path).name, repo)
+    try:  # a real YAML parser (what GitHub uses) catches things the subset parser accepts, e.g. "key: value" inside a plain scalar
+        import yaml
+        yaml.safe_load(text)
+    except ImportError:
+        pass
+    except Exception as exc:  # noqa: BLE001
+        errs.append(f"{Path(path).name}: invalid YAML for GitHub: {str(exc).splitlines()[0] if str(exc) else exc}")
+    return errs
 
 
 def main(argv: list[str] | None = None) -> int:
