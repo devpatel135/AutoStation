@@ -12,26 +12,85 @@ compatibility:
 components:
   wrapper-core:
     rings:
-      dev: "0.2.0"
-      pilot: "0.2.0"
-      broad: "0.2.0"
+      dev: "0.3.0"
+      pilot: "0.3.0"
+      broad: "0.3.0"
     versions:
       "0.2.0":
         url: artifacts/components/wrapper-core-0.2.0.zip
         sha256: aa545fcdb9bb2752892ec5da8839a23420571da89bb67a7f8d2e3550757ac64c
+      "0.3.0":
+        url: artifacts/components/wrapper-core-0.3.0.zip
+        sha256: "27bd1a797f8de0a9c276ae5b868d942683fd58309949e0261d5d6d743bf7800e"
   execution-framework:
     rings:
-      dev: "0.2.0"
-      pilot: "0.2.0"
-      broad: "0.2.0"
+      dev: "0.3.0"
+      pilot: "0.3.0"
+      broad: "0.3.0"
     versions:
       "0.2.0":
         url: artifacts/components/execution-framework-0.2.0.zip
         sha256: "6e67233aa437b6a710ac4a9a45598e9f528aa1aee2536413a0c6a537b4972cf7"
+      "0.3.0":
+        url: artifacts/components/execution-framework-0.3.0.zip
+        sha256: "779ad7d8211f140e2cfea40bdc70ee0817d787dc9f02d9d9b2b54f56c337aab3"
 assets:
   default:
     internal_api_url: "https://api.example.internal"
     feature_flags:
       run_synopsis: true
   dev: {}
-automations: {}
+automations:
+  automation-certification-site:
+    description: "automation-certification-site (auto-registered: complete the catalog entry)"
+    owner: automation-platform@example.com
+    owner_team: TODO owner team
+    systems:
+      - none
+    data_classification: internal
+    status: paused
+    paused_reason: "awaiting first release (new automation skeleton)"
+    llm_allowed_classification: internal
+    rings:
+      dev: "1.0.0"
+      pilot: "1.0.0"
+      broad: "1.0.0"
+    versions:
+      "1.0.0":
+        url: artifacts/automations/automation-certification-site-1.0.0.zip
+        sha256: c032e75644b2c441ca2e6065572db4528426743b15207ccbc531a945ff2ec86e
+        requires:
+          wrapper_core: ">=0.1.0,<1.0.0"
+          execution_framework: ">=0.1.0,<1.0.0"
+    schedule:
+      timezone: UTC
+      expected_duration_ms:
+        baseline: 120000
+        warn_threshold: 2.0
+      maintenance_windows:
+        - days:
+            - Saturday
+            - Sunday
+      slots:
+        - id: daily
+          type: daily
+          time: "09:00"
+          params: {}
+    error_handling:
+      max_retries: 3
+      network_retry_wait_s: 60
+      backoff_multiplier: 2.0
+      skip_on_data_error: true
+      escalate_after_retries: true
+    notify_on_complete: false
+    catalog:
+      summary: "automation-certification-site (auto-registered: complete the catalog entry)"
+      systems:
+        - none
+      owner_team: TODO owner team
+      data_classification: internal
+      process_owner: automation-platform@example.com
+      links: []
+      minutes_per_item: 0
+      tags:
+        - new
