@@ -1,9 +1,12 @@
 name: pages-demo
 
 # Publishes the end-to-end demo (fleet dashboard + registry portal/admin panel built from simulated machines) to GitHub
-# Pages so you can see the control plane without GitLab. Enable once: Settings -> Pages -> Source: GitHub Actions.
+# Pages so you can see the control plane without GitLab. Enable once: Settings -> Pages -> Build and deployment -> Source: GitHub Actions.
+# Until that setting is on, the deploy job fails with a Pages-not-enabled error (harmless); after it is on, every push to main redeploys.
 # Production uses the GitLab Pages pipelines in components/automation-logging and components/automation-registry.
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
