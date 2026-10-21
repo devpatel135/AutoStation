@@ -169,3 +169,5 @@ installed machines is advisory: the credential ships inside the installer, so no
 * **Release plumbing.** `release` checks out without credentials and hands the write token only to the steps that push; `ops-action` has `contents: read` at workflow level and its write scopes on the job only, and its summary output is allow-listed and fenced.
 * **Installers.** The SBOM is attested together with the installer; the stable exe is uploaded before its `.sha256` (a window of seconds in which they disagree is possible - the canary retries it); the canary pins `gh attestation verify` to the installers workflow and fails (never silently passes) if the demo portal is missing.
 
+
+> Scheduled runs (`site` every 30 minutes, `health` every 30 minutes, `canary` daily) are best-effort on GitHub: they can start several minutes late or be skipped under load. Every push to `main` also rebuilds the site, so a push is the quickest way to refresh the dashboards after new telemetry arrives.
