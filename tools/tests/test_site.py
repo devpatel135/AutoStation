@@ -292,7 +292,10 @@ def run_ps(script: Path, *args, tmp: Path) -> subprocess.CompletedProcess:
     env = dict(os.environ)
     env.pop("PSModulePath", None) if sys.platform == "win32" else None
     cmd = [PS, "-NoProfile", "-NonInteractive"] + (["-ExecutionPolicy", "Bypass"] if sys.platform == "win32" else []) + ["-File", str(script), *args]
-    return subprocess.run(cmd, capture_output=True, text=True, timeout=180, env=env, cwd=str(tmp))
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=180, env=env, cwd=str(tmp))
+    # PowerShell wraps long error lines at the console width (narrow on CI): collapse whitespace so phrase checks are stable
+    r.stdout, r.stderr = " ".join((r.stdout or "").split()), " ".join((r.stderr or "").split())
+    return r
 
 
 @pytest.fixture

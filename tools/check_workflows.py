@@ -118,7 +118,9 @@ def collect_usage(text: str) -> dict:
 
 
 def check_file(path: Path, repo: Path = ROOT) -> list[str]:
-    return check_text(Path(path).read_text(encoding="utf-8", newline=""), Path(path).name, repo)
+    with open(path, "r", encoding="utf-8", newline="") as fh:  # Path.read_text(newline=) only exists on Python 3.13+
+        text = fh.read()
+    return check_text(text, Path(path).name, repo)
 
 
 def main(argv: list[str] | None = None) -> int:
