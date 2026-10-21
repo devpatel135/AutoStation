@@ -139,6 +139,8 @@ jobs:
             if (-not (Test-Path (Join-Path $home_ $f))) { throw "missing after install: $f" }
           }
           Get-Content (Join-Path $home_ 'config\platform.json') | Out-Host
+          $pc = Get-Content (Join-Path $home_ 'config\platform.json') -Raw | ConvertFrom-Json
+          if ($env:LOG_TOKEN_SET -eq 'true' -and $pc.log_transport -ne 'github-api') { throw "connected build but log_transport is '$($pc.log_transport)', not github-api" }
           if ($env:LOG_TOKEN_SET -eq 'true' -and -not (Test-Path (Join-Path $home_ 'secrets\logging_token.dpapi'))) { throw 'connected build but no DPAPI logging token was installed' }
           schtasks /Query /TN "AUTOMAGIX\$env:AUTOMATION-daily" | Out-Host
           if ($LASTEXITCODE -ne 0) { throw 'scheduled task was not registered' }

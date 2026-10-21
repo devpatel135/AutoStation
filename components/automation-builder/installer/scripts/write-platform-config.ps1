@@ -5,7 +5,7 @@
 .DESCRIPTION
   Keys read by wrapper_core.paths.platform_config: ring, registry_url, log_transport, log_remote, llm_endpoint,
   llm_model. Existing keys not managed here are preserved so a re-install never drops operator additions.
-  log_transport is 'git-ssh' when -LogRemote looks like an ssh remote, otherwise 'dir'.
+  log_transport is 'git-ssh' for an ssh remote, 'github-api' for owner/repo (HTTPS Contents API, token in secrets), otherwise 'dir'.
 #>
 [CmdletBinding()]
 param(
@@ -33,7 +33,7 @@ if ($LogRemote -eq 'local') {
     $LogRemote = Join-Path (Split-Path -Parent (Split-Path -Parent $Out)) 'local-logs'
 }
 $cfg['log_remote'] = $LogRemote
-$cfg['log_transport'] = $(if ($LogRemote -match '^(git@|ssh://)') { 'git-ssh' } else { 'dir' })
+$cfg['log_transport'] = $(if ($LogRemote -match '^(git@|ssh://)') { 'git-ssh' } elseif ($LogRemote -match '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$') { 'github-api' } else { 'dir' })
 if ($LlmEndpoint) { $cfg['llm_endpoint'] = $LlmEndpoint }
 if ($LlmModel) { $cfg['llm_model'] = $LlmModel }
 if ($RegistryPubKeys) {

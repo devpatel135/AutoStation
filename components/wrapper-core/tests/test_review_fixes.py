@@ -482,3 +482,16 @@ def test_a_symlink_singleton_lock_is_removed_without_following_it(paths, tmp_pat
     assert not R.inside_root(paths, link) and R.inside_root(paths, link, allow_link=True)
     rep = R.Remediator(paths, "auto-a", {}, lister=lambda: []).handle(diag("STALE_BROWSER_PROFILE_LOCK"))
     assert rep.attempts[0]["outcome"] == "fixed" and not link.is_symlink() and target.read_text(encoding="utf-8") == "keep"
+
+
+def test_owner_repo_remote_with_legacy_dir_transport_is_healed_to_github_api(tmp_path, monkeypatch):
+    import json
+    from wrapper_core.paths import Paths, platform_config
+    monkeypatch.setenv("AUTOMAGIX_HOME", str(tmp_path))
+    monkeypatch.delenv("AUTOMAGIX_LOG_TRANSPORT", raising=False)
+    monkeypatch.delenv("AUTOMAGIX_LOG_REMOTE", raising=False)
+    p = Paths().ensure()
+    (p.config / "platform.json").write_text(json.dumps({"ring": "broad", "log_remote": "owner/logs-repo", "log_transport": "dir"}), encoding="utf-8")
+    assert platform_config(p)["log_transport"] == "github-api"
+    (p.config / "platform.json").write_text(json.dumps({"ring": "broad", "log_remote": str(tmp_path / "logs"), "log_transport": "dir"}), encoding="utf-8")
+    assert platform_config(p)["log_transport"] == "dir"            # a real directory stays a directory

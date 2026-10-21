@@ -248,3 +248,11 @@ def test_nsis_style_command_line_with_empty_arguments(tmp_path):
     assert r.returncode == 0, r.stderr
     cfg = json.loads(out.read_text(encoding="utf-8"))
     assert cfg["ring"] == "pilot" and "llm_endpoint" not in cfg and cfg["log_transport"] == "git-ssh"
+
+
+def test_owner_repo_remote_selects_the_github_transport(tmp_path):
+    out = tmp_path / "platform.json"
+    r = ps("write-platform-config.ps1", "-Out", str(out), "-Ring", "broad", "-RegistryUrl", "https://x.example/r/",
+           "-LogRemote", "owner/logs-repo")
+    assert r.returncode == 0, r.stderr + r.stdout
+    assert json.loads(out.read_text(encoding="utf-8"))["log_transport"] == "github-api"

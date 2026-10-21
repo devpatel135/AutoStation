@@ -123,6 +123,11 @@ def platform_config(paths: Paths | None = None) -> dict:
     remote = cfg.get("log_remote", "")
     cfg.setdefault("log_transport", "git-ssh" if remote.startswith(("git@", "ssh://")) else
                    "github-api" if re.match(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", remote) and not remote.startswith(("/", ".")) else "dir")
+    # Installers before wrapper-core 0.5.1 wrote log_transport "dir" next to an owner/repo remote, so a connected install logged into a
+    # bogus relative folder. An owner/repo remote can only mean the GitHub transport (a real directory is absolute or ./relative).
+    if cfg.get("log_transport") == "dir" and re.match(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", remote) and not remote.startswith((".", "/")) \
+            and not os.path.isabs(remote) and "\\" not in remote and not os.environ.get("AUTOMAGIX_LOG_TRANSPORT"):
+        cfg["log_transport"] = "github-api"
     if cfg["ring"] not in RINGS:
         raise ValueError(f"invalid ring {cfg['ring']!r}; expected one of {RINGS}")
     return cfg
