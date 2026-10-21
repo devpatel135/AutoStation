@@ -206,10 +206,22 @@ class GitHubApiTransport(Transport):
         except (urllib.error.URLError, OSError) as exc:
             raise TransportError(f"GitHub API unreachable: {exc}") from exc
 
+    def _bootstrap_empty_repo(self) -> None:
+        """Create the first commit (a README on the default branch) so branches can exist. Idempotent: 422 = another machine won the race."""
+        import base64
+        text = "# AutoStation run logs\n\nWritten by installed automations (branch `ingest`). Private; do not edit by hand.\n"
+        code, detail = self._call("PUT", f"/repos/{self.repo}/contents/README.md",
+                                  {"message": "initialise logs repo", "content": base64.b64encode(text.encode("utf-8")).decode("ascii")})
+        if code not in (200, 201, 409, 422):
+            raise TransportError(f"cannot initialise empty logs repo {self.repo}: HTTP {code} {str(detail.get('message', ''))[:100]}")
+
     def _ensure_branch(self) -> None:
         if self._branch_ready:
             return
-        code, _ = self._call("GET", f"/repos/{self.repo}/git/ref/heads/{self.branch}")
+        code, detail = self._call("GET", f"/repos/{self.repo}/git/ref/heads/{self.branch}")
+        if code == 409 and "empty" in str(detail.get("message", "")).lower():
+            self._bootstrap_empty_repo()          # a brand-new logs repo has no commits at all: the API answers 409 until one exists
+            code, detail = self._call("GET", f"/repos/{self.repo}/git/ref/heads/{self.branch}")
         if code == 404:
             code, repo = self._call("GET", f"/repos/{self.repo}")
             if code != 200:
@@ -217,7 +229,7 @@ class GitHubApiTransport(Transport):
             default = repo.get("default_branch", "main")
             code, ref = self._call("GET", f"/repos/{self.repo}/git/ref/heads/{default}")
             if code != 200:
-                raise TransportError(f"logs repo {self.repo} has no commits yet (add a README first): HTTP {code}")
+                raise TransportError(f"logs repo {self.repo} has no commits yet: HTTP {code}")
             code, _ = self._call("POST", f"/repos/{self.repo}/git/refs", {"ref": f"refs/heads/{self.branch}", "sha": ref["object"]["sha"]})
             if code not in (201, 422):  # 422 = created concurrently by another machine
                 raise TransportError(f"cannot create branch {self.branch}: HTTP {code}")

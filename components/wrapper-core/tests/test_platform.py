@@ -235,6 +235,8 @@ def _fake_github(state):
 
         def do_GET(self):
             self._auth()
+            if state.get("empty") and "/git/ref/heads/" in self.path:
+                return self._send(409, {"message": "Git Repository is empty."})
             if self.path.endswith("/git/ref/heads/ingest"):
                 return self._send(200 if state.get("branch") else 404, {"object": {"sha": "abc"}})
             if self.path.endswith("/git/ref/heads/main"):
@@ -253,6 +255,10 @@ def _fake_github(state):
             self._auth()
             body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             path = self.path.split("/contents/", 1)[1]
+            if path == "README.md" and state.get("empty"):
+                state["empty"] = False
+                state["readme"] = True
+                return self._send(201, {})
             if path in state.setdefault("files", {}):
                 return self._send(422, {"message": "Invalid request. \"sha\" wasn't supplied."})
             if state.get("fail_once"):
@@ -283,6 +289,22 @@ def test_github_api_transport_uploads_artefacts_idempotently(monkeypatch):
         assert json.loads(base64.b64decode(files["ingest/pilot/run/auto-a/RID1.json"]["content"])) == {"hello": "world"}
         assert files["ingest/pilot/run/auto-a/RID1.json"]["branch"] == "ingest"
         assert set(state["auth"]) == {"Bearer ghp_test_token"}
+    finally:
+        srv.shutdown()
+
+
+def test_github_api_transport_initialises_a_brand_new_empty_logs_repo(monkeypatch):
+    state = {"empty": True}
+    srv = _fake_github(state)
+    try:
+        monkeypatch.setenv("AUTOMAGIX_GITHUB_API", f"http://127.0.0.1:{srv.server_port}")
+        monkeypatch.setenv("AUTOMAGIX_LOGGING_TOKEN", "ghp_test_token")
+        monkeypatch.setenv("AUTOMAGIX_LOG_TRANSPORT", "github-api")
+        monkeypatch.setenv("AUTOMAGIX_LOG_REMOTE", "o/logs")
+        p = Paths().ensure()
+        assert transport.emit("run", "auto-a", "RID9", {"first": True}, p) is True
+        assert state.get("readme") and state.get("branch")
+        assert list(state["files"]) == ["ingest/pilot/run/auto-a/RID9.json"]
     finally:
         srv.shutdown()
 
