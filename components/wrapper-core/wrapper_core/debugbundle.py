@@ -158,11 +158,11 @@ def _write_bundle(paths: Paths, out: Path, run_dir: Optional[Path], run_automati
     total = 0
     truncated = False
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zf:
-        def add(name: str, text: str) -> None:
+        def add(name: str, text: str, force: bool = False) -> None:
             nonlocal total, truncated
             text = scrub_text(text)
             data = text.encode("utf-8", "replace")[:MAX_FILE]
-            if total + len(data) > max_total:
+            if not force and total + len(data) > max_total:
                 truncated = True
                 return
             zf.writestr(name, data)
@@ -215,7 +215,7 @@ def _write_bundle(paths: Paths, out: Path, run_dir: Optional[Path], run_automati
                                          "run_id": run_dir.name if run_dir else None, "run_output_included": bool(run_dir and not classified),
                                          "files": files, "truncated": truncated,
                                          "redaction": "scrub_text: tokens, keys, passwords, URL credentials, long opaque strings, user names; "
-                                                      "secrets/, browser profiles, screenshots and evidence are never included"}, indent=2))
+                                                      "secrets/, browser profiles, screenshots and evidence are never included"}, indent=2), force=True)
 
 
 def main(argv: List[str]) -> int:

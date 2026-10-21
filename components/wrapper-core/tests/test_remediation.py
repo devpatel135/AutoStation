@@ -109,8 +109,8 @@ def test_diagnose_never_raises_on_garbage():
 def test_scrub_removes_credentials_everywhere(monkeypatch):
     monkeypatch.setenv("MY_SERVICE_TOKEN", "s3cr3tvalue-xyz-123456")
     text = ("Authorization: Bearer abcdef1234567890abcdef\npassword=hunter22 api_key: 'AAAAbbbbCCCC1111'\n"
-            "https://user:pw12345@example.com/x ghp_" + "Z" * 36 + " eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcdEFGHijkl\n"
-            "C:\\Users\\jdoe\\AppData\\x s3cr3tvalue-xyz-123456 AKIAABCDEFGHIJKLMNOP "
+            "https://user:pw12345@example.com/x ghp_" + "Z" * 36 + " eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcdEFGHijkl\n"  # secret-scan: allow (fake fixture)
+            "C:\\Users\\jdoe\\AppData\\x s3cr3tvalue-xyz-123456 AKIAABCDEFGHIJKLMNOP "  # secret-scan: allow (fake fixture)
             "-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----")  # secret-scan: allow (fake fixture)
     out = R.scrub_text(text)
     for leak in ("abcdef1234567890", "hunter22", "AAAAbbbb", "pw12345", "ghp_", "eyJhbGci", "jdoe", "s3cr3tvalue", "AKIAABCDEFG", "OPENSSH PRIVATE"):
@@ -640,7 +640,7 @@ def test_debug_bundle_is_redacted_and_never_contains_secrets(paths, monkeypatch)
     token = "ghp_" + "T" * 36
     monkeypatch.setenv("AUTOMAGIX_LOGGING_TOKEN", "super-secret-logging-value-123")
     (paths.config / "platform.json").write_text(json.dumps({
-        "ring": "pilot", "registry_url": "https://u:pw99999@example.com/r/", "logging_token": token, "client_secret": "abc123def456",
+        "ring": "pilot", "registry_url": "https://u:pw99999@example.com/r/", "logging_token": token, "client_secret": "abc123def456",  # secret-scan: allow (fake fixture)
         "registry_pubkeys": ["ab" * 32], "log_remote": "owner/repo"}), encoding="utf-8")
     (paths.secrets / "logging_token.dpapi").write_bytes(b"DPAPI-BLOB-" + token.encode())
     (paths.secrets / "tmp").mkdir()
