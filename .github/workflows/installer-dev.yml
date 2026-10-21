@@ -78,7 +78,7 @@ jobs:
             Get-Content (Join-Path $h 'logs\wrapper.log') -ErrorAction SilentlyContinue | Select-Object -Last 40 | Out-Host
             exit 1
           }
-          $exe = Get-ChildItem build/out -Filter *.exe | Select-Object -First 1
+          $exe = Get-ChildItem build/out -Recurse -Filter *-setup.exe | Select-Object -First 1
           Write-Host "installing $($exe.Name)"
           $p = Start-Process -FilePath $exe.FullName -ArgumentList '/S' -Wait -PassThru
           if ($p.ExitCode -ne 0) { throw "installer exit code $($p.ExitCode)" }
