@@ -43,6 +43,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Bundle Node + playwright-core (the registry compares package content, so the framework must be built exactly as in release)
+        run: python tools/build_framework_bundle.py
       - name: Fetch published registry artifacts (if any)
         id: artifacts
         run: |
