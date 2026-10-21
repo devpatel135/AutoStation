@@ -115,7 +115,7 @@ jobs:
         continue-on-error: true
         run: |
           mkdir -p live
-          cp components/automation-registry/manifest.yaml live/manifest.yaml
+          cp ../automation-registry/manifest.yaml live/manifest.yaml
           if ! python -m automation_logging ingest --source dir --from "$GITHUB_WORKSPACE/../logs" --out live/archive > ingest.log 2>&1; then
             echo "::warning title=live ingest failed::$(tail -c 700 ingest.log | tr '\n' ' ')"
             exit 1
