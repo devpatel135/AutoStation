@@ -43,7 +43,7 @@
 
 ## Known gaps (honest list)
 
-* **Not run against real infrastructure from this build environment:** no GitLab, no NSIS, no Docker, no Node. The Python
+* **Not run against your real infrastructure:** GitLab pipelines, the Docker image, real code signing and a real browser run are unverified; NSIS, Node and the Python platform are exercised in GitHub Actions (see `docs/VERIFY_IN_YOUR_ENVIRONMENT.md`). Original note: no GitLab, no Docker in the build environment. The Python
   platform (wrapper-core, logging, registry, builder logic, automations) is exercised by tests on Windows including real DPAPI
   and Credential Manager round-trips; the NSIS script, Dockerfile, GitLab CI files and the Node framework are statically checked
   but must be run once in your environment (see `docs/VERIFY_IN_YOUR_ENVIRONMENT.md`).

@@ -69,6 +69,6 @@ publishes the demo dashboard + portal to GitHub Pages). Production pipelines for
 ## Status and honesty
 
 See [`docs/SECURITY.md`](docs/SECURITY.md) (*Known gaps*) and [`docs/VERIFY_IN_YOUR_ENVIRONMENT.md`](docs/VERIFY_IN_YOUR_ENVIRONMENT.md).
-In short: the Python platform is test-covered (including real Windows DPAPI/Credential Manager round-trips); the NSIS
-installer, Dockerfile, GitLab CI files and Node framework were written without being able to execute NSIS/Docker/Node/GitLab
-in the build environment and need one verification pass in yours.
+In short: CI exercises the Python platform (Windows + Linux, 3.9/3.12), the Node framework tests, the end-to-end walkthrough, and a real NSIS
+build with a silent install/run/uninstall smoke test on a Windows runner. The Dockerfile, GitLab CI files, code signing, a real browser
+run and your LLM endpoint still need one verification pass in your environment.

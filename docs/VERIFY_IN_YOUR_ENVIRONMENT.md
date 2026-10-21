@@ -1,5 +1,11 @@
 # Verify in your environment
 
+> **Update:** GitHub Actions now verifies the Python suites (Windows + Linux, Python 3.9 and 3.12), the Node syntax + tests, the
+> end-to-end walkthrough, and — on a real Windows runner — the NSIS build plus a **silent per-user install -> scheduled task ->
+> first run logged -> uninstall** smoke test (`installer-dev.yml`). What remains for you is what CI cannot reach: your GitLab,
+> your containeryard Docker image, your PKI signing cert, a real browser/Edge run of the Playwright example, your LLM
+> endpoint, and a standard-user (non-admin) VM install. Sections below list those checks.
+
 This repository was built on a Windows machine that had Python and PowerShell but **no Node.js, NSIS, Docker, or GitLab**.
 Everything below was therefore written and statically checked but not executed. Run this list once, in order, before the pilot.
 Each step says what "good" looks like.
