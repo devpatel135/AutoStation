@@ -22,7 +22,7 @@ USER_TROUBLE = [
      "The installer is an unsigned dev/pilot build (production releases are signed with the organisation's code-signing certificate).",
      "Verify the SHA-256 shown on this page first. If it matches and your security team approves, use <em>More info &rarr; Run anyway</em>, or right-click the file &rarr; Properties &rarr; Unblock."),
     ("The installer says git was not found",
-     "Run logs are sent with <code>git</code> over SSH; Git for Windows must be installed and on PATH (per-user install is fine).",
+     "Only installers configured for the SSH log transport need <code>git</code>. The downloadable installer does not; if you see this you are using an organisation build with SSH logging.",
      "Install Git for Windows (user scope), open a new terminal and confirm <code>git --version</code>, then run the installer again - it is safe to re-run."),
     ("Nothing seems to run",
      "The schedule is a Task Scheduler task under <code>\\AUTOMAGIX\\</code>, re-asserted at every sign-in. VDI session resets can clear tasks until the next sign-in.",
@@ -197,11 +197,11 @@ for you. Download it, read it, then run: <code>.\\bootstrap.ps1 -Automation &lt;
         changes = [
             "Files under <code>%LOCALAPPDATA%\\AUTOMAGIX\\</code> only: <code>python\\</code> (embedded runtime), <code>wrapper-core\\</code>, <code>execution-framework\\</code>, "
             f"<code>automations\\{esc(name)}\\</code>, <code>config\\</code>, <code>state\\</code>, <code>logs\\</code>, <code>runs\\</code> (14-day scratch)",
-            "No passwords, tokens or keys are stored by the downloadable installer. (Organisation builds that ship logs to a central server additionally keep a write-only log key encrypted with Windows DPAPI under <code>secrets\\</code>.)",
-            "Run logs stay on your machine in <code>%LOCALAPPDATA%\\AUTOMAGIX\\local-logs\\</code> unless your organisation's build ships them to its logging server",
+            "Connected builds keep a logging token for the project's private logs repository, encrypted with Windows DPAPI under <code>secrets\\</code> (bound to your Windows account). It can only add log files. No passwords for any other system are ever stored",
+            "Every run's log, heartbeat and (on failure) a screenshot and redacted page snapshot are sent over HTTPS to that logs repository; a copy of recent runs stays in <code>%LOCALAPPDATA%\\AUTOMAGIX\\runs\\</code> for 14 days. Standalone builds keep logs only in <code>local-logs\\</code>",
             f"Scheduled tasks (your account, least privilege) under <code>\\AUTOMAGIX\\{esc(name)}-&lt;slot&gt;</code>, plus a sign-in script <code>AUTOMAGIX-maintain.cmd</code> in your Startup folder that re-registers them",
             f"Current-user registry keys: <code>HKCU\\Software\\AUTOMAGIX</code> and the uninstall entry <code>{esc(key)}</code>",
-            "Outbound connections: the registry on GitHub Pages (HTTPS, read-only, for updates) and - only in organisation builds - the logging Git remote (SSH push of run logs). Nothing listens on the network; no services, drivers or admin elevation",
+            "Outbound connections (HTTPS only): the registry on GitHub Pages (read-only, update check on every run and sign-in) and, in connected builds, api.github.com (log upload). Nothing listens on the network; no services, drivers or admin elevation",
             "On the automation's first run, it executes once immediately to prove it works",
         ]
         paused_banner = (f'<div class="warnbox"><strong>Paused:</strong> {esc(e.get("paused_reason") or "no reason recorded")}. You can still install it; it will not run until operators resume it.</div>'
