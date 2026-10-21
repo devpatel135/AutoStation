@@ -1,0 +1,9 @@
+# Inputs for the programme / ROI dashboard (program/index.html). Edit through a pull request.
+# Leave the numbers at 0 until you have real ones: the dashboard then says "cost inputs are not configured" instead of inventing value.
+currency: USD
+hourly_cost: 0                          # fully loaded cost of one hour of the manual work these automations replace
+uipath:
+  license_cost_per_robot_per_year: 0    # what one UiPath unattended/attended robot licence costs per year
+  robots_retired: 0                     # robots/licences switched off because their automations moved to AutoStation
+  orchestrator_cost_per_year: 0         # set when the Orchestrator subscription is actually cancelled
+llm_cost_per_1k_calls: 0                # internal endpoint: usually 0; set a chargeback rate to track LLM cost

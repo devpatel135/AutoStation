@@ -3,8 +3,12 @@
 
     python tools/new_automation.py automation-expense-checker \
         --description "Check expense reports against policy" --owner finops@example.com \
-        --owner-team "FinOps Automation" --classification internal [--runtime python|node] [--out ./automation-expense-checker]
+        --owner-team "FinOps Automation" --classification internal [--template python|transactional|node] [--out ./automation-expense-checker]
         [--register path/to/manifest.yaml]
+
+Templates: ``python`` (default; simple item loop), ``transactional`` (queue-based, the UiPath REFramework equivalent:
+dispatcher/performer modes, business vs system exceptions), ``node`` (Playwright; when its template is present).
+``--runtime python|node`` is kept as an alias of ``--template``.
 
 Creates: starter payload that runs and logs successfully (verified by its own lifecycle test), automation.yaml,
 tests, README, CI wiring that includes automation-builder's shared templates, and a registry manifest stanza.
@@ -14,6 +18,7 @@ With ``--register`` the stanza is appended to the manifest via ``python -m regis
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import shutil
 import string
@@ -54,7 +59,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--owner", required=True, help="owning distribution list (not a person)")
     p.add_argument("--owner-team", default="Automation Platform")
     p.add_argument("--classification", default="internal", choices=CLASSIFICATIONS)
-    p.add_argument("--runtime", default="python", choices=["python", "node"])
+    p.add_argument("--template", default=None, choices=["python", "transactional", "node"], help="payload template (default: python)")
+    p.add_argument("--runtime", default=None, choices=["python", "node"], help="alias of --template (kept for compatibility)")
     p.add_argument("--out", default=None)
     p.add_argument("--register", default=None, help="manifest.yaml to add the stanza to")
     p.add_argument("--no-verify", action="store_true", help="skip running the generated test")
@@ -64,23 +70,24 @@ def main(argv: list[str] | None = None) -> int:
         p.error("name must look like automation-some-name (lowercase, digits, hyphens)")
     if "@" not in a.owner:
         p.error("--owner must be an email/distribution list address")
-    src = HERE / "templates" / f"automation-{a.runtime}"
-    if not src.is_dir():
-        p.error(f"no template for runtime {a.runtime!r}")
+    template = a.template or a.runtime or "python"
+    src = HERE / "templates" / f"automation-{template}"
+    if not src.is_dir() or not any(src.rglob("*.tmpl")):
+        p.error(f"no template {template!r} available (looked in {src})")
     out = Path(a.out or a.name).resolve()
     if out.exists() and any(out.iterdir()):
         p.error(f"{out} already exists and is not empty")
 
     values = {"name": a.name, "description": a.description.replace('"', "'"), "owner": a.owner,
-              "owner_team": a.owner_team, "classification": a.classification}
+              "owner_team": a.owner_team, "classification": a.classification,
+              "queue_name": a.name[len("automation-"):]}
     files = render_tree(src, out, values)
     print(f"created {len(files)} files in {out}")
     for f in files:
         print("  ", f.relative_to(out))
 
-    if not a.no_verify and a.runtime == "python":
+    if not a.no_verify and template in ("python", "transactional"):
         env_dir = HERE.parent / "components" / "wrapper-core"
-        import os
         env = dict(os.environ, WRAPPER_CORE_DIR=str(env_dir))
         r = subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider"], cwd=out, env=env, capture_output=True, text=True)
         print(r.stdout.strip().splitlines()[-1] if r.stdout.strip() else r.stderr.strip()[-300:])

@@ -30,7 +30,11 @@ test('index exposes the documented API; heavy modules are lazy', async (t) => {
   assert.equal(typeof fw.resilience.resilientPage, 'function');
   assert.equal(typeof fw.agent.runAgent, 'function');
   assert.equal(typeof fw.mcp.createServer, 'function');
-  assert.equal(fw.adapters.list().length, 4);
+  assert.equal(fw.adapters.list().length, 9);
+  assert.equal(typeof fw.wrapper.addEvidence, 'function');
+  assert.equal(typeof fw.evidence.captureFailure, 'function');
+  assert.equal(typeof fw.debug.buildDebugOptions, 'function');
+  assert.equal(typeof fw.recorder.convert, 'function');
 
   // entrypoint hands the framework object to main
   let seen;

@@ -8,6 +8,7 @@ const path = require('node:path');
 const events = require('./events');
 const E = require('./errors');
 const retry = require('./retry');
+const evidence = require('./evidence');
 const { llmCall } = require('./llm');
 
 const OUTCOMES = new Set(['success', 'skipped', 'failed']);
@@ -52,12 +53,31 @@ async function trackItem(itemId, fn, fields = {}) {
   return result;
 }
 
+/** When the retry engine gives up, grab failure evidence from the live browser (if any) before the error propagates. */
+async function withEscalationEvidence(promise, reason) {
+  try {
+    return await promise;
+  } catch (err) {
+    if (err instanceof E.Escalation) await evidence.captureSafe(err, { reason });
+    throw err;
+  }
+}
+
 function runWithRetry(fn, policy, opts = {}) {
-  return retry.runWithRetry(fn, policy, opts);
+  return withEscalationEvidence(retry.runWithRetry(fn, policy, opts), 'retries exhausted');
 }
 
 function runItem(itemId, fn, policy, opts = {}) {
-  return retry.runItem(itemId, fn, policy, { logItem, ...opts });
+  return withEscalationEvidence(retry.runItem(itemId, fn, policy, { logItem, ...opts }), `item ${String(itemId).slice(0, 40)} failed`);
+}
+
+/**
+ * addEvidence(name, dataBufferOrString, contentType?) -> {ok, name?, size?, reason?}. Files go to <run dir>/evidence/
+ * (<=8 files, <=1.5 MB total, png/jpeg/html/txt/json/zip only; text is scrubbed). Never throws.
+ */
+function addEvidence(name, data, contentType) {
+  const ctx = events.current();
+  return evidence.createStore({ runDir: ctx.runDir, logEvent: (n, d) => ctx.append(n, d) }).add(name, data, contentType);
 }
 
 function params(env = process.env) {
@@ -105,6 +125,8 @@ async function entrypoint(main, fw, io = {}) {
     setExit(0);
     return 0;
   } catch (exc) {
+    // failure evidence first (screenshot / redacted DOM / context of any live browser); it can never throw
+    await evidence.captureSafe(exc, { reason: 'uncaught error' });
     const esc = exc instanceof E.Escalation ? exc : null;
     const cause = esc && esc.cause ? esc.cause : exc;
     const cat = esc ? esc.category : E.classifyException(exc);
@@ -126,7 +148,7 @@ async function entrypoint(main, fw, io = {}) {
 }
 
 module.exports = {
-  logEvent, logItem, trackItem, runItem, runWithRetry, llmCall, setResult, params, param, isDryRun, assets, emitTrigger,
+  logEvent, logItem, trackItem, runItem, runWithRetry, llmCall, setResult, params, param, isDryRun, assets, emitTrigger, addEvidence,
   entrypoint, errors: { Category: E.Category, AutomationError: E.AutomationError, NetworkError: E.NetworkError,
     AuthExpired: E.AuthExpired, SystemUnavailable: E.SystemUnavailable, DataError: E.DataError, LogicError: E.LogicError,
     Escalation: E.Escalation },

@@ -1,0 +1,38 @@
+<Activity mc:Ignorable="sap sap2010" x:Class="Main" xmlns="http://schemas.microsoft.com/netfx/2009/xaml/activities" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:sap="http://schemas.microsoft.com/netfx/2009/xaml/activities/presentation" xmlns:sap2010="http://schemas.microsoft.com/netfx/2010/xaml/activities/presentation" xmlns:ui="http://schemas.uipath.com/workflow/activities" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <!-- SYNTHETIC SAMPLE: browser-only flow with an image click and an attended input dialog; no exception handling -->
+  <Sequence DisplayName="Scrape vendor statements">
+    <ui:OpenBrowser DisplayName="Open vendor portal" Url="https://vendor-portal.example.com/login" BrowserType="Chrome">
+      <ui:OpenBrowser.Body>
+        <Sequence>
+          <ui:TypeInto DisplayName="Type user" Text="svc-portal-reader">
+            <ui:TypeInto.Target>
+              <ui:Target Selector="&lt;html app='chrome.exe' title='Vendor Portal*' /&gt;&lt;webctrl id='username' tag='INPUT' /&gt;" />
+            </ui:TypeInto.Target>
+          </ui:TypeInto>
+          <ui:TypeSecureText DisplayName="Type password" SecureText="[secPortalPassword]">
+            <ui:TypeSecureText.Target>
+              <ui:Target Selector="&lt;html app='chrome.exe' title='Vendor Portal*' /&gt;&lt;webctrl id='password' tag='INPUT' /&gt;" />
+            </ui:TypeSecureText.Target>
+          </ui:TypeSecureText>
+          <ui:Click DisplayName="Sign in">
+            <ui:Click.Target>
+              <ui:Target Selector="&lt;html app='chrome.exe' title='Vendor Portal*' /&gt;&lt;webctrl tag='BUTTON' innertext='Sign in' /&gt;" />
+            </ui:Click.Target>
+          </ui:Click>
+          <ui:NavigateTo DisplayName="Go to statements" Url="https://vendor-portal.example.com/statements" />
+          <ui:ExtractStructuredData DisplayName="Extract statement table" />
+          <ui:ClickImage DisplayName="Click the export icon (no stable selector)" />
+          <ui:GetText DisplayName="Read the confirmation banner">
+            <ui:GetText.Target>
+              <ui:Target Selector="&lt;html app='chrome.exe' /&gt;&lt;webctrl css-selector='.banner' tag='DIV' /&gt;" />
+            </ui:GetText.Target>
+          </ui:GetText>
+        </Sequence>
+      </ui:OpenBrowser.Body>
+    </ui:OpenBrowser>
+    <ui:InputDialog DisplayName="Ask which month to export" Title="Month" Label="Enter the month (YYYY-MM)" />
+    <ui:WriteCsv DisplayName="Write statements.csv" FilePath="C:\Reports\statements.csv" />
+    <ui:LogMessage DisplayName="Done" Level="Info" Message="[&quot;scrape finished&quot;]" />
+    <ui:Delay DisplayName="Wait for download" Duration="00:00:10" />
+  </Sequence>
+</Activity>

@@ -1,0 +1,304 @@
+# AUTOSTATION registry manifest. Edit through merge requests (or `python -m registry ...`).
+# STARTER CONTENT: every sha256 below is the all-zero PLACEHOLDER. `registry validate` only accepts it with
+# --allow-placeholders; real releases (add-version) replace it with the package's hash. Comments are not
+# preserved when the tool rewrites this file.
+schema_version: 1
+fleet:
+  paused: false
+  paused_reason: ""
+rings:
+  - dev
+  - pilot
+  - broad
+compatibility:
+  - wrapper_core: ">=0.1.0,<1.0.0"
+    execution_framework: ">=0.1.0,<1.0.0"
+components:
+  wrapper-core:
+    rings:
+      dev: "0.1.0"
+      pilot: "0.1.0"
+      broad: "0.1.0"
+    versions:
+      "0.1.0":
+        url: artifacts/components/wrapper-core-0.1.0.zip
+        sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+  execution-framework:
+    rings:
+      dev: "0.1.0"
+      pilot: "0.1.0"
+      broad: "0.1.0"
+    versions:
+      "0.1.0":
+        url: artifacts/components/execution-framework-0.1.0.zip
+        sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+assets:
+  default:
+    internal_api_url: "https://api.example.internal"
+    feature_flags:
+      run_synopsis: true
+  dev: {}
+automations:
+  automation-hello-world:
+    description: "Test automation: proves install, scheduling, logging, self-heal and the LLM seam end to end."
+    owner: automation-platform@example.com
+    owner_team: Automation Platform
+    systems:
+      - none
+    data_classification: public
+    status: active
+    paused_reason: ""
+    llm_allowed_classification: internal
+    rings:
+      dev: "1.0.0"
+      pilot: "1.0.0"
+      broad: "1.0.0"
+    versions:
+      "1.0.0":
+        url: artifacts/automations/automation-hello-world-1.0.0.zip
+        sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+        requires:
+          wrapper_core: ">=0.1.0,<1.0.0"
+          execution_framework: ">=0.1.0,<1.0.0"
+    schedule:
+      timezone: UTC
+      expected_duration_ms:
+        baseline: 30000
+        warn_threshold: 3.0
+      slots:
+        - id: daily
+          type: daily
+          time: "09:00"
+          params:
+            message: hello
+    error_handling:
+      max_retries: 3
+      network_retry_wait_s: 60
+      backoff_multiplier: 2.0
+      skip_on_data_error: true
+      escalate_after_retries: true
+    notify_on_complete: false
+    catalog:
+      summary: Smoke-test automation used to validate every platform release before real work depends on it.
+      systems:
+        - none
+      owner_team: Automation Platform
+      data_classification: public
+      process_owner: automation-platform@example.com
+      links:
+        - title: Getting started
+          url: "https://wiki.example.internal/autostation/getting-started"
+      minutes_per_item: 0
+      tags:
+        - test
+        - platform
+  automation-invoice-router:
+    description: "Pulls open AP invoices from System X, classifies each with the LLM (Pattern 1) and routes it to the right AP queue."
+    owner: ap-automation@example.com
+    owner_team: AP Automation
+    systems:
+      - System X
+      - AP workflow queue
+    data_classification: internal
+    status: active
+    paused_reason: ""
+    llm_allowed_classification: internal
+    rings:
+      dev: "1.2.0"
+      pilot: "1.1.0"
+      broad: "1.0.0"
+    versions:
+      "1.0.0":
+        url: artifacts/automations/automation-invoice-router-1.0.0.zip
+        sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+        requires:
+          wrapper_core: ">=0.1.0,<1.0.0"
+          execution_framework: ">=0.1.0,<1.0.0"
+      "1.1.0":
+        url: artifacts/automations/automation-invoice-router-1.1.0.zip
+        sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+        requires:
+          wrapper_core: ">=0.1.0,<1.0.0"
+          execution_framework: ">=0.1.0,<1.0.0"
+      "1.2.0":
+        url: artifacts/automations/automation-invoice-router-1.2.0.zip
+        sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+        requires:
+          wrapper_core: ">=0.1.0,<1.0.0"
+          execution_framework: ">=0.1.0,<1.0.0"
+    schedule:
+      timezone: America/New_York
+      expected_duration_ms:
+        baseline: 120000
+        warn_threshold: 2.0
+      maintenance_windows:
+        - days:
+            - Saturday
+            - Sunday
+        - daily: "23:00-02:00"
+      slots:
+        - id: daily
+          type: daily
+          time: "09:00"
+          params:
+            date_range: yesterday
+        - id: weekly
+          type: weekly
+          days:
+            - Monday
+          time: "08:00"
+          params:
+            date_range: last_week
+    error_handling:
+      max_retries: 3
+      network_retry_wait_s: 60
+      backoff_multiplier: 2.0
+      vpn_tool: tools/vpn_reconnect.ps1
+      skip_on_data_error: true
+      escalate_after_retries: true
+    notify_on_complete: false
+    catalog:
+      summary: "Routes open AP invoices to the correct team; flags documents with missing vendor data for manual review."
+      systems:
+        - System X
+        - AP workflow queue
+      owner_team: AP Automation
+      data_classification: internal
+      process_owner: ap-lead@example.com
+      links:
+        - title: Process runbook
+          url: "https://wiki.example.internal/ap/invoice-routing"
+      minutes_per_item: 4
+      tags:
+        - finance
+        - ap
+        - llm
+  automation-portal-report:
+    description: "Browser automation: signs in with the user's own session, downloads the quarterly compliance report from the internal portal and archives it."
+    owner: compliance-automation@example.com
+    owner_team: Compliance Operations
+    systems:
+      - Internal compliance portal
+    data_classification: internal
+    status: active
+    paused_reason: ""
+    llm_allowed_classification: internal
+    rings:
+      dev: "0.9.0"
+      pilot: "0.9.0"
+    versions:
+      "0.9.0":
+        url: artifacts/automations/automation-portal-report-0.9.0.zip
+        sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+        requires:
+          wrapper_core: ">=0.1.0,<1.0.0"
+          execution_framework: ">=0.1.0,<1.0.0"
+    schedule:
+      timezone: America/New_York
+      expected_duration_ms:
+        baseline: 300000
+        warn_threshold: 2.0
+      maintenance_windows:
+        - days:
+            - Sunday
+      slots:
+        - id: daily
+          type: daily
+          time: "07:30"
+          params:
+            report: quarterly
+        - id: poll
+          type: poll
+          every_minutes: 15
+          params:
+            report: adhoc
+    error_handling:
+      max_retries: 3
+      network_retry_wait_s: 60
+      backoff_multiplier: 2.0
+      vpn_tool: tools/vpn_reconnect.ps1
+      skip_on_data_error: true
+      escalate_after_retries: true
+    notify_on_complete: true
+    catalog:
+      summary: "Downloads and archives the compliance report; uses the Playwright resilience layer when selectors drift."
+      systems:
+        - Internal compliance portal
+      owner_team: Compliance Operations
+      data_classification: internal
+      process_owner: compliance-lead@example.com
+      links: []
+      minutes_per_item: 25
+      tags:
+        - compliance
+        - browser
+        - playwright
+  automation-notifier:
+    description: "Dog-food automation: turns signals.json from the analytics pipeline into Teams and email notifications for the owning teams."
+    owner: automation-platform@example.com
+    owner_team: Automation Platform
+    systems:
+      - Microsoft Teams
+      - SMTP relay
+    data_classification: internal
+    status: active
+    paused_reason: ""
+    llm_allowed_classification: internal
+    rings:
+      dev: "1.0.0"
+      pilot: "1.0.0"
+      broad: "1.0.0"
+    versions:
+      "1.0.0":
+        url: artifacts/automations/automation-notifier-1.0.0.zip
+        sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+        requires:
+          wrapper_core: ">=0.1.0,<1.0.0"
+          execution_framework: ">=0.1.0,<1.0.0"
+    schedule:
+      timezone: UTC
+      expected_duration_ms:
+        baseline: 60000
+        warn_threshold: 3.0
+      slots:
+        - id: hourly
+          type: hourly
+          every: 1
+          params:
+            mode: digest
+        - id: poll
+          type: poll
+          every_minutes: 10
+          params:
+            mode: alert
+    error_handling:
+      max_retries: 3
+      network_retry_wait_s: 60
+      backoff_multiplier: 2.0
+      skip_on_data_error: true
+      escalate_after_retries: true
+    notify_on_complete: false
+    triggers:
+      - on_automation: automation-invoice-router
+        on_status: failed
+        slot: poll
+        params:
+          source: automation-invoice-router
+      - on_automation: automation-portal-report
+        on_status: failed
+        slot: poll
+        params:
+          source: automation-portal-report
+    catalog:
+      summary: "Notifies owners of failed, missed or hung runs so failures never wait to be noticed."
+      systems:
+        - Microsoft Teams
+        - SMTP relay
+      owner_team: Automation Platform
+      data_classification: internal
+      process_owner: automation-platform@example.com
+      links: []
+      minutes_per_item: 2
+      tags:
+        - platform
+        - alerting

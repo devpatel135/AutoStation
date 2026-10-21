@@ -5,7 +5,7 @@ from wrapper_core import manifest as wcm
 from wrapper_core import versions
 
 from .common import (classification_pill, describe_schedule, describe_slot, describe_windows, esc, health_pill, installer_rel,
-                     layout, pill, rings_of, safe_url, status_pill)
+                     layout, rel_href, pill, rings_of, safe_url, status_pill)
 from . import markdown
 
 INDEX_JS = r"""
@@ -186,8 +186,8 @@ def build_detail(name: str, entry: dict, m: dict, config: dict, health: dict | N
                   for s in health.get("signals") or []) + "</table>" if health.get("signals") else ""))
     dr = _default_ring(entry, order)
     dv = (entry.get("rings") or {}).get(dr) if dr else None
-    dl = (f'<a class="btn primary" href="../{esc(installer_rel(config, name, dv))}" download>Download installer v{esc(dv)} ({esc(dr)})</a> '
-          f'<a class="btn" href="../{esc(installer_rel(config, name, dv))}.sha256">sha256 file</a>') if dv else ""
+    dl = (f'<a class="btn primary" href="{esc(rel_href(config, installer_rel(config, name, dv), "../"))}" download>Download installer v{esc(dv)} ({esc(dr)})</a> '
+          f'<a class="btn" href="{esc(rel_href(config, installer_rel(config, name, dv), "../"))}.sha256">sha256 file</a>') if dv else ""
     body = f"""<p><a href="../index.html">&larr; Catalog</a></p>
 <div class="row" style="display:flex;gap:.8rem;align-items:center;flex-wrap:wrap"><h1 style="font-family:var(--mono)">{esc(name)}</h1>{status_pill(entry)} {health_pill(health)}</div>
 <p class="summary" style="margin-top:.4rem">{esc(cat.get('summary') or entry.get('description'))}</p>

@@ -1,0 +1,160 @@
+"""$name: $description
+
+Transactional automation - the AutoStation equivalent of the UiPath REFramework.
+
+    Init -> Dispatcher (fill the queue) and/or Performer (process transactions) -> End process (summary)
+
+Pick the mode with the schedule-slot parameter ``mode`` in the registry manifest (default ``both``):
+
+    dispatch   read the source and add one queue item per transaction (REFramework "dispatcher")
+    perform    take items from the queue and process them one by one      (REFramework "performer")
+    both       dispatch then perform in one run (simple/small workloads, local development)
+
+Exception handling mirrors the REFramework:
+
+    business rule exception  raise wrapper.DataError(...)   -> q.fail_business: NEVER retried, reported as skipped
+    system exception         anything else                  -> retried in-process for transient faults (manifest
+                                                              error_handling), then q.fail_system re-queues the item up to
+                                                              ``max_retries``; programming errors (LogicError) are not retried
+    needs a human            raise NeedsReview(reason)      -> q.needs_review (UiPath Action Center equivalent)
+    too many system errors   in a row                       -> the run stops (REFramework MaxConsecutiveSystemExceptions)
+
+Parameters / assets (schedule-slot ``params`` override manifest ``assets``): mode, queue_name, max_retries,
+max_consecutive_system_exceptions, max_items (0 = unlimited). Honours --dry-run (nothing is queued or processed).
+Rules this file is reviewed against: docs/AUTOMATION_STANDARD.md (``python -m wrapper_core assist review main.py``).
+"""
+from __future__ import annotations
+
+import wrapper_core as wrapper
+from wrapper_core.activities import queue
+from wrapper_core.activities.queue import NeedsReview  # raise from process_transaction when a person must decide (Action Center)
+from wrapper_core.retry import Skipped
+
+QUEUE_NAME = "$queue_name"
+MODES = ("dispatch", "perform", "both")
+
+
+# --- Init ----------------------------------------------------------------------------------------------------
+def init() -> dict:
+    """REFramework 'Init All Settings': config from manifest assets, overridden by the slot params."""
+    cfg = {**wrapper.assets(), **wrapper.params()}
+    settings = {
+        "mode": str(cfg.get("mode", "both")).lower(),
+        "queue": str(cfg.get("queue_name", QUEUE_NAME)),
+        "max_retries": int(cfg.get("max_retries", 3)),
+        "max_consecutive_system_exceptions": int(cfg.get("max_consecutive_system_exceptions", 3)),
+        "max_items": int(cfg.get("max_items", 0)) or None,
+    }
+    if settings["mode"] not in MODES:
+        raise wrapper.LogicError(f"mode must be one of {MODES}, got {settings['mode']!r}")
+    wrapper.log_event("init", settings)
+    return settings
+
+
+# --- Dispatcher ----------------------------------------------------------------------------------------------
+def fetch_source_items() -> list[dict]:
+    """TODO: read the real source (API, file drop, mailbox...). Every item needs a stable unique ``id`` (the queue reference)."""
+    return [{"id": "T-1", "amount": 120}, {"id": "T-2", "amount": 80}, {"id": "T-3", "amount": -5}, {"id": "T-4", "amount": 9999, "review": True}]
+
+
+def dispatch(q, cfg: dict) -> int:
+    added = 0
+    for rec in fetch_source_items():
+        if wrapper.is_dry_run():
+            added += 1
+            continue
+        # duplicates (same reference) are ignored, so re-running the dispatcher is safe
+        if q.add(str(rec["id"]), rec, priority=int(rec.get("priority", 2))):
+            added += 1
+    wrapper.log_event("dispatched", {"added": added, "queue": cfg["queue"]})
+    return added
+
+
+# --- Performer -------------------------------------------------------------------------------------------------
+def process_transaction(item) -> dict | None:
+    """TODO: the business logic for ONE transaction (REFramework 'Process.xaml'). Return an optional output dict.
+
+    Raise ``wrapper.DataError`` for business rule exceptions and ``NeedsReview`` when a human must decide.
+    Never perform side effects when ``wrapper.is_dry_run()``.
+    """
+    rec = item.payload
+    if rec.get("amount", 0) < 0:
+        raise wrapper.DataError(f"invalid amount for {item.reference}")  # business rule exception
+    if rec.get("review"):
+        raise NeedsReview("amount above the auto-approval limit")
+    return {"approved": True, "amount": rec.get("amount")}
+
+
+def perform(q, cfg: dict) -> dict:
+    # NOTE: if your performer is just "call a handler per item", `queue.run_queue(q, handler)` can replace this loop.
+    stats = {"succeeded": 0, "business_exceptions": 0, "system_exceptions": 0, "needs_review": 0}
+    consecutive_system = 0
+    seen = 0
+    while True:
+        if cfg["max_items"] and seen >= cfg["max_items"]:
+            break
+        item = q.next()
+        if item is None:
+            break
+        seen += 1
+        ref = item.reference
+
+        def attempt():
+            try:
+                return ("ok", process_transaction(item))
+            except NeedsReview as exc:
+                return ("review", str(exc))
+
+        try:
+            result = wrapper.run_with_retry(attempt, item_id=ref)
+        except wrapper.Escalation as esc:
+            if esc.category is wrapper.Category.DATA_ERROR:  # skip_on_data_error=false in the manifest: still a business exception
+                q.fail_business(item, str(esc))
+                stats["business_exceptions"] += 1
+                wrapper.log_item(ref, "skipped", reason=str(esc)[:200], error_category="DATA_ERROR", retry_no=item.retry_no)
+                consecutive_system = 0
+                continue
+            # system exception: LOGIC errors never retry; everything else is re-queued up to max_retries
+            retries = 0 if esc.category is wrapper.Category.LOGIC_ERROR else cfg["max_retries"]
+            q.fail_system(item, str(esc), max_retries=retries)
+            stats["system_exceptions"] += 1
+            consecutive_system += 1
+            wrapper.log_item(ref, "failed", error_category=esc.category.value, detail=str(esc)[:300], retry_no=item.retry_no)
+            if consecutive_system >= cfg["max_consecutive_system_exceptions"]:
+                raise wrapper.Escalation(f"{consecutive_system} consecutive system exceptions; stopping the run", esc.category, consecutive_system) from esc
+            continue
+        if isinstance(result, Skipped):  # DataError with skip_on_data_error=true => business rule exception
+            q.fail_business(item, result.reason or "business rule exception")
+            stats["business_exceptions"] += 1
+            wrapper.log_item(ref, "skipped", reason=(result.reason or "business rule exception")[:200], error_category="DATA_ERROR", retry_no=item.retry_no)
+            consecutive_system = 0
+            continue
+        kind, payload = result
+        if kind == "review":
+            q.needs_review(item, payload)
+            stats["needs_review"] += 1
+            wrapper.log_item(ref, "skipped", reason="needs_review: " + payload[:160], retry_no=item.retry_no)
+        else:
+            q.succeed(item, output=payload if isinstance(payload, dict) else None)
+            stats["succeeded"] += 1
+            wrapper.log_item(ref, "success", retry_no=item.retry_no)
+        consecutive_system = 0
+    return stats
+
+
+# --- End process -----------------------------------------------------------------------------------------------
+@wrapper.entrypoint
+def main() -> None:
+    cfg = init()
+    q = queue.open(cfg["queue"])
+    dispatched, stats = 0, {}
+    if cfg["mode"] in ("dispatch", "both"):
+        dispatched = dispatch(q, cfg)
+    if cfg["mode"] in ("perform", "both") and not wrapper.is_dry_run():
+        stats = perform(q, cfg)
+    counts = q.counts() if not wrapper.is_dry_run() else {}
+    wrapper.set_result(mode=cfg["mode"], dispatched=dispatched, queue=counts, **stats)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,21 @@
+{
+  "name": "Invoice_Processing_REF",
+  "projectId": "00000000-0000-4000-8000-000000000001",
+  "description": "SYNTHETIC SAMPLE - invoice performer built on the REFramework (queue + Excel + HTTP + mail)",
+  "main": "Main.xaml",
+  "dependencies": {
+    "UiPath.Excel.Activities": "[2.12.3]",
+    "UiPath.Mail.Activities": "[1.17.2]",
+    "UiPath.System.Activities": "[21.10.4]",
+    "UiPath.UIAutomation.Activities": "[21.10.5]",
+    "UiPath.WebAPI.Activities": "[1.11.0]"
+  },
+  "webServices": [],
+  "entitlements": [],
+  "schemaVersion": "4.0",
+  "studioVersion": "21.10.3.0",
+  "projectVersion": "1.0.4",
+  "runtimeOptions": {"autoDispose": false, "isPausable": true, "requiresUserInteraction": false, "supportsPersistence": false},
+  "expressionLanguage": "VisualBasic",
+  "isTemplate": false
+}

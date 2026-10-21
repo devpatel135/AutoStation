@@ -1,0 +1,34 @@
+# $name
+
+$description
+
+* **Owner:** $owner
+* **Pattern:** transactional (queue-based) - the AutoStation equivalent of the UiPath REFramework
+* **Data classification:** $classification
+
+## How it maps to the REFramework
+
+| REFramework | This payload |
+|---|---|
+| Init All Settings (Config.xlsx) | `init()` - manifest `assets` + slot `params` |
+| Dispatcher (Add Queue Item) | `dispatch(q, cfg)` - `q.add(reference, payload)`; duplicate references are ignored |
+| Get Transaction Data | `q.next()` |
+| Process (business logic) | `process_transaction(item)` |
+| Business Rule Exception (no retry) | `raise wrapper.DataError(...)` -> `q.fail_business` |
+| System Exception (retry) | transient faults retried by `wrapper.run_with_retry`, then `q.fail_system(max_retries)` re-queues |
+| Action Center / validation station | `raise NeedsReview(reason)` -> `q.needs_review` (shows on the dashboard) |
+| MaxConsecutiveSystemExceptions | `max_consecutive_system_exceptions` param |
+| End Process | `wrapper.set_result(...)` summary |
+
+Slots in `manifest-entry.yaml`: a daily `dispatch` slot and an hourly `perform` slot (`mode` param). Use `mode=both` for small jobs.
+
+## Develop
+
+```bash
+python -m wrapper_core dev . --param mode=both       # real lifecycle, offline
+python -m wrapper_core assist review main.py         # compliance review
+python -m pytest
+```
+
+Replace `fetch_source_items()` and `process_transaction()`; everything else is the framework. Queue API:
+`wrapper_core.activities.queue` (`open`, `add`, `next`, `succeed`, `fail_business`, `fail_system`, `needs_review`, `counts`) - see `docs/ACTIVITIES.md`.

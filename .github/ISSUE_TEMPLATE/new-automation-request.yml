@@ -1,0 +1,76 @@
+name: New automation request (intake)
+description: Propose a process to automate
+title: "[intake] "
+labels: ["intake", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Answer what you can; the platform team will help with the rest. The goal is a process that runs **unattended** - if a person must click something
+        mid-run, tell us what that person provides or decides and we will look for a file, a rule or a trigger that replaces it.
+  - type: input
+    id: process_name
+    attributes:
+      label: Process name
+      placeholder: "Weekly AP invoice routing"
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: What happens today (steps, systems, who does it)
+    validations:
+      required: true
+  - type: input
+    id: owner
+    attributes:
+      label: Owning team / distribution list
+      description: A list, not a person - alerts go here
+      placeholder: ap-automation@example.com
+    validations:
+      required: true
+  - type: input
+    id: volume
+    attributes:
+      label: Volume and schedule
+      placeholder: "~200 invoices, every weekday 09:00"
+  - type: input
+    id: minutes_per_item
+    attributes:
+      label: Manual minutes per item (for the value dashboard)
+      placeholder: "4"
+  - type: dropdown
+    id: classification
+    attributes:
+      label: Highest data classification touched
+      options:
+        - public
+        - internal
+        - confidential
+        - restricted
+    validations:
+      required: true
+  - type: dropdown
+    id: access
+    attributes:
+      label: How can the target system be reached?
+      options:
+        - API / certificate auth (headless - best)
+        - Browser only (SSO)
+        - Windows desktop application
+        - Citrix / image only
+        - Files / email / shared folder
+        - Not sure
+    validations:
+      required: true
+  - type: checkboxes
+    id: unattended
+    attributes:
+      label: Unattended check
+      options:
+        - label: No person needs to interact while it runs (or I described what they provide in the details)
+          required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything else (existing UiPath project name, SLAs, known edge cases)

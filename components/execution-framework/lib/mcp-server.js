@@ -10,7 +10,7 @@ const readline = require('node:readline');
 const schemaLib = require('./schema');
 
 const PROTOCOL_VERSION = '2024-11-05';
-const SERVER_INFO = { name: 'amx-browser', version: '0.1.0' };
+const SERVER_INFO = { name: 'amx-browser', version: require('../package.json').version };
 
 function textContent(text) {
   return { type: 'text', text: typeof text === 'string' ? text : JSON.stringify(text, null, 2) };

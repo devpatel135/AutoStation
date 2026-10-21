@@ -10,7 +10,7 @@ import traceback
 from datetime import datetime
 from pathlib import Path
 
-from . import alerting, analytics, dashboard, diagnose, triggers
+from . import alerting, analytics, dashboard, diagnose, program, triggers
 from .common import iso, read_json, utcnow, wc_manifest, write_json
 
 
@@ -22,7 +22,8 @@ def load_manifest(path) -> dict:
 
 def build(archive, manifest_path, state_dir, out, now: datetime | None = None, alert_config=None,
           dry_run_alerts: bool = False, requests_dir=None, max_llm_calls: int = 20, config: dict | None = None,
-          alert_ctx: alerting.Context | None = None, log_base_url: str | None = None, llm_call=None) -> dict:
+          alert_ctx: alerting.Context | None = None, log_base_url: str | None = None, llm_call=None,
+          program_config=None) -> dict:
     now = now or utcnow()
     state_dir, out = Path(state_dir), Path(out)
     state_dir.mkdir(parents=True, exist_ok=True)
@@ -82,4 +83,5 @@ def build(archive, manifest_path, state_dir, out, now: datetime | None = None, a
 
     stage("triggers", lambda: triggers.run(data, manifest, now, Path(out) / "triggers.json", requests_dir))
     stage("dashboard", lambda: dashboard.build_site(report, data, out))
+    stage("program", lambda: program.build(report, data, manifest, Path(out) / "program", program.load_config(program_config), now)["program"])
     return summary

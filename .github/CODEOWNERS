@@ -1,0 +1,25 @@
+# Platform approvers must review anything that changes what runs on endpoints, how it is released, or who can release it.
+# Replace @devpatel135 with a team (e.g. @your-org/platform-approvers) and enable
+# Settings -> Branches -> main -> "Require review from Code Owners" (see docs/PIPELINES.md).
+
+# the registry: promotion, pause/resume, rollback, decommission are manifest edits
+/components/automation-registry/manifest.yaml        @devpatel135
+/components/automation-registry/history/             @devpatel135
+/components/automation-registry/triggers.json        @devpatel135
+
+# pipelines and release plumbing
+/.github/                                            @devpatel135
+/tools/build_registry.py                             @devpatel135
+/tools/build_site.py                                 @devpatel135
+
+# installer and secret handling (what runs on every endpoint, how keys are stored)
+/components/automation-builder/installer/            @devpatel135
+/components/automation-builder/scripts/              @devpatel135
+/components/wrapper-core/wrapper_core/secrets.py     @devpatel135
+/components/wrapper-core/wrapper_core/selfheal.py    @devpatel135
+/components/wrapper-core/wrapper_core/transport.py   @devpatel135
+
+# policy documents
+/docs/GOVERNANCE.md                                  @devpatel135
+/docs/AUTOMATION_STANDARD.md                         @devpatel135
+/docs/SECURITY.md                                    @devpatel135

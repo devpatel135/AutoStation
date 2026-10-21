@@ -23,6 +23,12 @@ ManifestDPIAware true
 !define DEFAULT_RING    "@@DEFAULT_RING@@"
 !define REGISTRY_URL    "@@REGISTRY_URL@@"
 !define LOG_REMOTE      "@@LOG_REMOTE@@"
+; standalone installs (log_remote "local") keep logs on disk: git/ssh are not prerequisites
+!if "${LOG_REMOTE}" == "local"
+  !define GIT_ARG "-SkipGit"
+!else
+  !define GIT_ARG ""
+!endif
 !define LLM_ENDPOINT    "@@LLM_ENDPOINT@@"
 !define LLM_MODEL       "@@LLM_MODEL@@"
 !define WRAPPER_VERSION "@@WRAPPER_VERSION@@"
@@ -128,7 +134,7 @@ Section "Install" SecInstall
 
   ; 1. prerequisites (git, ssh, disk, write access) - nothing is written to the install dir before this passes
   DetailPrint "Checking prerequisites..."
-  nsExec::ExecToStack `"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\scripts\install-check.ps1" -InstallDir "$INSTDIR"`
+  nsExec::ExecToStack `"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\scripts\install-check.ps1" -InstallDir "$INSTDIR" ${GIT_ARG}`
   Pop $0
   Pop $1
   DetailPrint "$1"

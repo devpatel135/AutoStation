@@ -1,0 +1,16 @@
+{
+  "name": "SAP_Desktop_Posting",
+  "projectId": "00000000-0000-4000-8000-000000000003",
+  "description": "SYNTHETIC SAMPLE - posts journal entries through the SAP GUI and a desktop Excel sheet",
+  "main": "Main.xaml",
+  "dependencies": {
+    "UiPath.Excel.Activities": "[2.12.3]",
+    "UiPath.System.Activities": "[21.10.4]",
+    "UiPath.UIAutomation.Activities": "[21.10.5]"
+  },
+  "schemaVersion": "4.0",
+  "studioVersion": "21.10.3.0",
+  "projectVersion": "0.9.2",
+  "expressionLanguage": "VisualBasic",
+  "isTemplate": false
+}

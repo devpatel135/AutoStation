@@ -1,0 +1,6 @@
+Name,ProcessName,CronExpression,TimeZone,Enabled
+Invoice Performer Weekdays,Invoice_Processing_REF,0 0 8 ? * MON-FRI *,America/New_York,true
+Invoice Performer Frequent,Invoice_Processing_REF,0 0/30 8-18 ? * MON-FRI *,America/New_York,false
+Portal Nightly,Portal_Scraper,0 30 2 ? * * *,UTC,true
+SAP Month End,SAP_Desktop_Posting,0 0 6 1 * ? *,Europe/London,true
+Legacy Weekly,Legacy_Unused_Process,0 0 5 ? * SUN *,UTC,true

@@ -1,0 +1,41 @@
+<Activity mc:Ignorable="sap sap2010" x:Class="Process" xmlns="http://schemas.microsoft.com/netfx/2009/xaml/activities" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:sap="http://schemas.microsoft.com/netfx/2009/xaml/activities/presentation" xmlns:sap2010="http://schemas.microsoft.com/netfx/2010/xaml/activities/presentation" xmlns:ui="http://schemas.uipath.com/workflow/activities" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <!-- SYNTHETIC SAMPLE: validates an invoice against the vendor master (HTTP + Excel), mails exceptions -->
+  <Sequence DisplayName="Process Invoice">
+    <Sequence.Variables>
+      <Variable x:TypeArguments="x:String" Name="strApiKey" Default="FAKE-SYNTHETIC-KEY-0001" />
+      <Variable x:TypeArguments="x:String" Name="strVendorId" />
+    </Sequence.Variables>
+    <TryCatch DisplayName="Process with exception handling">
+      <TryCatch.Try>
+        <Sequence>
+          <ui:RetryScope DisplayName="Call vendor master" NumberOfRetries="3" RetryInterval="00:00:05">
+            <ui:RetryScope.Body>
+              <ui:HttpClient DisplayName="GET vendor" EndPoint="https://erp.example.internal/api/vendors" Method="GET" />
+            </ui:RetryScope.Body>
+          </ui:RetryScope>
+          <ui:ExcelApplicationScope DisplayName="Approved vendors" WorkbookPath="[in_Config(&quot;ApprovedVendorsPath&quot;)]">
+            <ui:ExcelApplicationScope.Body>
+              <ui:ExcelReadRange DisplayName="Read approved vendors" SheetName="Vendors" />
+            </ui:ExcelApplicationScope.Body>
+          </ui:ExcelApplicationScope>
+          <ui:FilterDataTable DisplayName="Filter vendor" />
+          <If Condition="[dtMatch.Rows.Count = 0]" DisplayName="Vendor not approved?">
+            <If.Then>
+              <ui:AddQueueItem DisplayName="Queue for review" QueueName="ExceptionsQueue" />
+            </If.Then>
+          </If>
+          <ui:SendMail DisplayName="Notify AP" Server="smtp.example.internal" Port="587" Password="P@ssw0rd-SYNTHETIC" Email="ap-robot@example.internal" To="[&quot;ap-team@example.internal&quot;]" Subject="Invoice processed" />
+          <ui:LogMessage DisplayName="Log" Level="Info" Message="[&quot;processed&quot;]" />
+          <ui:Delay DisplayName="Pace the ERP" Duration="00:00:02" />
+        </Sequence>
+      </TryCatch.Try>
+      <TryCatch.Catches>
+        <Catch x:TypeArguments="x:Exception">
+          <ActivityAction x:TypeArguments="x:Exception">
+            <Throw DisplayName="Rethrow as business exception" />
+          </ActivityAction>
+        </Catch>
+      </TryCatch.Catches>
+    </TryCatch>
+  </Sequence>
+</Activity>

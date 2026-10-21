@@ -40,6 +40,8 @@ fw.wrapper.entrypoint(async (framework) => {
     channel: w.param('channel', 'msedge'),
   });
   try {
+    // session.guard captures failure evidence (screenshot + redacted DOM snapshot) on any error, then rethrows it unchanged
+    await session.guard(async () => {
     const { page } = session;
     await w.runWithRetry(() => page.goto(portalUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }));
 
@@ -72,6 +74,7 @@ fw.wrapper.entrypoint(async (framework) => {
     const manual = kind === 'credential';
     if (manual) w.logEvent('manual_step_required', { reason: 'Microsoft is asking for credentials/MFA; not handled by design', host: finalHost });
     w.setResult({ state: clicked ? 'account_selected' : (manual ? 'manual_step_required' : kind), clicked, final_host: finalHost });
+    });
   } finally {
     await session.close();
   }

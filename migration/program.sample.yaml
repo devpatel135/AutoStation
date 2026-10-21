@@ -1,0 +1,9 @@
+# SAMPLE program inputs for the licence-savings ESTIMATE (synthetic numbers - replace with your contract values).
+licence:
+  currency: USD
+  annual_cost_per_unattended_robot: 8000
+  annual_cost_per_attended_robot: 1500
+  annual_orchestrator_cost: 20000
+robots:
+  unattended_total: 3
+  attended_total: 3

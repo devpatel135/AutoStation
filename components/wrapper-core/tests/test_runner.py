@@ -6,6 +6,8 @@ import shutil
 
 import pytest
 
+from wrapper_core import __version__ as WC_VERSION
+
 from wrapper_core import lifecycle, mockllm, runctx, selfheal, transport
 from wrapper_core.paths import Paths
 from wrapper_core.runner import run_automation
@@ -20,7 +22,7 @@ def _fast(monkeypatch):
 
 
 def setup_reg(registry, code=HELLO, name="auto-a", **kw):
-    registry.add_component("wrapper-core", "0.1.0")
+    registry.add_component("wrapper-core", WC_VERSION)
     registry.add_component("execution-framework", "0.1.0")
     registry.add_automation(name, "1.0.0", code, **kw)
     return registry.save()
@@ -254,15 +256,15 @@ def test_concurrent_run_is_refused(registry):
 
 def test_wrapper_core_update_is_staged_then_applied(registry):
     setup_reg(registry)
-    registry.add_component("wrapper-core", "0.2.0", {"wrapper_core/x.py": "# new"})
+    registry.add_component("wrapper-core", "0.3.0", {"wrapper_core/x.py": "# new"})
     registry.save()
     p = Paths().ensure()
     heal = selfheal.run(p, {"ring": "pilot", "registry_url": str(registry.root)}, "auto-a")
-    assert any("wrapper-core staged 0.2.0" in i for i in heal.installed)
-    assert (p.root / "wrapper-core.pending" / "VERSION").read_text().strip() == "0.2.0"
-    assert selfheal.apply_pending(p) == ["wrapper-core 0.2.0"]
-    assert (p.wrapper_core / "VERSION").read_text().strip() == "0.2.0" and not (p.root / "wrapper-core.pending").exists()
-    assert selfheal.installed_component_version(p, "wrapper-core") == "0.2.0"
+    assert any("wrapper-core staged 0.3.0" in i for i in heal.installed)
+    assert (p.root / "wrapper-core.pending" / "VERSION").read_text().strip() == "0.3.0"
+    assert selfheal.apply_pending(p) == ["wrapper-core 0.3.0"]
+    assert (p.wrapper_core / "VERSION").read_text().strip() == "0.3.0" and not (p.root / "wrapper-core.pending").exists()
+    assert selfheal.installed_component_version(p, "wrapper-core") == "0.3.0"
 
 
 def test_zip_slip_rejected(tmp_path):

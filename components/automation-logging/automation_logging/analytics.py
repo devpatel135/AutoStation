@@ -26,10 +26,13 @@ _FAILED = ("failed", "self_heal_failed")
 
 
 class Data:
-    def __init__(self, runs=None, heartbeats=None, lifecycle=None):
+    def __init__(self, runs=None, heartbeats=None, lifecycle=None, evidence=None, archive=None):
         self.runs: list[dict] = sorted(runs or [], key=lambda r: r["started_at"])
         self.heartbeats: list[dict] = sorted(heartbeats or [], key=lambda r: r["ts"])
         self.lifecycle: list[dict] = sorted(lifecycle or [], key=lambda r: r["ts"])
+        # evidence records are loaded WITHOUT their (large) payloads: {run_id, automation, ts, files:[{name,content_type,size,sha256}], _path}
+        self.evidence: list[dict] = sorted(evidence or [], key=lambda r: r["ts"])
+        self.archive = archive  # archive root, so the dashboard can read an evidence payload on demand
         self.runs_by_id = {r["run_id"]: r for r in self.runs}
 
 
@@ -38,7 +41,7 @@ def load_archive(archive, now: datetime | None = None, window_days: int = DEFAUL
     archive = Path(archive)
     now = now or utcnow()
     cutoff = (now - timedelta(days=window_days)).date()
-    out: dict[str, list] = {"run": [], "heartbeat": [], "lifecycle": []}
+    out: dict[str, list] = {"run": [], "heartbeat": [], "lifecycle": [], "evidence": []}
     for kind in out:
         for f in (archive / kind).glob("*/*/*/*/*.json") if (archive / kind).exists() else []:
             rel = f.relative_to(archive / kind).parts
@@ -52,8 +55,10 @@ def load_archive(archive, now: datetime | None = None, window_days: int = DEFAUL
             if not isinstance(rec, dict) or rec.get("kind") != kind:
                 continue
             rec["_path"] = f.relative_to(archive).as_posix()
+            if kind == "evidence":  # keep the index light: payloads are read on demand
+                rec["files"] = [{k: v for k, v in (fl or {}).items() if k != "data_b64"} for fl in (rec.get("files") or []) if isinstance(fl, dict)]
             out[kind].append(rec)
-    return Data(out["run"], out["heartbeat"], out["lifecycle"])
+    return Data(out["run"], out["heartbeat"], out["lifecycle"], out["evidence"], archive)
 
 
 # ---------------------------------------------------------------------------------------------- helpers

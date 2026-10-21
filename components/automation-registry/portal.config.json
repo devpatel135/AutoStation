@@ -1,8 +1,13 @@
 {
   "title": "AUTOSTATION",
+  "platform": "github",
+  "github_repo": "devpatel135/AutoStation",
+  "manifest_path": "components/automation-registry/manifest.yaml",
+  "ops_workflow": "ops-action.yml",
   "gitlab_url": "https://gitlab.example.internal",
   "project_path": "automation/automation-registry",
   "default_branch": "main",
   "ops_ref": "main",
-  "installers_path": "installers"
+  "installers_path": "installers",
+  "installer_url_template": "https://github.com/{repo}/releases/download/installers-latest/{name}-setup.exe"
 }

@@ -37,5 +37,8 @@ lazy('resilience', () => require('./lib/resilience'));
 lazy('agent', () => require('./lib/agent'));
 lazy('mcp', () => require('./lib/mcp-server'));
 lazy('adapters', () => require('./lib/adapters'));
+lazy('evidence', () => require('./lib/evidence'));
+lazy('debug', () => require('./lib/debug'));
+lazy('recorder', () => require('./lib/recorder'));
 
 module.exports = fw;

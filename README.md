@@ -31,6 +31,21 @@ docs/                    SPEC · AUTOMATION_STANDARD · GOVERNANCE · RUNBOOKS �
 In production each `components/*` directory is its own GitLab project (each carries its own `.gitlab-ci.yml`;
 `git subtree split --prefix=components/<name>` gives you the history-preserving split).
 
+## Download an installer (real `.exe`, no admin)
+
+Every automation has a self-contained per-user installer (bundled Python + payload; works before any server exists):
+
+| Automation | Download |
+|---|---|
+| automation-hello-world | [setup.exe](https://github.com/devpatel135/AutoStation/releases/download/installers-latest/automation-hello-world-setup.exe) · [sha256](https://github.com/devpatel135/AutoStation/releases/download/installers-latest/automation-hello-world-setup.exe.sha256) |
+| automation-invoice-router | [setup.exe](https://github.com/devpatel135/AutoStation/releases/download/installers-latest/automation-invoice-router-setup.exe) · [sha256](https://github.com/devpatel135/AutoStation/releases/download/installers-latest/automation-invoice-router-setup.exe.sha256) |
+| automation-notifier | [setup.exe](https://github.com/devpatel135/AutoStation/releases/download/installers-latest/automation-notifier-setup.exe) · [sha256](https://github.com/devpatel135/AutoStation/releases/download/installers-latest/automation-notifier-setup.exe.sha256) |
+| automation-portal-report (Deloitte develop login example) | [setup.exe](https://github.com/devpatel135/AutoStation/releases/download/installers-latest/automation-portal-report-setup.exe) · [sha256](https://github.com/devpatel135/AutoStation/releases/download/installers-latest/automation-portal-report-setup.exe.sha256) |
+
+Unsigned builds trigger Windows SmartScreen ("More info → Run anyway"); compare the SHA-256 first. Install center with per-automation
+pages: https://devpatel135.github.io/AutoStation/install/ . Troubleshoot any machine: `python -m wrapper_core doctor`.
+Replacing UiPath? Start at [`docs/UIPATH_PARITY.md`](docs/UIPATH_PARITY.md) and [`docs/UIPATH_MIGRATION.md`](docs/UIPATH_MIGRATION.md); `python tools/amx.py help` lists every developer/operator command.
+
 ## Quick tour (no installs beyond Python)
 
 ```bash

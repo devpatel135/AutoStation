@@ -6,7 +6,8 @@
  *   adapters.register('my-portal', adapter);   // usually in your automation's own startup
  *   const a = adapters.get('my-portal');
  *
- * Shipped adapters: generic-table, generic-form, download, sso-detect. To add your own, export an object with a `name`
+ * Shipped adapters: generic-table, generic-form, download, sso-detect, file-upload, iframe-helper, wait-helpers, popup-handler,
+ * table-export-csv. To add your own, export an object with a `name`
  * and whatever async methods your automations need (they receive a Playwright `page` or a resilientPage proxy), then
  * call `register`. Shared adapters belong in this folder and in `registerBuiltins` below.
  */
@@ -40,7 +41,7 @@ function unregister(name) {
 }
 
 function registerBuiltins() {
-  for (const mod of ['generic-table', 'generic-form', 'download', 'sso-detect']) {
+  for (const mod of ['generic-table', 'generic-form', 'download', 'sso-detect', 'file-upload', 'iframe-helper', 'wait-helpers', 'popup-handler', 'table-export-csv']) {
     const adapter = require(`./${mod}`);
     if (!registry.has(adapter.name)) register(adapter.name, adapter);
   }

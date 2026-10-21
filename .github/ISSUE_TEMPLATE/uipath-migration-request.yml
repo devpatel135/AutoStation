@@ -1,0 +1,62 @@
+name: UiPath migration request
+description: Move an existing UiPath process to AutoStation
+title: "[migration] "
+labels: ["uipath-migration", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Run the inventory scanner over the project first if you can (`python tools/uipath/inventory.py <projects-dir>`) and paste the project's row below.
+        See the migration guide on the docs site for the concept map (Orchestrator queues/assets/triggers/robots -> AutoStation equivalents).
+  - type: input
+    id: project
+    attributes:
+      label: UiPath project / process name
+    validations:
+      required: true
+  - type: input
+    id: orchestrator_folder
+    attributes:
+      label: Orchestrator folder
+  - type: dropdown
+    id: pattern
+    attributes:
+      label: Kind of process (best guess)
+      options:
+        - REFramework / queue-based transactional
+        - Linear unattended script
+        - Browser UI automation
+        - Desktop UI automation
+        - Citrix / image-based
+        - Excel / file / email only
+        - API only
+        - Attended (a person triggers or interacts)
+    validations:
+      required: true
+  - type: input
+    id: schedule
+    attributes:
+      label: Orchestrator trigger(s)
+      placeholder: "Daily 09:00 + queue trigger"
+  - type: input
+    id: robots
+    attributes:
+      label: Robots / licences it occupies
+      description: Used by the value dashboard (licences that can be retired when the last process on a robot moves)
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: Assets, credentials, queues and storage buckets it uses (names only - no values)
+  - type: textarea
+    id: risks
+    attributes:
+      label: Known risks (selectors that break, Citrix, attended steps, DU/AI Center models)
+  - type: dropdown
+    id: wave
+    attributes:
+      label: Preferred wave
+      options:
+        - Pilot wave (low risk, high value)
+        - Next wave
+        - Later
+        - No preference

@@ -62,6 +62,12 @@ def main(argv: list[str] | None = None) -> int:
     b.add_argument("--requests", default=None)
     b.add_argument("--max-llm-calls", type=int, default=20)
     b.add_argument("--log-base-url", default=None)
+    b.add_argument("--program-config", default=None, help="program.yaml (hourly cost, UiPath licence inputs) for the programme dashboard")
+
+    pg = sub.add_parser("program", help="render only the programme/ROI dashboard from an archive")
+    common(pg)
+    pg.add_argument("--out", required=True)
+    pg.add_argument("--program-config", default=None)
 
     dsh = sub.add_parser("dashboard", help="render the static site from a report.json")
     dsh.add_argument("--report", required=True)
@@ -141,9 +147,17 @@ def main(argv: list[str] | None = None) -> int:
         data = analytics.load_archive(args.archive, now)
         print(json.dumps(triggers.run(data, manifest, now, args.out, args.requests)))
         return 0
+    if args.cmd == "program":
+        from . import program
+        manifest = pipeline.load_manifest(args.manifest)
+        data = analytics.load_archive(args.archive, now)
+        report, _ = analytics.compute(data, manifest, now, None, read_json(Path(args.state) / "analytics.json", {}))
+        print(json.dumps(program.build(report, data, manifest, args.out, program.load_config(args.program_config), now)["program"]))
+        return 0
     if args.cmd == "build":
         summary = pipeline.build(args.archive, args.manifest, args.state, args.out, now, args.alert_config, args.dry_run_alerts,
-                                 args.requests, args.max_llm_calls, log_base_url=args.log_base_url)
+                                 args.requests, args.max_llm_calls, log_base_url=args.log_base_url,
+                                 program_config=args.program_config)
         print(json.dumps({k: v for k, v in summary.items() if k != "stages"} | {"stages": {k: (v if not isinstance(v, dict) else {a: b for a, b in v.items() if a != "detail"}) for k, v in summary["stages"].items()}}, indent=2, default=str))
         return 1 if summary["errors"] else 0
     return 2

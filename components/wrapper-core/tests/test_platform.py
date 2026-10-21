@@ -176,3 +176,15 @@ def test_git_transport_failure_spools(tmp_path, monkeypatch):
     monkeypatch.setenv("AUTOMAGIX_LOG_REMOTE", str(tmp_path / "does-not-exist.git"))
     assert transport.emit("run", "a", "R1", {"x": 1}, p) is False
     assert len(list(p.spool.glob("*.json"))) == 1
+
+
+def test_doctor_reports_without_crashing_and_never_leaks_secrets(monkeypatch, tmp_path):
+    from wrapper_core import doctor
+    monkeypatch.setenv("AUTOMAGIX_REGISTRY_TOKEN", "tok-should-never-print")
+    p = Paths().ensure()
+    res = doctor.run_checks(p, online=False)
+    names = {r["check"] for r in res}
+    assert {"python", "wrapper-core", "ring", "installed automations", "run-log destination", "unsent log spool"} <= names
+    assert "tok-should-never-print" not in str(res)
+    assert all(r["status"] in ("PASS", "WARN", "FAIL") for r in res)
+    assert doctor.main(["--offline", "--json"]) in (0, 1)

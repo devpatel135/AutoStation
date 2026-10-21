@@ -308,6 +308,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     o = sub.add_parser("ops-action", parents=[common], help="CI entry point: apply ACTION/TARGET/REASON/PARAMS from the environment")
     o.add_argument("--git", action="store_true", help="branch + commit + open MR (or push triggers branch) via the GitLab API")
+    o.add_argument("--platform", choices=["auto", "gitlab", "github"], default="auto",
+                   help="API flavour for --git (auto: GitHub when running in GitHub Actions)")
     o.add_argument("--result", default="ops_result.json")
     o.set_defaults(fn=cmd_ops_action)
     return p

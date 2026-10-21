@@ -1,0 +1,46 @@
+"""Lifecycle tests: the payload runs through the REAL wrapper-core run lifecycle, offline (mock LLM, dir log transport).
+
+They need ``wrapper_core.activities.queue`` (the activities library); they skip cleanly if it is not installed yet.
+"""
+from __future__ import annotations
+
+import os
+import sys
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, os.environ.get("WRAPPER_CORE_DIR", str(ROOT.parent / "wrapper-core")))
+
+pytest.importorskip("wrapper_core.activities.queue")
+from wrapper_core.testing import run_payload  # noqa: E402
+
+FAST = {"max_retries": 2, "network_retry_wait_s": 0, "backoff_multiplier": 1.0, "skip_on_data_error": True}
+
+
+def test_both_mode_processes_every_transaction(tmp_path):
+    r = run_payload(ROOT, {"mode": "both"}, error_handling=FAST, tmp_root=tmp_path)
+    assert r.record["status"] == "success", r.record.get("error")
+    res = r.record["result"]
+    assert res["dispatched"] == 4 and res["succeeded"] == 2
+    assert res["business_exceptions"] == 1 and res["needs_review"] == 1
+
+
+def test_dispatch_and_perform_are_separate_runs(tmp_path):
+    d = run_payload(ROOT, {"mode": "dispatch"}, error_handling=FAST, tmp_root=tmp_path)
+    assert d.record["result"]["dispatched"] == 4
+    p = run_payload(ROOT, {"mode": "perform"}, error_handling=FAST, tmp_root=tmp_path)   # same AUTOMAGIX_HOME -> same queue
+    assert p.record["result"]["succeeded"] == 2
+
+
+def test_rerunning_the_dispatcher_does_not_duplicate_items(tmp_path):
+    run_payload(ROOT, {"mode": "dispatch"}, error_handling=FAST, tmp_root=tmp_path)
+    again = run_payload(ROOT, {"mode": "dispatch"}, error_handling=FAST, tmp_root=tmp_path)
+    assert again.record["result"]["dispatched"] == 0
+
+
+def test_dry_run_has_no_side_effects(tmp_path):
+    r = run_payload(ROOT, {"mode": "both"}, error_handling=FAST, tmp_root=tmp_path, dry_run=True)
+    assert r.record["status"] == "success"
+    assert r.record["result"].get("succeeded", 0) == 0

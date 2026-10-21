@@ -1,0 +1,6 @@
+<Activity mc:Ignorable="sap sap2010" x:Class="Unused_Old_Export" xmlns="http://schemas.microsoft.com/netfx/2009/xaml/activities" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:sap="http://schemas.microsoft.com/netfx/2009/xaml/activities/presentation" xmlns:sap2010="http://schemas.microsoft.com/netfx/2010/xaml/activities/presentation" xmlns:ui="http://schemas.uipath.com/workflow/activities" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <!-- SYNTHETIC SAMPLE: a workflow nothing invokes (orphan) -->
+  <Sequence DisplayName="Old export">
+    <ui:WriteCsv DisplayName="Write old report" FilePath="C:\temp\old_report.csv" />
+  </Sequence>
+</Activity>

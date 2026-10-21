@@ -13,6 +13,9 @@ def main(argv: list[str] | None = None) -> int:
     if argv and argv[0] == "secrets":
         from . import secrets
         return secrets.main(argv[1:])
+    if argv and argv[0] == "doctor":
+        from . import doctor
+        return doctor.main(argv[1:])
     if argv and argv[0] == "assist":
         from . import assist
         return assist.main(argv[1:])
@@ -35,6 +38,7 @@ def main(argv: list[str] | None = None) -> int:
     u.add_argument("automation")
     u.add_argument("--keep-shared", action="store_true")
 
+    sub.add_parser("doctor", help="diagnose this machine/install (read-only, PASS/WARN/FAIL with fixes)")
     sub.add_parser("status", help="show installed components and last runs")
     sub.add_parser("heartbeat", help="send a heartbeat now")
     sub.add_parser("apply-pending", help="swap in a staged wrapper-core")

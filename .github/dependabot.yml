@@ -1,0 +1,26 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "ci"
+  - package-ecosystem: npm
+    directory: "/components/execution-framework"
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "deps(framework)"
+  - package-ecosystem: pip
+    directory: "/components/wrapper-core"
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "deps(wrapper-core)"
+  - package-ecosystem: pip
+    directory: "/components/automation-builder/docker"
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "deps(builder)"

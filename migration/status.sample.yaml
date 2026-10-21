@@ -1,0 +1,42 @@
+# SAMPLE migration status file (synthetic). Copy to migration/status.yaml and edit; see migration/README.md for the schema.
+program:
+  name: UiPath to AutoStation migration (sample)
+  updated: "2026-10-21"
+
+waves:
+  "1": {name: Pilot wave, target: "2026-12-15"}
+  "2": {name: Finance wave, target: "2027-02-28"}
+
+projects:
+  Invoice_Processing_REF:
+    status: pilot
+    wave: 1
+    owner: ap-team@example.com
+    target_date: "2026-12-15"
+    effort_spent_days: 4
+    blockers: []
+    parity:
+      verdict: GO
+      date: "2026-11-30"
+      report: "parity/Invoice_Processing_REF/parity.html"
+    notes: Parallel run 5/5 clean; waiting for the pilot soak.
+  Portal_Scraper:
+    status: classified
+    wave: 2
+    owner: procurement-automation@example.com
+    target_date: "2027-01-31"
+    blockers:
+      - "Image click on the export icon needs an API or DOM alternative from the portal team"
+      - "Attended month prompt must become a schedule parameter"
+  SAP_Desktop_Posting:
+    status: scaffolded
+    wave: 2
+    owner: finance-systems@example.com
+    target_date: "2027-02-28"
+    blockers:
+      - "Decide RFC/OData API vs SAP GUI scripting"
+
+history:
+  - {date: "2026-09-01", remaining_days: 24, retired: 0}
+  - {date: "2026-10-01", remaining_days: 21, retired: 0}
+  - {date: "2026-10-21", remaining_days: 16, retired: 0}

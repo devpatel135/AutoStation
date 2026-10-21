@@ -1,0 +1,66 @@
+name: Automation failure / problem
+description: An installed automation failed, did not run, or behaved unexpectedly
+title: "[automation] "
+labels: ["automation-failure", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. **Do not paste passwords, tokens, personal data or screenshots of sensitive screens.**
+        Run logs, the failure evidence and the LLM diagnosis are already on the dashboard - the run id is all we need to find them.
+  - type: input
+    id: automation
+    attributes:
+      label: Automation
+      description: Name as shown in the install center
+      placeholder: automation-hello-world
+    validations:
+      required: true
+  - type: dropdown
+    id: ring
+    attributes:
+      label: Your ring
+      options:
+        - broad
+        - pilot
+        - dev
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Installed version
+      description: "Run: python -m wrapper_core status (embedded python is under %LOCALAPPDATA%\\AUTOMAGIX\\python)"
+      placeholder: "1.0.0"
+  - type: input
+    id: run_id
+    attributes:
+      label: Run id (if you have it)
+      description: Shown on the dashboard and in the notification
+      placeholder: "20261012T130000Z-ab12cd34"
+  - type: dropdown
+    id: symptom
+    attributes:
+      label: What happened?
+      options:
+        - It did not run at all
+        - It ran and failed
+        - It ran but the result is wrong
+        - It is slow or seems stuck
+        - It will not install or update
+        - Something else
+    validations:
+      required: true
+  - type: textarea
+    id: details
+    attributes:
+      label: Details
+      description: What did you expect, what did you see, when did it start?
+    validations:
+      required: true
+  - type: textarea
+    id: wrapper_log
+    attributes:
+      label: Last lines of wrapper.log (optional)
+      description: "%LOCALAPPDATA%\\AUTOMAGIX\\logs\\wrapper.log"
+      render: text

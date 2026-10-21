@@ -15,7 +15,7 @@ const sso = require('../lib/adapters/sso-detect');
 // ---- registry ------------------------------------------------------------------------------------
 test('built-in adapters are registered and discoverable', () => {
   const names = adapters.list().map((a) => a.name).sort();
-  assert.deepEqual(names, ['download', 'generic-form', 'generic-table', 'sso-detect']);
+  assert.deepEqual(names, ['download', 'file-upload', 'generic-form', 'generic-table', 'iframe-helper', 'popup-handler', 'sso-detect', 'table-export-csv', 'wait-helpers']);
   assert.equal(adapters.get('generic-table').scrapeTable, table.scrapeTable);
   assert.equal(adapters.has('download'), true);
 });

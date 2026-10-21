@@ -11,6 +11,7 @@ reason, substituted for ``SENTINEL`` by the page script.
 from __future__ import annotations
 
 import difflib
+import re
 import json
 import urllib.parse
 
@@ -40,6 +41,38 @@ def build_links(config: dict, ci: dict, title: str, description: str, branch: st
           f"&merge_request[title]={_q(title)}&merge_request[description]={_q(description)}")
     edit = f"{base}/-/edit/{_q(config.get('default_branch', 'main'))}/manifest.yaml"
     return {"pipeline": pipeline, "merge_request": mr, "edit": edit}
+
+
+_REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+_WF_RE = re.compile(r"^[A-Za-z0-9_.-]+\.ya?ml$")
+_PATH_RE = re.compile(r"^[A-Za-z0-9_./-]+$")
+
+
+def github_config(cfg: dict) -> dict:
+    """Validate the GitHub-mode settings (they end up in links); fall back to GitLab mode if anything looks off."""
+    out = dict(cfg)
+    if out.get("platform") != "github":
+        out["platform"] = "gitlab"
+        return out
+    ok = (_REPO_RE.match(str(out.get("github_repo", ""))) and _WF_RE.match(str(out.get("ops_workflow", "")))
+          and _PATH_RE.match(str(out.get("manifest_path", ""))) and ".." not in str(out.get("manifest_path", "")))
+    if not ok:
+        out["platform"] = "gitlab"
+    return out
+
+
+def build_github_links(config: dict, ci: dict, title: str, description: str, branch: str) -> dict:
+    """Python reference implementation of the GitHub links the page script builds (kept in sync by tests)."""
+    cfg = github_config(config)
+    base = f"https://github.com/{cfg['github_repo']}"
+    flags = " ".join(f"-f {k.lower()}={json.dumps(str(v))}" for k, v in {**ci, "BRANCH": branch}.items() if v != "")
+    return {
+        "workflow": f"{base}/actions/workflows/{_q(cfg['ops_workflow'])}",
+        "gh_command": f"gh workflow run {cfg['ops_workflow']} --repo {cfg['github_repo']} --ref {cfg.get('ops_ref', 'main')} {flags}",
+        "pull_request": (f"{base}/compare/{_q(cfg.get('default_branch', 'main'))}...{_q(branch)}?quick_pull=1"
+                         f"&title={_q(title)}&body={_q(description)}"),
+        "edit": f"{base}/edit/{_q(cfg.get('default_branch', 'main'))}/" + "/".join(_q(p) for p in cfg["manifest_path"].split("/")),
+    }
 
 
 def cli_command(action: str, target: str | None, flags: list[tuple[str, str]], with_reason: bool = True) -> str:
@@ -154,11 +187,26 @@ ADMIN_JS = r"""
     var p2 = document.createElement('pre'); p2.textContent = cmd; s2.appendChild(p2); s2.appendChild(copyBtn(cmd)); out.appendChild(s2);
     var ci = { ACTION: d.ci.ACTION, TARGET: d.ci.TARGET, REASON: r, PARAMS: params };
     var branch = 'ops/' + d.ci.ACTION + '-' + (d.ci.TARGET || 'fleet') + '-' + cur.id;
-    var s3 = section('Option B - ops-action pipeline (CI variables)'); var tb = document.createElement('table');
+    var s3 = section(cfg.platform === 'github' ? 'Option B - ops-action workflow (GitHub Actions inputs)' : 'Option B - ops-action pipeline (CI variables)'); var tb = document.createElement('table');
     var vars = Object.keys(ci); if (d.kind !== 'trigger') { vars.push('BRANCH'); ci.BRANCH = branch; } var text = '';
     vars.forEach(function (k) { if (ci[k] === '') return; var tr = document.createElement('tr'), a = document.createElement('td'), b = document.createElement('td');
       a.textContent = k; b.textContent = ci[k]; b.className = 'mono'; tr.appendChild(a); tr.appendChild(b); tb.appendChild(tr); text += k + '=' + ci[k] + '\n'; });
     s3.appendChild(tb); s3.appendChild(copyBtn(text, 'Copy variables')); out.appendChild(s3);
+    if (cfg.platform === 'github') {
+      var gh = 'https://github.com/' + cfg.github_repo, ghdesc = 'ops-action ' + d.ci.ACTION + ' ' + (d.ci.TARGET || 'fleet') + '\nReason: ' + (r || '(none)');
+      var ghc = 'gh workflow run ' + cfg.ops_workflow + ' --repo ' + cfg.github_repo + ' --ref ' + cfg.ops_ref;
+      vars.forEach(function (k) { if (ci[k] !== '') ghc += ' -f ' + k.toLowerCase() + '=' + shq(ci[k], sh); });
+      var s3g = section('GitHub CLI (same thing as the workflow form)'); var p3 = document.createElement('pre'); p3.textContent = ghc; s3g.appendChild(p3); s3g.appendChild(copyBtn(ghc)); out.appendChild(s3g);
+      var s4g = section('GitHub links'); var rowg = document.createElement('div'); rowg.className = 'actions';
+      if (!needs) {
+        rowg.appendChild(link(gh + '/actions/workflows/' + q(cfg.ops_workflow), 'Open the ops-action workflow (Run workflow, paste the inputs above)', true));
+        if (d.kind !== 'trigger') { rowg.appendChild(link(gh + '/compare/' + q(cfg.default_branch) + '...' + q(branch) + '?quick_pull=1&title=' + q(title) + '&body=' + q(ghdesc), 'Open the pull request (after the workflow pushed the branch)')); }
+      }
+      rowg.appendChild(link(gh + '/edit/' + q(cfg.default_branch) + '/' + cfg.manifest_path.split('/').map(q).join('/'), 'Edit manifest.yaml on GitHub (manual fallback)'));
+      s4g.appendChild(rowg); out.appendChild(s4g);
+      $('composer').hidden = false;
+      return;
+    }
     var base = cfg.gitlab_url.replace(/\/+$/, '') + '/' + cfg.project_path.replace(/^\/+|\/+$/g, '');
     var pl = base + '/-/pipelines/new?ref=' + q(cfg.ops_ref); vars.forEach(function (k) { if (ci[k] !== '') pl += '&var[' + k + ']=' + q(ci[k]); });
     var desc = 'ops-action ' + d.ci.ACTION + ' ' + (d.ci.TARGET || 'fleet') + '\nReason: ' + (r || '(none)');
@@ -204,7 +252,9 @@ def build_admin(m: dict, config: dict, health: dict[str, dict], signals: list[di
     for key in ("gitlab_url",):
         if not safe_url(cfg.get(key, "")) or not str(cfg[key]).startswith(("http://", "https://")):
             cfg[key] = "https://gitlab.example.internal"
-    data = {"sentinel": SENTINEL, "config": {k: cfg.get(k) for k in ("gitlab_url", "project_path", "default_branch", "ops_ref")},
+    cfg = github_config(cfg)
+    data = {"sentinel": SENTINEL, "config": {k: cfg.get(k) for k in ("gitlab_url", "project_path", "default_branch", "ops_ref", "platform",
+                                                                       "github_repo", "manifest_path", "ops_workflow")},
             "automations": actions["automations"], "fleet": actions["fleet"]}
     fleet = m.get("fleet") or {}
     paused = [n for n, e in autos.items() if (e or {}).get("status") == "paused"]

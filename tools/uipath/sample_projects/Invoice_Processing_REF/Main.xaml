@@ -1,0 +1,38 @@
+<Activity mc:Ignorable="sap sap2010 sads" x:Class="Main" xmlns="http://schemas.microsoft.com/netfx/2009/xaml/activities" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:sap="http://schemas.microsoft.com/netfx/2009/xaml/activities/presentation" xmlns:sap2010="http://schemas.microsoft.com/netfx/2010/xaml/activities/presentation" xmlns:ui="http://schemas.uipath.com/workflow/activities" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <!-- SYNTHETIC SAMPLE: shape follows the UiPath REFramework template (state machine) -->
+  <x:Members>
+    <x:Property Name="in_TransactionNumber" Type="InArgument(x:Int32)" />
+  </x:Members>
+  <StateMachine DisplayName="Main State Machine" sap2010:WorkflowViewState.IdRef="StateMachine_1">
+    <State DisplayName="Initialization">
+      <State.Entry>
+        <Sequence DisplayName="Init">
+          <ui:InvokeWorkflowFile DisplayName="Init All Settings" WorkflowFileName="Framework\InitAllSettings.xaml" />
+          <ui:InvokeWorkflowFile DisplayName="Init All Applications" WorkflowFileName="Framework\InitAllApplications.xaml" />
+        </Sequence>
+      </State.Entry>
+    </State>
+    <State DisplayName="Get Transaction Data">
+      <State.Entry>
+        <ui:InvokeWorkflowFile DisplayName="Get Transaction Data" WorkflowFileName="Framework\GetTransactionData.xaml" />
+      </State.Entry>
+    </State>
+    <State DisplayName="Process Transaction">
+      <State.Entry>
+        <Sequence DisplayName="Process">
+          <ui:InvokeWorkflowFile DisplayName="Process" WorkflowFileName="Process.xaml" />
+          <ui:InvokeWorkflowFile DisplayName="Set Transaction Status" WorkflowFileName="Framework\SetTransactionStatus.xaml" />
+        </Sequence>
+      </State.Entry>
+    </State>
+    <State DisplayName="End Process">
+      <State.Entry>
+        <Sequence DisplayName="End">
+          <ui:InvokeWorkflowFile DisplayName="Close All Applications" WorkflowFileName="Framework\CloseAllApplications.xaml" />
+          <ui:InvokeWorkflowFile DisplayName="Kill All Processes" WorkflowFileName="Framework\KillAllProcesses.xaml" />
+          <ui:LogMessage DisplayName="End of run" Level="Info" Message="[&quot;Process finished&quot;]" />
+        </Sequence>
+      </State.Entry>
+    </State>
+  </StateMachine>
+</Activity>

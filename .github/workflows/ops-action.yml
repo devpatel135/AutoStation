@@ -1,0 +1,86 @@
+name: ops-action
+
+# The fleet admin panel's backend (there is no server). Operators pick an action on the admin page (or run `gh workflow run ops-action.yml`),
+# this workflow applies it with the registry ops and opens a pull request - the approval is the governance gate.
+# `trigger-add` changes no manifest: it commits straight to the protected `triggers` branch and republishes the site.
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: Operator action
+        required: true
+        type: choice
+        options:
+          - pause
+          - resume
+          - promote
+          - rollback
+          - fleet-pause
+          - fleet-resume
+          - trigger-add
+      target:
+        description: Automation name (not needed for fleet-pause / fleet-resume)
+        required: false
+        default: ""
+      reason:
+        description: "Why (single line, max 300 chars; shown to users when pausing)"
+        required: false
+        default: ""
+      params:
+        description: 'JSON, e.g. {"to":"pilot"} for promote, {"ring":"pilot","to":"1.0.0"} for rollback, {"slot":"poll","params":{}} for trigger-add'
+        required: false
+        default: "{}"
+      branch:
+        description: "Optional ops/... branch name (the admin panel pre-computes it)"
+        required: false
+        default: ""
+      emergency:
+        description: "Emergency pause: also merge the PR if you are listed in AUTOSTATION_EMERGENCY_PAUSE_USERS"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+
+concurrency:
+  group: ops-action
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    env:
+      ACTION: ${{ inputs.action }}
+      TARGET: ${{ inputs.target }}
+      REASON: ${{ inputs.reason }}
+      PARAMS: ${{ inputs.params }}
+      BRANCH: ${{ inputs.branch }}
+      EMERGENCY: ${{ inputs.emergency && '1' || '' }}
+      EMERGENCY_PAUSE_USERS: ${{ vars.AUTOSTATION_EMERGENCY_PAUSE_USERS }}
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      OPS_BOT_TOKEN: ${{ secrets.OPS_BOT_TOKEN }}
+      MANIFEST_PATH: components/automation-registry/manifest.yaml
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Apply the action (inputs travel as environment variables, never interpolated into a shell)
+        working-directory: components/automation-registry
+        env:
+          PYTHONPATH: ../wrapper-core
+        run: python -m registry ops-action --git --platform github --manifest manifest.yaml --result "$GITHUB_WORKSPACE/ops_result.json"
+      - name: Summary
+        if: ${{ always() }}
+        run: |
+          {
+            echo "### ops-action: ${ACTION} ${TARGET}"
+            echo
+            echo '```json'
+            cat ops_result.json 2>/dev/null || echo '{}'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

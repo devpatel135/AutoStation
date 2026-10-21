@@ -18,6 +18,8 @@ const events = require('./events');
 const cdp = require('./cdp');
 const schemaLib = require('./schema');
 const wrapper = require('./wrapper');
+const evidence = require('./evidence');
+const debugLib = require('./debug');
 
 const DEFAULT_DENY = /delete|remove|destroy|erase|purge|submit payment|pay now|confirm payment|wire transfer|transfer funds/i;
 
@@ -36,6 +38,7 @@ const HEAL_SCHEMA = {
 // method name -> {kind, run(locator, args, timeoutMs)}
 const METHODS = {
   click: { kind: 'click', run: (l, a, t) => l.click({ timeout: t, ...(a[0] || {}) }) },
+  dblclick: { kind: 'click', run: (l, a, t) => l.dblclick({ timeout: t, ...(a[0] || {}) }) },
   fill: { kind: 'fill', run: (l, a, t) => l.fill(String(a[0]), { timeout: t, ...(a[1] || {}) }) },
   selectOption: { kind: 'select', run: (l, a, t) => l.selectOption(a[0], { timeout: t, ...(a[1] || {}) }) },
   check: { kind: 'check', run: (l, a, t) => l.check({ timeout: t, ...(a[0] || {}) }) },
@@ -59,6 +62,12 @@ function urlPattern(url) {
   } catch (_) {
     return String(url || '').split(/[?#]/)[0];
   }
+}
+
+/** Stable text for a selector argument (strings as-is; functions by their normalised source). */
+function describeSelector(sel) {
+  if (typeof sel === 'function') return `fn:${String(sel).replace(/\s+/g, ' ').trim().slice(0, 200)}`;
+  return String(sel);
 }
 
 function isHealable(err) {
@@ -130,6 +139,7 @@ function resilientPage(page, opts = {}) {
   const o = {
     caller: 'resilience', maxHealsPerRun: 5, timeoutMs: 10000, denyPatterns: [DEFAULT_DENY], allowDestructive: false,
     llmCall: wrapper.llmCall, logEvent: wrapper.logEvent, snapshot: cdp.domSnapshot,
+    captureEvidence: evidence.captureSafe, debugSelectors: debugLib.buildDebugOptions().debugSelectors,
     ...opts,
   };
   const cache = opts.cache || createFileCache(opts.cachePath || defaultCachePath());
@@ -170,9 +180,19 @@ function resilientPage(page, opts = {}) {
     return verdict.selector;
   }
 
-  async function perform(method, selector, args) {
+  async function perform(method, selectorArg, args) {
     const spec = METHODS[method];
-    const exec = (sel) => spec.run(page.locator(sel), args, o.timeoutMs);
+    // a selector is a CSS/Playwright selector string, or a function (p) => p.getByRole(...) (recorder output keeps the exact chain)
+    const selector = describeSelector(selectorArg);
+    const locate = (sel) => (typeof sel === 'function' ? sel(page) : page.locator(sel));
+    const exec = async (sel) => {
+      if (o.debugSelectors) {
+        let n = -1;
+        try { n = await locate(sel).count(); } catch (_) { n = -1; }
+        o.logEvent('selector_debug', { selector: typeof sel === 'function' ? selector : sel, action: spec.kind, matches: n });
+      }
+      return spec.run(locate(sel), args, o.timeoutMs);
+    };
     const key = `${urlPattern(page.url())}|${selector}`;
     const cached = cache.get(key);
     if (cached) {
@@ -185,11 +205,14 @@ function resilientPage(page, opts = {}) {
       }
     }
     try {
-      return await exec(selector);
+      return await exec(selectorArg);
     } catch (err) {
       if (!isHealable(err)) throw err;
       const healed = await heal(method, spec, selector, args, err);
-      if (!healed) throw err;
+      if (!healed) {
+        await o.captureEvidence(err, { reason: `selector ${selector.slice(0, 80)} not found and healing failed`, page });
+        throw err;
+      }
       try {
         const r = await exec(healed);
         cache.set(key, healed);
@@ -197,6 +220,7 @@ function resilientPage(page, opts = {}) {
         return r;
       } catch (retryErr) {
         o.logEvent('selector_heal_rejected', { original: selector, healed, action: spec.kind, reason: 'healed selector failed on retry' });
+        await o.captureEvidence(err, { reason: `healed selector for ${selector.slice(0, 80)} failed on retry`, page });
         throw err;
       }
     }
@@ -213,4 +237,4 @@ function resilientPage(page, opts = {}) {
   });
 }
 
-module.exports = { resilientPage, urlPattern, createFileCache, validateCandidate, isHealable, DEFAULT_DENY, HEAL_SCHEMA, METHODS };
+module.exports = { resilientPage, urlPattern, createFileCache, validateCandidate, isHealable, describeSelector, DEFAULT_DENY, HEAL_SCHEMA, METHODS };

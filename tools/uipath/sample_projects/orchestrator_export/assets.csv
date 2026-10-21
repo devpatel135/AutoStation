@@ -1,0 +1,5 @@
+Name,Type,Scope,Value
+PostingCompanyCode,Text,Global,1000
+SMTP_CredentialAsset,Credential,Global,
+SAP_Posting_Service,Credential,Global,
+Legacy_Password,Text,Global,FAKE-ASSET-SECRET-VALUE-999

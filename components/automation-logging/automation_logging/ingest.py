@@ -11,6 +11,9 @@ fails validation is quarantined under ``<archive>/_rejected/`` instead of being 
 """
 from __future__ import annotations
 
+import base64
+import binascii
+import hashlib
 import json
 import os
 import re
@@ -26,6 +29,54 @@ _SAFE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 
 class IngestError(RuntimeError):
     pass
+
+
+# ---- evidence artefacts (screenshots / DOM snapshots / traces captured on failure) -------------------------------------
+EVIDENCE_MAX_BYTES = 2 * 1024 * 1024
+EVIDENCE_MAX_FILES = 12
+EVIDENCE_TYPES = {"image/png", "image/jpeg", "text/html", "text/plain", "application/zip", "application/json"}
+_EVIDENCE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
+_MAGIC = {"image/png": (bytes([0x89]) + b"PNG" + bytes([0x0d, 0x0a, 0x1a, 0x0a]),), "image/jpeg": (bytes([0xff, 0xd8, 0xff]),), "application/zip": (b"PK" + bytes([3, 4]), b"PK" + bytes([5, 6]))}
+
+
+def validate_evidence(rec: dict) -> str | None:
+    """Strict checks on an evidence artefact. Payloads are data: never executed, never rendered as HTML."""
+    if not rec.get("run_id") or not rec.get("automation"):
+        return "evidence artefact missing run_id/automation"
+    files = rec.get("files")
+    if not isinstance(files, list) or not files:
+        return "evidence artefact has no files"
+    if len(files) > EVIDENCE_MAX_FILES:
+        return f"too many evidence files ({len(files)} > {EVIDENCE_MAX_FILES})"
+    total = 0
+    for f in files:
+        if not isinstance(f, dict):
+            return "evidence file entry is not an object"
+        name, ctype = f.get("name"), f.get("content_type")
+        if not isinstance(name, str) or not _EVIDENCE_NAME.match(name) or ".." in name:
+            return f"unsafe evidence file name {name!r}"
+        if ctype not in EVIDENCE_TYPES:
+            return f"content type {ctype!r} is not allowed (allowed: {sorted(EVIDENCE_TYPES)})"
+        try:
+            blob = base64.b64decode(f.get("data_b64") or "", validate=True)
+        except (binascii.Error, ValueError):
+            return f"{name}: data_b64 is not valid base64"
+        if len(blob) != f.get("size"):
+            return f"{name}: size does not match the payload"
+        if hashlib.sha256(blob).hexdigest() != f.get("sha256"):
+            return f"{name}: sha256 does not match the payload"
+        magic = _MAGIC.get(ctype)
+        if magic and not blob.startswith(magic):
+            return f"{name}: content does not look like {ctype}"
+        if ctype in ("text/html", "text/plain", "application/json"):
+            try:
+                blob.decode("utf-8")
+            except UnicodeDecodeError:
+                return f"{name}: text evidence is not valid UTF-8"
+        total += len(blob)
+        if total > EVIDENCE_MAX_BYTES:
+            return f"evidence exceeds {EVIDENCE_MAX_BYTES} bytes"
+    return None
 
 
 def artefact_time(rec: dict):
@@ -53,8 +104,12 @@ def _validate(rec, kind: str, name: str, art_id: str) -> str | None:
             return f"unsafe {label} {val!r}"
     if kind == "run" and (not rec.get("automation") or not rec.get("run_id") or not rec.get("started_at")):
         return "run artefact missing automation/run_id/started_at"
-    if kind in ("heartbeat", "lifecycle") and not rec.get("ts"):
+    if kind in ("heartbeat", "lifecycle", "evidence") and not rec.get("ts"):
         return f"{kind} artefact missing ts"
+    if kind == "evidence":
+        bad = validate_evidence(rec)
+        if bad:
+            return bad
     try:
         artefact_time(rec)
     except ValueError:

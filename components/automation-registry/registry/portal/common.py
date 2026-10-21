@@ -17,6 +17,12 @@ DEFAULT_CONFIG = {
     "default_branch": "main",
     "ops_ref": "main",
     "installers_path": "installers",
+    # --- GitHub mode (platform = "github"): links point at GitHub Actions / PRs / Releases instead of GitLab ---
+    "platform": "gitlab",
+    "github_repo": "",                      # owner/name, e.g. devpatel135/AutoStation
+    "manifest_path": "manifest.yaml",       # path of manifest.yaml inside the repo
+    "ops_workflow": "ops-action.yml",
+    "installer_url_template": "",           # e.g. https://github.com/{repo}/releases/download/{name}-v{version}/{name}-{version}-setup.exe
 }
 
 
@@ -37,7 +43,17 @@ def safe_url(url: str) -> str | None:
 
 
 def installer_rel(config: dict, name: str, version: str) -> str:
+    """Where the installer for ``name`` ``version`` lives: a relative path, or an absolute URL when
+    ``installer_url_template`` is configured (GitHub Releases)."""
+    tpl = str(config.get("installer_url_template") or "")
+    if tpl:
+        return tpl.format(repo=config.get("github_repo", ""), name=name, version=version)
     return f"{config.get('installers_path', 'installers').strip('/')}/{name}-{version}-setup.exe"
+
+
+def rel_href(config: dict, rel: str, depth_prefix: str = "") -> str:
+    """Prefix a relative link with ``depth_prefix`` (e.g. ``../``) but leave absolute URLs alone."""
+    return rel if rel.startswith(("http://", "https://")) else f"{depth_prefix}{rel}"
 
 
 def rings_of(m: dict) -> list[str]:
@@ -116,6 +132,8 @@ def layout(title: str, body: str, *, config: dict, active: str = "", depth: int 
            extra_head: str = "", extra_js: str = "") -> str:
     base = "../" * depth
     links = "".join(f'<a href="{base}{href}"{" class=active" if key == active else ""}>{label}</a>' for href, label, key in NAV)
+    if config.get("home_url"):  # embedded in a larger site (GitHub Pages): link back to its home page
+        links = f'<a href="{esc(base + str(config["home_url"]))}">Site home</a>' + links
     digest = hashlib.sha256(manifest_text.encode("utf-8")).hexdigest()[:12] if manifest_text else "n/a"
     brand = esc(config.get("title", "AUTOSTATION"))
     return f"""<!doctype html>

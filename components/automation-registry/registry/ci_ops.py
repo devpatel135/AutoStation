@@ -105,6 +105,105 @@ class GitLab:
         return self.call("POST", "/pipeline", {"ref": self.default_branch, "variables": [{"key": "PAGES_ONLY", "value": "1"}]})
 
 
+# ---- GitHub API client (same interface as GitLab above, so run_action works unchanged) ----------------
+def github_http(method: str, url: str, token: str, body: dict | None = None) -> tuple[int, object]:
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    req = urllib.request.Request(url, data=data, method=method, headers={
+        "Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28", "Content-Type": "application/json", "User-Agent": "autostation-ops-action"})
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:  # noqa: S310 - GitHub API
+            raw = resp.read().decode("utf-8")
+            try:
+                return resp.status, json.loads(raw) if raw else {}
+            except ValueError:
+                return resp.status, raw
+    except urllib.error.HTTPError as exc:
+        raw = exc.read().decode("utf-8", "replace")
+        try:
+            return exc.code, json.loads(raw)
+        except ValueError:
+            return exc.code, raw
+
+
+class GitHub:
+    """Contents/refs/pulls REST calls with the GitHub Actions token. Branch protection on ``main`` stays in force:
+    manifest changes only ever land through a pull request that a human approves."""
+
+    def __init__(self, env: dict, http=github_http):
+        self.base = (env.get("GITHUB_API_URL") or "https://api.github.com").rstrip("/")
+        self.repo = env["GITHUB_REPOSITORY"]
+        self.default_branch = env.get("DEFAULT_BRANCH") or env.get("CI_DEFAULT_BRANCH") or "main"
+        self.token = env.get("OPS_BOT_TOKEN") or env["GITHUB_TOKEN"]
+        self.workflow_pages = env.get("PAGES_WORKFLOW", "site.yml")
+        self.http = http
+
+    def _u(self, path: str) -> str:
+        return f"{self.base}/repos/{self.repo}{path}"
+
+    def call(self, method: str, path: str, body: dict | None = None):
+        return self.http(method, self._u(path), self.token, body)
+
+    def _file(self, path: str, ref: str):
+        q = urllib.parse.quote(path, safe="/")
+        status, data = self.call("GET", f"/contents/{q}?ref={urllib.parse.quote(ref, safe='')}")
+        if status == 404:
+            return None
+        if status >= 400 or not isinstance(data, dict) or "content" not in data:
+            raise OpError(f"GitHub API error reading {path}@{ref}: HTTP {status}")
+        return data
+
+    def get_file(self, path: str, ref: str) -> str | None:
+        import base64
+        data = self._file(path, ref)
+        return None if data is None else base64.b64decode(data["content"]).decode("utf-8")
+
+    def _branch_sha(self, branch: str):
+        status, data = self.call("GET", f"/git/ref/heads/{urllib.parse.quote(branch, safe='/')}")
+        if status == 404:
+            return None
+        if status >= 400:
+            raise OpError(f"GitHub API error reading branch {branch}: HTTP {status}")
+        return (data.get("object") or {}).get("sha")
+
+    def commit(self, branch: str, start_branch: str | None, message: str, files: dict[str, str], existing: set[str]):
+        import base64
+        if self._branch_sha(branch) is None:
+            if not start_branch:
+                raise OpError(f"branch {branch} does not exist and no start branch was given")
+            base_sha = self._branch_sha(start_branch)
+            if not base_sha:
+                raise OpError(f"start branch {start_branch} not found")
+            status, data = self.call("POST", "/git/refs", {"ref": f"refs/heads/{branch}", "sha": base_sha})
+            if status >= 400:
+                raise OpError(f"GitHub refused to create branch {branch}: HTTP {status} {str(data)[:200]}")
+        last = None
+        for path, content in files.items():
+            cur = self._file(path, branch)
+            body = {"message": message, "content": base64.b64encode(content.encode("utf-8")).decode("ascii"), "branch": branch}
+            if cur is not None:
+                body["sha"] = cur["sha"]
+            status, last = self.call("PUT", f"/contents/{urllib.parse.quote(path, safe='/')}", body)
+            if status >= 400:
+                raise OpError(f"GitHub refused the commit of {path} on {branch}: HTTP {status} {str(last)[:200]}")
+        return last
+
+    def create_mr(self, source: str, title: str, description: str, labels: list[str]):
+        status, data = self.call("POST", "/pulls", {"title": title, "head": source, "base": self.default_branch, "body": description})
+        if status >= 400:
+            raise OpError(f"GitHub refused the pull request: HTTP {status} {str(data)[:200]}")
+        number = data["number"]
+        if labels:  # labels may not exist yet: GitHub creates them on the fly when the token may; failure is not fatal
+            self.call("POST", f"/issues/{number}/labels", {"labels": labels})
+        return {"web_url": data.get("html_url"), "iid": number}
+
+    def merge_mr(self, iid: int):
+        return self.call("PUT", f"/pulls/{iid}/merge", {"merge_method": "squash"})
+
+    def run_pages_pipeline(self):
+        return self.call("POST", f"/actions/workflows/{self.workflow_pages}/dispatches", {"ref": self.default_branch})
+
+
 # ---- the action --------------------------------------------------------------------------------------
 def _parse_env(env: dict) -> tuple[str, str, str, dict, str | None]:
     action = (env.get("ACTION") or "").strip()
@@ -119,7 +218,7 @@ def _parse_env(env: dict) -> tuple[str, str, str, dict, str | None]:
         raise OpError("PARAMS must be a JSON object, e.g. {\"to\": \"pilot\"}")
     if not isinstance(params, dict):
         raise OpError("PARAMS must be a JSON object")
-    return action, target, reason, params, env.get("GITLAB_USER_LOGIN") or None
+    return action, target, reason, params, env.get("GITLAB_USER_LOGIN") or env.get("GITHUB_ACTOR") or None
 
 
 def run_action(env: dict, manifest_path: Path, *, api: GitLab | None = None, dry_run: bool = False,
@@ -212,12 +311,18 @@ def mr_description(res: ops.OpResult, action: str, target: str, reason: str, act
 def main(args) -> int:
     env = dict(os.environ)
     api = None
+    platform = getattr(args, "platform", "auto") or "auto"
+    if platform == "auto":
+        platform = "github" if (env.get("GITHUB_ACTIONS") or env.get("GITHUB_REPOSITORY")) and not env.get("CI_API_V4_URL") else "gitlab"
     if args.git:
-        missing = [k for k in ("CI_API_V4_URL", "CI_PROJECT_ID", "OPS_BOT_TOKEN") if not env.get(k)]
+        need = ("GITHUB_REPOSITORY",) if platform == "github" else ("CI_API_V4_URL", "CI_PROJECT_ID", "OPS_BOT_TOKEN")
+        missing = [k for k in need if not env.get(k)]
+        if platform == "github" and not (env.get("OPS_BOT_TOKEN") or env.get("GITHUB_TOKEN")):
+            missing.append("GITHUB_TOKEN")
         if missing:
             print(f"refused: --git needs {', '.join(missing)}", file=sys.stderr)
             return 2
-        api = GitLab(env)
+        api = GitHub(env) if platform == "github" else GitLab(env)
     allow = bool(getattr(args, "allow_placeholders", False) or env.get("REGISTRY_ALLOW_PLACEHOLDERS") in ("1", "true"))
     try:
         result = run_action(env, Path(args.manifest), api=api, dry_run=args.dry_run, allow_placeholders=allow)

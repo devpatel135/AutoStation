@@ -1,0 +1,137 @@
+name: analytics
+
+# Live fleet analytics: ingest run logs from the (private) logging repository, compute compliance signals, diagnose failures with the LLM,
+# alert, and build the dashboards. OFF unless the repository variable AUTOSTATION_LIVE_ANALYTICS is 'true'.
+#
+# DATA EXPOSURE: run logs and dashboards describe your fleet (hosts, item ids, error text). Workflow artifacts and GitHub Pages of a PUBLIC
+# repository are public. This workflow therefore refuses to run on a public repository unless AUTOSTATION_ALLOW_PUBLIC_DASHBOARD is 'true',
+# and it never publishes to Pages unless AUTOSTATION_LIVE_TO_PAGES is 'true'. Read docs/PIPELINES.md before enabling.
+on:
+  schedule:
+    - cron: "7,37 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: analytics
+  cancel-in-progress: false
+
+jobs:
+  analyze:
+    if: ${{ vars.AUTOSTATION_LIVE_ANALYTICS == 'true' && (github.event.repository.private || vars.AUTOSTATION_ALLOW_PUBLIC_DASHBOARD == 'true') }}
+    runs-on: ubuntu-latest
+    env:
+      LOGGING_REPO: ${{ vars.AUTOSTATION_LOGGING_REPO }}
+      LOGGING_READ_TOKEN: ${{ secrets.LOGGING_READ_TOKEN }}
+      AUTOSTATION_LLM_ENDPOINT: ${{ vars.LLM_ENDPOINT }}
+      AUTOSTATION_LLM_KEY: ${{ secrets.LLM_KEY }}
+      JIRA_URL: ${{ vars.JIRA_URL }}
+      JIRA_PROJECT: ${{ vars.JIRA_PROJECT }}
+      JIRA_TOKEN: ${{ secrets.JIRA_TOKEN }}
+      TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
+      ALERTS_LIVE: ${{ vars.AUTOSTATION_ALERTS_LIVE }}
+      TO_PAGES: ${{ vars.AUTOSTATION_LIVE_TO_PAGES }}
+    steps:
+      - name: Check configuration
+        id: cfg
+        run: |
+          if [ -z "$LOGGING_REPO" ] || [ -z "$LOGGING_READ_TOKEN" ]; then
+            echo "::notice::live analytics is enabled but AUTOSTATION_LOGGING_REPO (variable) or LOGGING_READ_TOKEN (secret) is missing - skipping"
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "proceed=true" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/checkout@v4
+        if: ${{ steps.cfg.outputs.proceed == 'true' }}
+      - uses: actions/setup-python@v5
+        if: ${{ steps.cfg.outputs.proceed == 'true' }}
+        with:
+          python-version: "3.12"
+      - name: Restore the archive (branch 'archive' of the logging repo)
+        if: ${{ steps.cfg.outputs.proceed == 'true' }}
+        run: |
+          URL="https://x-access-token:${LOGGING_READ_TOKEN}@github.com/${LOGGING_REPO}.git"
+          if git ls-remote --exit-code --heads "$URL" archive >/dev/null 2>&1; then
+            git clone --quiet --depth 1 --branch archive "$URL" ../logs-archive
+          else
+            mkdir ../logs-archive
+            git -C ../logs-archive init -q -b archive
+            git -C ../logs-archive remote add origin "$URL"
+          fi
+          git -C ../logs-archive config user.name "github-actions[bot]"
+          git -C ../logs-archive config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+      - name: Ingest ingest/* refs into the archive (refs are kept until the archive is safely pushed)
+        if: ${{ steps.cfg.outputs.proceed == 'true' }}
+        working-directory: components/automation-logging
+        env:
+          PYTHONPATH: ../wrapper-core
+        run: python -m automation_logging ingest --source git --remote "https://x-access-token:${LOGGING_READ_TOKEN}@github.com/${LOGGING_REPO}.git" --out ../../../logs-archive --keep-refs
+      - name: Push the archive, then consume the ingested refs
+        if: ${{ steps.cfg.outputs.proceed == 'true' }}
+        working-directory: components/automation-logging
+        env:
+          PYTHONPATH: ../wrapper-core
+        run: |
+          cd ../../../logs-archive
+          git add -A
+          if ! git diff --cached --quiet; then
+            git commit -q -m "archive $(date -u +%Y-%m-%dT%H:%MZ)"
+            git push origin HEAD:archive
+          fi
+          cd - >/dev/null
+          python -m automation_logging ingest --source git --remote "https://x-access-token:${LOGGING_READ_TOKEN}@github.com/${LOGGING_REPO}.git" --out ../../../logs-archive
+          # artefacts that arrived between the two ingests were archived locally and their refs deleted: push them too, or they would be lost
+          cd ../../../logs-archive
+          git add -A
+          if ! git diff --cached --quiet; then
+            git commit -q -m "archive (late arrivals) $(date -u +%Y-%m-%dT%H:%MZ)"
+            git push origin HEAD:archive
+          fi
+      - name: Analyze, diagnose, alert, build dashboards
+        if: ${{ steps.cfg.outputs.proceed == 'true' }}
+        working-directory: components/automation-logging
+        env:
+          PYTHONPATH: ../wrapper-core
+        run: |
+          DRY="--dry-run-alerts"
+          if [ "$ALERTS_LIVE" = "true" ]; then DRY=""; fi
+          python -m automation_logging build --archive ../../../logs-archive --manifest ../automation-registry/manifest.yaml \
+            --state ../../../logs-archive/_state --out "$GITHUB_WORKSPACE/live-out" --alert-config alerting.yaml $DRY \
+            --program-config program.yaml
+          cd ../../../logs-archive && git add -A && { git diff --cached --quiet || { git commit -q -m "state $(date -u +%H:%MZ)" && git push origin HEAD:archive; }; }
+      - name: Publish the dashboards as a workflow artifact (private repositories only)
+        if: ${{ steps.cfg.outputs.proceed == 'true' && github.event.repository.private }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: fleet-dashboard
+          path: live-out
+          retention-days: 7
+      - name: Build the full site with LIVE data (opt-in publish to Pages)
+        if: ${{ steps.cfg.outputs.proceed == 'true' && vars.AUTOSTATION_LIVE_TO_PAGES == 'true' }}
+        run: |
+          mkdir -p live-data
+          cp -r ../logs-archive live-data/archive
+          rm -rf live-data/archive/.git live-data/archive/_state
+          cp components/automation-registry/manifest.yaml live-data/manifest.yaml
+          python tools/build_site.py --out site --live-data live-data --fetch-installer-sha
+          python tools/check_site.py site
+      - name: Upload the site
+        if: ${{ steps.cfg.outputs.proceed == 'true' && vars.AUTOSTATION_LIVE_TO_PAGES == 'true' }}
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  publish:
+    needs: analyze
+    if: ${{ vars.AUTOSTATION_LIVE_TO_PAGES == 'true' && needs.analyze.result == 'success' }}
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

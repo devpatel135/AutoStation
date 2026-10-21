@@ -1,0 +1,40 @@
+<Activity mc:Ignorable="sap sap2010" x:Class="Main" xmlns="http://schemas.microsoft.com/netfx/2009/xaml/activities" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:sap="http://schemas.microsoft.com/netfx/2009/xaml/activities/presentation" xmlns:sap2010="http://schemas.microsoft.com/netfx/2010/xaml/activities/presentation" xmlns:ui="http://schemas.uipath.com/workflow/activities" xmlns:uis="clr-namespace:UiPath.UIAutomation.Activities.SAP;assembly=UiPath.UIAutomation.Activities" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <!-- SYNTHETIC SAMPLE: small desktop flow: SAP GUI + a desktop Excel window -->
+  <Sequence DisplayName="Post journal entries">
+    <ui:GetRobotCredential DisplayName="Get SAP service account" AssetName="SAP_Posting_Service" />
+    <ui:GetRobotAsset DisplayName="Get company code" AssetName="PostingCompanyCode" />
+    <ui:OpenApplication DisplayName="Start SAP Logon" FileName="C:\Program Files (x86)\SAP\FrontEnd\SAPgui\saplogon.exe" />
+    <TryCatch DisplayName="Post">
+      <TryCatch.Try>
+        <Sequence>
+          <ui:TypeInto DisplayName="User name">
+            <ui:TypeInto.Target>
+              <ui:Target Selector="&lt;wnd app='saplogon.exe' cls='SAP_FRONTEND_SESSION' /&gt;&lt;sap id='usr/txtRSYST-BNAME' /&gt;" />
+            </ui:TypeInto.Target>
+          </ui:TypeInto>
+          <uis:SAPCallTransaction DisplayName="Open FB50" TransactionCode="FB50" />
+          <ui:Click DisplayName="Post">
+            <ui:Click.Target>
+              <ui:Target Selector="&lt;wnd app='saplogon.exe' /&gt;&lt;sap id='wnd[0]/tbar[0]/btn[11]' /&gt;" />
+            </ui:Click.Target>
+          </ui:Click>
+          <ui:GetText DisplayName="Read the document number from Excel">
+            <ui:GetText.Target>
+              <ui:Target Selector="&lt;wnd app='excel.exe' cls='XLMAIN' /&gt;&lt;uia automationid='A1' /&gt;" />
+            </ui:GetText.Target>
+          </ui:GetText>
+          <ui:ReadRange DisplayName="Read the entries" SheetName="Entries" />
+        </Sequence>
+      </TryCatch.Try>
+      <TryCatch.Catches>
+        <Catch x:TypeArguments="x:Exception">
+          <ActivityAction x:TypeArguments="x:Exception">
+            <Throw DisplayName="Rethrow" />
+          </ActivityAction>
+        </Catch>
+      </TryCatch.Catches>
+    </TryCatch>
+    <ui:MessageBox DisplayName="Tell the user it finished" Caption="Done" Text="Posting complete" />
+    <ui:CloseApplication DisplayName="Close SAP" />
+  </Sequence>
+</Activity>

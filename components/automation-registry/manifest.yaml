@@ -1,7 +1,3 @@
-# AUTOSTATION registry manifest. Edit through merge requests (or `python -m registry ...`).
-# STARTER CONTENT: every sha256 below is the all-zero PLACEHOLDER. `registry validate` only accepts it with
-# --allow-placeholders; real releases (add-version) replace it with the package's hash. Comments are not
-# preserved when the tool rewrites this file.
 schema_version: 1
 fleet:
   paused: false
@@ -16,22 +12,22 @@ compatibility:
 components:
   wrapper-core:
     rings:
-      dev: "0.1.0"
-      pilot: "0.1.0"
-      broad: "0.1.0"
+      dev: "0.2.0"
+      pilot: "0.2.0"
+      broad: "0.2.0"
     versions:
-      "0.1.0":
-        url: artifacts/components/wrapper-core-0.1.0.zip
-        sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+      "0.2.0":
+        url: artifacts/components/wrapper-core-0.2.0.zip
+        sha256: aa545fcdb9bb2752892ec5da8839a23420571da89bb67a7f8d2e3550757ac64c
   execution-framework:
     rings:
-      dev: "0.1.0"
-      pilot: "0.1.0"
-      broad: "0.1.0"
+      dev: "0.2.0"
+      pilot: "0.2.0"
+      broad: "0.2.0"
     versions:
-      "0.1.0":
-        url: artifacts/components/execution-framework-0.1.0.zip
-        sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+      "0.2.0":
+        url: artifacts/components/execution-framework-0.2.0.zip
+        sha256: "6e67233aa437b6a710ac4a9a45598e9f528aa1aee2536413a0c6a537b4972cf7"
 assets:
   default:
     internal_api_url: "https://api.example.internal"
@@ -56,7 +52,7 @@ automations:
     versions:
       "1.0.0":
         url: artifacts/automations/automation-hello-world-1.0.0.zip
-        sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+        sha256: "201e3dc765c3ffb316a72a716ba553974377da884416a9fed6f886040e64ce46"
         requires:
           wrapper_core: ">=0.1.0,<1.0.0"
           execution_framework: ">=0.1.0,<1.0.0"
@@ -104,25 +100,13 @@ automations:
     paused_reason: ""
     llm_allowed_classification: internal
     rings:
-      dev: "1.2.0"
-      pilot: "1.1.0"
+      dev: "1.0.0"
+      pilot: "1.0.0"
       broad: "1.0.0"
     versions:
       "1.0.0":
         url: artifacts/automations/automation-invoice-router-1.0.0.zip
-        sha256: "0000000000000000000000000000000000000000000000000000000000000000"
-        requires:
-          wrapper_core: ">=0.1.0,<1.0.0"
-          execution_framework: ">=0.1.0,<1.0.0"
-      "1.1.0":
-        url: artifacts/automations/automation-invoice-router-1.1.0.zip
-        sha256: "0000000000000000000000000000000000000000000000000000000000000000"
-        requires:
-          wrapper_core: ">=0.1.0,<1.0.0"
-          execution_framework: ">=0.1.0,<1.0.0"
-      "1.2.0":
-        url: artifacts/automations/automation-invoice-router-1.2.0.zip
-        sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+        sha256: "029a037c834c3991a7d96e1e6a7e81baa6ad768294a04fdc70cb9f649b617230"
         requires:
           wrapper_core: ">=0.1.0,<1.0.0"
           execution_framework: ">=0.1.0,<1.0.0"
@@ -184,12 +168,13 @@ automations:
     paused_reason: ""
     llm_allowed_classification: internal
     rings:
-      dev: "0.9.0"
-      pilot: "0.9.0"
+      dev: "1.0.0"
+      pilot: "1.0.0"
+      broad: "1.0.0"
     versions:
-      "0.9.0":
-        url: artifacts/automations/automation-portal-report-0.9.0.zip
-        sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+      "1.0.0":
+        url: artifacts/automations/automation-portal-report-1.0.0.zip
+        sha256: "7c9d6a34e4f8cb090a011eee1719d840f1608d432ed80ef8181857be7d6835b6"
         requires:
           wrapper_core: ">=0.1.0,<1.0.0"
           execution_framework: ">=0.1.0,<1.0.0"
@@ -251,7 +236,7 @@ automations:
     versions:
       "1.0.0":
         url: artifacts/automations/automation-notifier-1.0.0.zip
-        sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+        sha256: ec99ed977b203944e39ae8ac23a519230bd976fd04fbafe2bcd4ef26ebad5db8
         requires:
           wrapper_core: ">=0.1.0,<1.0.0"
           execution_framework: ">=0.1.0,<1.0.0"

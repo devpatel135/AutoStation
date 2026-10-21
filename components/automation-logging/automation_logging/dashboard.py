@@ -5,8 +5,10 @@ The page is server-rendered with no inline data blobs and no script that touches
 """
 from __future__ import annotations
 
+import base64
 import html
 import json
+import re
 from pathlib import Path
 
 from .common import write_json
@@ -100,7 +102,7 @@ code{font:12px var(--mono);background:var(--surface2);padding:1px 5px;border-rad
 """
 
 
-def render(report: dict, runs_latest: list[dict]) -> str:
+def render(report: dict, runs_latest: list[dict], evidence_html: str = "") -> str:
     fleet = report["fleet"]
     sigs = report["signals"]
     parts: list[str] = []
@@ -199,6 +201,9 @@ def render(report: dict, runs_latest: list[dict]) -> str:
           f"<td>{comp(h['components']['execution-framework'])}</td><td>{autos or '-'}</td></tr>")
     A("</table></div>")
 
+    if evidence_html:
+        A(evidence_html)
+
     # --- recent runs
     A("<h2>Latest runs</h2><div class=\"tw\"><table><tr><th>Started</th><th>Automation</th><th>Host</th><th>Status</th><th>Duration</th><th>Synopsis</th></tr>")
     for r in runs_latest[:25]:
@@ -209,11 +214,69 @@ def render(report: dict, runs_latest: list[dict]) -> str:
     return "".join(parts)
 
 
+INLINE_IMAGE_MAX = 500 * 1024
+_TEXT_EXT = {"text/html": ".html.txt", "text/plain": ".txt", "application/json": ".json", "application/zip": ".zip",
+             "image/png": ".png", "image/jpeg": ".jpg"}
+_SAFE_STEM = re.compile(r"[^A-Za-z0-9_-]+")
+
+
+def safe_evidence_file(name: str, ctype: str) -> str:
+    """File name used on the published site: sanitised stem + an extension derived from the (validated) content type,
+    so stored HTML is always served as plain text (``.html.txt``) and can never be rendered or executed by a browser."""
+    stem = _SAFE_STEM.sub("_", name.rsplit(".", 1)[0])[:60].strip("_") or "file"
+    return stem + _TEXT_EXT.get(ctype, ".bin")
+
+
+def evidence_section(data: analytics.Data, out: Path, limit: int = 12) -> str:
+    """Failure evidence (screenshots, DOM snapshots, traces). Images <=500 KB are inlined as data URIs; everything else is a
+    download link; text/HTML is shown only as escaped text excerpts. Payloads are written under ``evidence/<run_id>/``."""
+    records = sorted(getattr(data, "evidence", None) or [], key=lambda r: r["ts"], reverse=True)[:limit]
+    if not records or not getattr(data, "archive", None):
+        return ""
+    parts = ["<h2>Failure evidence</h2><p class=\"sub\">Captured automatically when a run failed (redacted DOM, screenshots, traces). "
+             "Stored content is never rendered as a page: text is shown escaped, HTML is a plain-text download.</p>"]
+    for rec in records:
+        payload = None
+        try:
+            payload = json.loads((Path(data.archive) / rec["_path"]).read_text(encoding="utf-8"))
+        except (OSError, ValueError, KeyError):
+            pass
+        run = data.runs_by_id.get(rec.get("run_id")) or {}
+        err = run.get("error") or {}
+        head = (f"<div class=\"kv\"><b>Run</b><span><code>{esc(rec.get('run_id'))}</code></span><b>Automation</b><span>{esc(rec.get('automation'))}</span>"
+                f"<b>Host</b><span>{esc(rec.get('host') or run.get('host'))}</span><b>When</b><span>{esc(rec.get('ts'))}</span>"
+                f"<b>Status</b><span>{esc(run.get('status') or '-')}</span><b>Error</b><span>{esc((err.get('category') or '') + ' ' + (err.get('message') or '')[:200])}</span></div>")
+        body = []
+        for f in (payload or {}).get("files", []):
+            ctype = f.get("content_type")
+            try:
+                blob = base64.b64decode(f.get("data_b64") or "", validate=False)
+            except ValueError:
+                continue
+            fname = safe_evidence_file(str(f.get("name", "file")), str(ctype))
+            dest = out / "evidence" / re.sub(r"[^A-Za-z0-9._-]", "_", str(rec.get("run_id"))) / fname
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(blob)
+            rel = dest.relative_to(out).as_posix()
+            label = f"{esc(f.get('name'))} ({len(blob) // 1024 or 1} KB, {esc(ctype)})"
+            if ctype in ("image/png", "image/jpeg") and len(blob) <= INLINE_IMAGE_MAX:
+                body.append(f"<div><img alt=\"{esc(f.get('name'))}\" style=\"max-width:100%;border:1px solid var(--border);border-radius:6px\" "
+                            f"src=\"data:{esc(ctype)};base64,{base64.b64encode(blob).decode('ascii')}\"><div class=\"sub\"><a href=\"{esc(rel)}\">{label}</a></div></div>")
+            elif ctype in ("text/html", "text/plain", "application/json"):
+                excerpt = blob[:1500].decode("utf-8", "replace")
+                body.append(f"<details><summary>{label} - <a href=\"{esc(rel)}\">download</a></summary><pre>{esc(excerpt)}</pre></details>")
+            else:
+                body.append(f"<div><a href=\"{esc(rel)}\">{label}</a></div>")
+        inner = "".join(body) or "<div class=sub>payload unavailable</div>"
+        parts.append(f"<div class=\"acard\" style=\"margin-bottom:.8rem\">{head}{inner}</div>")
+    return "".join(parts)
+
+
 def build_site(report: dict, data: analytics.Data, out_dir: str | Path, signals: list[dict] | None = None) -> dict:
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     runs_latest = [analytics.run_summary(r) for r in sorted(data.runs, key=lambda r: r["started_at"], reverse=True)[:50]]
-    (out / "index.html").write_text(render(report, runs_latest), encoding="utf-8")
+    (out / "index.html").write_text(render(report, runs_latest, evidence_section(data, out)), encoding="utf-8")
     write_json(out / "data.json", report)
     write_json(out / "signals.json", {"schema_version": 1, "generated_at": report["generated_at"],
                                       "signals": signals if signals is not None else report["signals"]})

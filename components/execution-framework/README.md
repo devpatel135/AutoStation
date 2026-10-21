@@ -107,6 +107,7 @@ All of `fw.wrapper` writes into `AUTOMAGIX_RUN_DIR` (falls back to `./.amx-dev-r
 | `isDryRun()` | `is_dry_run()` | |
 | `assets()` | `assets()` | dynamic config assets for the ring |
 | `emitTrigger(target, params, reason)` | `emit_trigger(...)` | event-driven orchestration |
+| `addEvidence(name, bufferOrString, contentType?)` | `add_evidence(...)` | files into `<run>/evidence/` (caps + scrubbing, see Failure evidence); never throws |
 | `entrypoint(async (fw) => {...})` | `@entrypoint` | writes `error.json` {category,type,message,traceback_tail,escalated,attempts}; sets `process.exitCode = 1` on failure |
 | `errors.{Category, NetworkError, AuthExpired, SystemUnavailable, DataError, LogicError, Escalation}` | same names in `wrapper_core` | throw these to steer the classifier |
 
@@ -122,7 +123,9 @@ Client certificates: `powershell -File scripts/export-cert.ps1 -SubjectLike "*CN
 
 ### `fw.browser`, `fw.cdp`
 
-`browser.launch({ headless = true, channel = 'msedge', userDataDir, cdpPort, args, executablePath })` -> `{ browser, context, page, cdp, close() }`; `browser.attach(cdpUrl)` connects to a running browser.
+`browser.launch({ headless = true, channel = 'msedge', userDataDir, cdpPort, args, executablePath, slowMo })` -> `{ browser, context, page, cdp, guard(fn), captureFailure(err), close() }`; `browser.attach(cdpUrl)` connects to a running browser.
+Every session is registered for **failure evidence** (below). `session.guard(async (s) => {...})` runs your code and captures evidence on ANY error before rethrowing the original — use it when you close the browser in a `finally`
+(the error reaches `entrypoint` only after `finally` ran, when the page is already gone).
 `cdp.domSnapshot(page, { maxChars })` returns the compact LLM-facing snapshot (interactive elements + stable selectors; values redacted; URL queries masked).
 
 ### `fw.resilience` — Pattern 3
@@ -154,12 +157,54 @@ fw.adapters.register('contoso-portal', {
 });
 fw.adapters.get('contoso-portal').openInvoice(page, 'INV-1');
 ```
-Shipped: `generic-table` (header normalisation + pagination), `generic-form` (fill + verify, never submits), `download` (size/hash check, atomic move, sanitised file names), `sso-detect` (throws `AuthExpired`).
+Shipped: `generic-table` (header normalisation + pagination), `generic-form` (fill + verify, never submits), `download` (size/hash check, atomic move, sanitised file names), `sso-detect` (throws `AuthExpired`),
+and (0.2) `file-upload` (validates existence/size first; a missing file is a `DataError`, not a Playwright timeout), `iframe-helper` (find a frame by URL pattern/name with a polling wait, `withFrame`),
+`wait-helpers` (`retryUntil` with backoff, `waitForNetworkIdle`, `waitForStable(selector)` — no fixed sleeps), `popup-handler` (dismiss cookie/consent banners, **reject-first**, never clicks a deny-listed target such as delete/pay/submit),
+`table-export-csv` (scrape a table to CSV; Excel formula-injection guard that leaves plain numbers alone).
 Adapters shared across automations belong in `lib/adapters/` and in `registerBuiltins`.
 
-### Developer onboarding: Playwright CodeGen
+### Developer onboarding: Playwright CodeGen and the Recorder
 
 `node bin/amx-codegen.js https://portal.internal.example.com --target javascript` records selectors against your Edge profile (SSO works while recording) and prints working code to refine.
+
+`node bin/amx-record.js https://portal.internal.example.com --name automation-foo` is the UiPath-Recorder equivalent: it records with codegen, then **converts** the recording into a complete AUTOSTATION payload
+(`main.js`, `automation.yaml`, `README.md` with the recorded steps table, `params.suggested.yaml`, `tests/test_lifecycle.py`). Resilient `rp.*` calls, params instead of literals, `sso-detect` assertions after navigations,
+`runItem` loops for repeated row patterns, dry-run guards on irreversible-looking clicks — and **credentials are never recorded** (the step throws `credential required: use the user profile / Credential Manager`).
+`--from-file recording.js` converts an existing codegen file without a browser. Full workflow and limits: [`docs/RECORDER.md`](../../docs/RECORDER.md).
+
+### Failure evidence (UiPath's "screenshot on error")
+
+When something fails, the framework captures into `<AUTOMAGIX_RUN_DIR>/evidence/` (wrapper-core ships that folder with the run as artefact kind `evidence`):
+
+| File | Content |
+|---|---|
+| `failN-screenshot.png` | the live page |
+| `failN-dom-snapshot.txt` | the **redacted** compact DOM snapshot (labels/selectors; form values are never included; URL query masked) |
+| `failN-context.txt` | automation / run id / reason / scrubbed error / masked URL / last 20 events (sensitive keys redacted) |
+| `trace.zip` | Playwright trace, only with `AMX_TRACE=1` and only on failure (dropped if over the size cap) |
+
+Triggers: uncaught error in `entrypoint`; retries exhausted in `runItem` / `runWithRetry`; selector heal exhausted (`resilience`); session lapse (`sso-detect`); any error inside `session.guard`.
+Rules enforced in code: **≤ 8 files and ≤ 1.5 MB total**, only png/jpeg/html/txt/json/zip, names that look like cookies/storage/credentials are refused, text is scrubbed (bearer tokens, JWTs, `password=`/`token=`, SSNs, card numbers),
+each capture step is individually guarded (evidence can never mask the real error), one capture per error object, at most two capture sets per run. Your own files: `fw.wrapper.addEvidence(name, bufferOrString, contentType?)`.
+
+### Debug mode
+
+| Env | Effect |
+|---|---|
+| `AMX_HEADED=1` | headed browser |
+| `AMX_SLOWMO=<ms>` | slow every action (0–5000) |
+| `AMX_PAUSE_ON_ERROR=1` | on failure keep the browser open (`AMX_PAUSE_MINUTES`, default 10, max 60) until you press Enter — **interactive TTY only** |
+| `AMX_DEBUG_SELECTORS=1` | log every locator with its match count (`selector_debug` event) |
+| `AMX_TRACE=1` | Playwright trace kept as `evidence/trace.zip` on failure (passive, honoured everywhere) |
+
+The interactive options are **ignored in scheduled runs** (`AUTOMAGIX_SLOT` is any real slot id; `dev`/`adhoc`/`manual`/`debug` count as interactive), so an unattended VDI never opens a window or waits for a person.
+`AMX_DEBUG_ALLOW_SCHEDULED=1` overrides that explicitly. Ignored options are reported once as a `debug_options_ignored` event. Selectors may be strings **or** functions (`rp.click((p) => p.getByRole('button', { name: 'Go' }))`), which keep the exact Playwright chain (recorder output).
+
+## Changelog
+
+* **0.2.0** — failure evidence (`addEvidence`, `session.guard`, auto-capture on failure, `trace.zip`), debug mode (`AMX_HEADED/SLOWMO/PAUSE_ON_ERROR/DEBUG_SELECTORS/TRACE`), recorder (`bin/amx-record.js`, `lib/recorder.js`),
+  resilient function selectors + `dblclick`, new adapters (`file-upload`, `iframe-helper`, `wait-helpers`, `popup-handler`, `table-export-csv`). Public 0.1 API unchanged (compatible with manifest range `>=0.1.0,<1.0.0`).
+* **0.1.0** — initial release.
 
 ## Build and release
 
@@ -176,9 +221,9 @@ python <automation-builder>/scripts/package.py component execution-framework dis
 
 This component was authored on a machine **without Node.js**, so **`node --test` has never been run against it.** What was verified instead:
 
-* **Syntax:** all 37 `.js/.cjs/.mjs` files parse cleanly with a full modern-JS grammar (tree-sitter), with a negative control confirming the checker flags broken code.
+* **Syntax:** all 54 `.js/.cjs/.mjs` files parse cleanly with a full modern-JS grammar (tree-sitter), with a negative control confirming the checker flags broken code.
 * **Logic, in a real JS engine (V8) via a Node-compat shim:** `tools/v8-harness/run_in_v8.py` runs the real library code and all `test/*.test.js` suites against in-memory shims (fs, path, sha256, assert, test, readline, stream,
-  in-memory HTTP servers, URL/timer polyfills). **173 tests pass.** A mutation check (disabling the deny-list and the LOGIC_ERROR no-retry rule) made the suite fail as expected. To re-run on a machine without Node:
+  in-memory HTTP servers, URL/timer polyfills). **242 tests pass** (173 in 0.1, +69 for evidence, debug mode, recorder, `amx-record` and the new adapters). A mutation check (disabling the deny-list and the LOGIC_ERROR no-retry rule) made the suite fail as expected. To re-run on a machine without Node:
   `py -3 -m pip install py-mini-racer` then `py -3 tools/v8-harness/run_in_v8.py [--only test/retry.test.js]`.
 * **Cross-language format:** the golden `events.jsonl` lines in `test/events.test.js` were confirmed byte-identical (apart from the timestamp) to what `wrapper_core.runctx` writes, and the classifier parity table was
   confirmed against the Python classifier (29/29 rows).

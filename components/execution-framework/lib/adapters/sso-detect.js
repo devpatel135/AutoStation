@@ -44,7 +44,12 @@ async function readState(page, cfg = {}) {
 async function assertSession(page, cfg = {}) {
   const state = await readState(page, cfg);
   const r = isLoginState(state, cfg);
-  if (r.loggedOut) throw new AuthExpired(`session not valid: ${r.reason}`);
+  if (r.loggedOut) {
+    const err = new AuthExpired(`session not valid: ${r.reason}`);
+    // failure evidence from the live page (cfg.captureEvidence is injectable; never throws)
+    await (cfg.captureEvidence || require('../evidence').captureSafe)(err, { reason: 'session lapse', page: page.raw || page });
+    throw err;
+  }
   return true;
 }
 

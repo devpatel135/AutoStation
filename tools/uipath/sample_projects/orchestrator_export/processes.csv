@@ -1,0 +1,5 @@
+Name,Version,Folder
+Invoice_Processing_REF,1.0.4,Shared/Finance
+Portal_Scraper,2.1.0,Shared/Procurement
+SAP_Desktop_Posting,0.9.2,Shared/Finance
+Legacy_Unused_Process,1.0.0,Shared/Legacy

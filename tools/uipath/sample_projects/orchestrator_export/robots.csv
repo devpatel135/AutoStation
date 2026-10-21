@@ -1,0 +1,4 @@
+Name,Type,Folder,Count
+VDI-FIN-UNATTENDED,Unattended,Shared/Finance,2
+VDI-PROC-UNATTENDED,Unattended,Shared/Procurement,1
+LAPTOP-AP-ATTENDED,Attended,Shared/Finance,3

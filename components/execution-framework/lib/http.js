@@ -102,7 +102,7 @@ function client(opts = {}) {
   async function request(method, pathOrUrl, o = {}) {
     method = method.toUpperCase();
     const u = buildUrl(baseUrl, pathOrUrl, o.query);
-    const h = { Accept: 'application/json', 'User-Agent': 'execution-framework/0.1.0', ...headers, ...(o.headers || {}) };
+    const h = { Accept: 'application/json', 'User-Agent': `execution-framework/${require('../package.json').version}`, ...headers, ...(o.headers || {}) };
     let bodyStr = null;
     if (o.json !== undefined) {
       bodyStr = JSON.stringify(o.json);

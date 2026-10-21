@@ -4,6 +4,8 @@ import json
 
 import pytest
 
+from wrapper_core import __version__ as WC_VERSION
+
 from wrapper_core import manifest as mf, miniyaml, schema, versions
 from wrapper_core.redact import REDACTED, redact_event
 
@@ -47,7 +49,7 @@ def test_version_ranges():
 
 # ---- manifest -------------------------------------------------------------------------------------
 def _valid_manifest(registry):
-    registry.add_component("wrapper-core", "0.1.0")
+    registry.add_component("wrapper-core", WC_VERSION)
     registry.add_component("execution-framework", "0.1.0")
     registry.add_automation("auto-a", "1.0.0", "print(1)")
     return mf.parse(miniyaml.dumps(registry.manifest))

@@ -19,7 +19,7 @@ from wrapper_core import manifest as wc_manifest  # noqa: E402
 from wrapper_core import miniyaml  # noqa: E402
 from wrapper_core.util import iso, parse_iso  # noqa: E402
 
-KINDS = ("run", "heartbeat", "lifecycle")
+KINDS = ("run", "heartbeat", "lifecycle", "evidence")
 SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3}
 
 __all__ = ["iso", "parse_iso", "utcnow", "fingerprint", "percentile", "read_json", "write_json", "error_fingerprint",

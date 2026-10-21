@@ -1,0 +1,43 @@
+name: Access request
+description: Ask for access (join a ring, repository role, dashboards, secrets for a new automation)
+title: "[access] "
+labels: ["access", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Never put a password, token or key in this issue.** Access is granted by a platform approver through GitHub teams / the secret store, and the grant is recorded here.
+  - type: dropdown
+    id: kind
+    attributes:
+      label: What do you need?
+      options:
+        - Join the pilot ring
+        - Developer role (create/merge automation repos)
+        - Platform approver role
+        - Operator role (admin panel actions)
+        - Dashboard / analytics access
+        - Credential or secret for a new automation
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: who
+    attributes:
+      label: For whom (GitHub username or team)
+    validations:
+      required: true
+  - type: input
+    id: automation
+    attributes:
+      label: Automation (if specific)
+  - type: textarea
+    id: justification
+    attributes:
+      label: Why, and for how long?
+    validations:
+      required: true
+  - type: input
+    id: approver
+    attributes:
+      label: Manager / owner who can confirm this request

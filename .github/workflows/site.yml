@@ -1,0 +1,90 @@
+name: site
+
+# Builds the whole site (landing, install center, docs, registry portal + admin panel, dashboards, program, migration) and
+# deploys it to GitHub Pages. It also publishes the registry (manifest.yaml + artifacts) that endpoints self-heal from:
+# https://<owner>.github.io/<repo>/registry/
+# One-time setup: Settings -> Pages -> Build and deployment -> Source: GitHub Actions.
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_run:
+    workflows: [installers]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      data:
+        description: "Dashboard data: demo (synthetic, labelled) or none (placeholders)"
+        required: false
+        default: demo
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    # when live analytics publishes to Pages (analytics.yml), this workflow stays out of its way
+    if: ${{ vars.AUTOSTATION_LIVE_TO_PAGES != 'true' && (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success') }}
+    runs-on: ubuntu-latest
+    env:
+      SITE_DATA: ${{ inputs.data || vars.AUTOSTATION_SITE_DATA || 'demo' }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Fetch published registry artifacts (if any)
+        id: artifacts
+        run: |
+          URL="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          if git ls-remote --exit-code --heads "$URL" registry-artifacts >/dev/null 2>&1; then
+            git clone --quiet --depth 1 --branch registry-artifacts "$URL" ../ra
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::no registry-artifacts branch yet - run the 'release' workflow once (see docs/PIPELINES.md)"
+          fi
+      - name: Build the registry from main + published artifacts
+        id: registry
+        if: ${{ steps.artifacts.outputs.exists == 'true' }}
+        continue-on-error: true
+        run: python tools/build_registry.py --out registry-out --artifacts-dir ../ra
+      - name: Overlay on-demand triggers (branch 'triggers', written by ops-action)
+        if: ${{ steps.registry.outcome == 'success' }}
+        run: |
+          URL="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          if git clone --quiet --depth 1 --branch triggers "$URL" ../tr 2>/dev/null && [ -f ../tr/components/automation-registry/triggers.json ]; then
+            cp ../tr/components/automation-registry/triggers.json registry-out/triggers.json
+            echo "overlaid triggers.json from the triggers branch"
+          fi
+      - name: Build the site
+        run: |
+          ARGS="--out site --fetch-installer-sha"
+          if [ "${{ steps.registry.outcome }}" = "success" ]; then ARGS="$ARGS --registry registry-out"; fi
+          if [ "$SITE_DATA" = "demo" ]; then ARGS="$ARGS --demo"; fi
+          python tools/build_site.py $ARGS
+      - name: Check the generated site (links, install pages)
+        run: python tools/check_site.py site
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
