@@ -1,8 +1,8 @@
 name: installer-dev
 
-# Builds an UNSIGNED, dev-ring per-user installer with NSIS on a Windows runner, so the installer path is verified in CI
-# even if your GitLab/Docker pipeline is not set up yet. Secrets (logging SSH key, registry token) are optional here; real
-# release builds use components/automation-builder/.gitlab-ci.yml with protected CI variables and --require-signing.
+# Builds an UNSIGNED dev-ring per-user installer with NSIS on a Windows runner and (on push) SMOKE-TESTS it: silent install
+# as a per-user install, verify files / scheduled task / first run / log artefact, then uninstall and verify cleanup.
+# Real release builds use components/automation-builder/.gitlab-ci.yml with protected CI variables and --require-signing.
 on:
   push:
     branches: [main]
@@ -13,48 +13,99 @@ on:
         description: Automation payload to wrap (directory name under components/automations)
         default: automation-hello-world
       registry_url:
-        description: Registry base URL or UNC/local path the endpoint reads manifest.yaml from
-        default: https://example.invalid/registry/
+        description: Registry base URL or local path (leave empty to use the e2e demo registry built in this job)
+        default: ""
       log_remote:
-        description: Logging repo SSH URL (git@host:group/automation-logging.git)
-        default: git@example.invalid:platform/automation-logging.git
+        description: Logging remote (ssh git url, or a local dir for the dev ring; empty = local smoke dir)
+        default: ""
       python_embed_url:
         description: python.org embeddable zip
         default: https://www.python.org/ftp/python/3.12.7/python-3.12.7-embed-amd64.zip
 
 jobs:
-  build:
+  build-and-smoke:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: python -m pip install jinja2 pytest
+      - run: python -m pip install jinja2 pytest pydantic
       - name: Install NSIS
         run: choco install nsis -y --no-progress
-      - name: Package wrapper-core and the automation
+      - name: Build the demo registry (packages, manifest, artifacts)
+        run: python tools/e2e_demo.py --out e2e-out
+      - name: Package wrapper-core and the automation, write build config
         shell: bash
         run: |
+          WS="${GITHUB_WORKSPACE//\\//}"
+          A="${{ inputs.automation }}"; A="${A:-automation-hello-world}"
+          REG="${{ inputs.registry_url }}"; REG="${REG:-$WS/e2e-out/registry}"
+          LOG="${{ inputs.log_remote }}"; LOG="${LOG:-$WS/smoke-logs}"
+          EMB="${{ inputs.python_embed_url }}"; EMB="${EMB:-https://www.python.org/ftp/python/3.12.7/python-3.12.7-embed-amd64.zip}"
           mkdir -p build/stage/wrapper-core build/pkg vendor
           cp -r components/wrapper-core/wrapper_core build/stage/wrapper-core/
           cp components/wrapper-core/VERSION build/stage/wrapper-core/VERSION
-          python components/automation-builder/scripts/package.py component wrapper-core build/stage/wrapper-core \
-            --version "$(tr -d '\r\n' < components/wrapper-core/VERSION)" --out build/pkg
-          A="${{ inputs.automation || 'automation-hello-world' }}"
+          WV="$(tr -d '\r\n' < components/wrapper-core/VERSION)"
+          python components/automation-builder/scripts/package.py component wrapper-core build/stage/wrapper-core --version "$WV" --out build/pkg
           V=$(python -c "import sys; sys.path.insert(0,'components/wrapper-core'); from wrapper_core import miniyaml; print(miniyaml.load('components/automations/$A/automation.yaml')['version'])")
-          python components/automation-builder/scripts/package.py automation "$A" "components/automations/$A" --version "$V" --out build/pkg
-          curl -fsSL -o vendor/python-embed.zip "${{ inputs.python_embed_url || 'https://www.python.org/ftp/python/3.12.7/python-3.12.7-embed-amd64.zip' }}"
+          curl -fsSL -o vendor/python-embed.zip "$EMB"
           cat > build/build.json <<EOF
           {"automation": "$A", "version": "$V", "ring": "dev",
-           "registry_url": "${{ inputs.registry_url || 'https://example.invalid/registry/' }}", "log_remote": "${{ inputs.log_remote || 'git@example.invalid:platform/automation-logging.git' }}",
+           "registry_url": "$REG", "log_remote": "$LOG",
            "llm_endpoint": "", "publisher": "AutoStation (dev build)",
-           "wrapper_core_zip": "../build/pkg/components/wrapper-core-$(tr -d '\r\n' < components/wrapper-core/VERSION).zip",
+           "wrapper_core_zip": "../build/pkg/components/wrapper-core-$WV.zip",
            "python_embed_zip": "../vendor/python-embed.zip"}
           EOF
+          echo "AUTOMATION=$A" >> "$GITHUB_ENV"
       - name: Render + compile installer (unsigned, dev)
         run: python components/automation-builder/scripts/build_installer.py --config build/build.json --out build/out --ring dev --allow-missing-secrets
       - uses: actions/upload-artifact@v4
         with:
           name: installer-dev
           path: build/out/*
+      - name: Smoke test - silent per-user install
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem build/out -Filter *.exe | Select-Object -First 1
+          Write-Host "installing $($exe.Name)"
+          $p = Start-Process -FilePath $exe.FullName -ArgumentList '/S' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "installer exit code $($p.ExitCode)" }
+          $home_ = Join-Path $env:LOCALAPPDATA 'AUTOMAGIX'
+          foreach ($f in @('python\python.exe', 'wrapper-core\wrapper_core\__init__.py', "automations\$env:AUTOMATION\automation.yaml", 'state\installed.json', 'config\platform.json')) {
+            if (-not (Test-Path (Join-Path $home_ $f))) { throw "missing after install: $f" }
+          }
+          Get-Content (Join-Path $home_ 'state\installed.json')
+          schtasks /Query /TN "AUTOMAGIX\$env:AUTOMATION-daily" | Out-Host
+          if ($LASTEXITCODE -ne 0) { throw 'scheduled task was not registered' }
+          Write-Host 'install OK'
+      - name: Smoke test - first run reaches the log transport
+        shell: pwsh
+        run: |
+          $logs = Join-Path $env:GITHUB_WORKSPACE 'smoke-logs'
+          $deadline = (Get-Date).AddSeconds(120)
+          while ((Get-Date) -lt $deadline) {
+            $runs = @(Get-ChildItem -Recurse -Path $logs -Filter *.json -ErrorAction SilentlyContinue | Where-Object { $_.FullName -match 'ingest[\\/]dev[\\/]run[\\/]' })
+            if ($runs.Count -gt 0) { break }
+            Start-Sleep -Seconds 3
+          }
+          if ($runs.Count -eq 0) {
+            Get-ChildItem -Recurse $env:LOCALAPPDATA\AUTOMAGIX\logs -ErrorAction SilentlyContinue | Out-Host
+            Get-Content $env:LOCALAPPDATA\AUTOMAGIX\logs\wrapper.log -ErrorAction SilentlyContinue | Select-Object -Last 40 | Out-Host
+            throw 'no run log arrived at the transport after install'
+          }
+          $rec = Get-Content $runs[0].FullName -Raw | ConvertFrom-Json
+          Write-Host "first run: status=$($rec.status) items=$($rec.items.total) synopsis=$($rec.synopsis)"
+          if ($rec.status -ne 'success') { throw "first run status was $($rec.status)" }
+      - name: Smoke test - uninstall removes everything it installed
+        shell: pwsh
+        run: |
+          $home_ = Join-Path $env:LOCALAPPDATA 'AUTOMAGIX'
+          $un = Get-ChildItem $home_ -Filter 'uninstall-*.exe' | Select-Object -First 1
+          $p = Start-Process -FilePath $un.FullName -ArgumentList '/S' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "uninstaller exit code $($p.ExitCode)" }
+          Start-Sleep -Seconds 3
+          schtasks /Query /TN "AUTOMAGIX\$env:AUTOMATION-daily" 2>$null
+          if ($LASTEXITCODE -eq 0) { throw 'scheduled task still registered after uninstall' }
+          if (Test-Path (Join-Path $home_ "automations\$env:AUTOMATION")) { throw 'payload still present after uninstall' }
+          Write-Host 'uninstall OK'
