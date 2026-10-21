@@ -34,8 +34,8 @@ jobs:
         run: find components -name "*.js" -not -path "*/node_modules/*" -print0 | xargs -0 -n1 node --check
       - name: Framework + automation tests
         run: |
-          node --test components/execution-framework/test/
-          node --test components/automations/automation-portal-report/test/
+          cd components/execution-framework && node --test
+          cd ../automations/automation-portal-report && node --test
 
   integration:
     needs: python

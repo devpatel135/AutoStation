@@ -23,11 +23,11 @@ SUITES: list[tuple[str, Path, list[str], str]] = [
     ("automation-logging", C / "automation-logging", [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider"], "py"),
     ("automation-registry", C / "automation-registry", [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider"], "py"),
     ("automation-builder", C / "automation-builder", [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider"], "py"),
-    ("execution-framework", C / "execution-framework", ["node", "--test", "test/"], "node"),
+    ("execution-framework", C / "execution-framework", ["node", "--test"], "node"),
     ("automation-hello-world", C / "automations" / "automation-hello-world", [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider"], "py"),
     ("automation-invoice-router", C / "automations" / "automation-invoice-router", [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider"], "py"),
     ("automation-notifier", C / "automations" / "automation-notifier", [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider"], "py"),
-    ("automation-portal-report", C / "automations" / "automation-portal-report", ["node", "--test", "test/"], "node"),
+    ("automation-portal-report", C / "automations" / "automation-portal-report", ["node", "--test"], "node"),
     ("tools", ROOT / "tools", [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider"], "py"),
 ]
 
