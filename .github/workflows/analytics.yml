@@ -47,7 +47,7 @@ jobs:
           fi
       - uses: actions/checkout@v4
         if: ${{ steps.cfg.outputs.proceed == 'true' }}
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         if: ${{ steps.cfg.outputs.proceed == 'true' }}
         with:
           python-version: "3.12"
