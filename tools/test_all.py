@@ -53,6 +53,12 @@ def main() -> int:
         results.append((name, "PASS" if r.returncode == 0 else "FAIL", time.time() - t, tail))
         if r.returncode != 0:
             print(f"--- {name} output ---\n{r.stdout[-3000:]}\n{r.stderr[-1500:]}")
+            if os.environ.get("GITHUB_ACTIONS"):  # surface the failure as a check annotation (visible without log access)
+                import re
+                failed = re.findall(r"^(?:FAILED|ERROR) .*$", r.stdout, re.M)[:12]
+                body = "\n".join(failed) or (r.stdout[-1500:] + r.stderr[-1000:])
+                body = body.replace("%", "%25").replace("\r", "").replace("\n", "%0A")[:3500]
+                print(f"::error title={name} failed::{body}")
     print()
     for name, status, secs, tail in results:
         print(f"{status:<28} {name:<28} {secs:6.1f}s  {tail}")
