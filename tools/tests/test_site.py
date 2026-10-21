@@ -294,7 +294,10 @@ def run_ps(script: Path, *args, tmp: Path) -> subprocess.CompletedProcess:
     cmd = [PS, "-NoProfile", "-NonInteractive"] + (["-ExecutionPolicy", "Bypass"] if sys.platform == "win32" else []) + ["-File", str(script), *args]
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=180, env=env, cwd=str(tmp))
     # PowerShell wraps long error lines at the console width (narrow on CI): collapse whitespace so phrase checks are stable
-    r.stdout, r.stderr = " ".join((r.stdout or "").split()), " ".join((r.stderr or "").split())
+    import re
+    ansi = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")  # PowerShell 7 colours error text and re-applies the colour on every wrapped line
+    r.stdout = " ".join(ansi.sub("", r.stdout or "").split())
+    r.stderr = " ".join(ansi.sub("", r.stderr or "").split())
     return r
 
 
