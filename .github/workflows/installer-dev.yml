@@ -59,7 +59,9 @@ jobs:
           EOF
           echo "AUTOMATION=$A" >> "$GITHUB_ENV"
       - name: Render + compile installer (unsigned, dev)
-        run: python components/automation-builder/scripts/build_installer.py --config build/build.json --out build/out --ring dev --allow-missing-secrets
+        run: python components/automation-builder/scripts/build_installer.py --config build/build.json --out build/out --ring dev --allow-missing-secrets --makensis "C:/Program Files (x86)/NSIS/makensis.exe"
+      - name: List build output
+        run: Get-ChildItem build/out -Recurse | Select-Object FullName, Length | Format-Table -AutoSize
       - uses: actions/upload-artifact@v4
         with:
           name: installer-dev
