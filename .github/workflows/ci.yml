@@ -48,7 +48,7 @@ jobs:
       - run: python -m pip install pytest pydantic jinja2
       - name: End-to-end platform walkthrough (package -> registry -> run -> ingest -> analytics -> dashboard -> notifier)
         run: python tools/e2e_demo.py --out e2e-out
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: e2e-dashboard
           path: e2e-out/public

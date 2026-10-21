@@ -108,7 +108,7 @@ jobs:
             echo "- new packages: ${{ steps.build.outputs.new }}"
             echo "- manifest changed: ${{ steps.build.outputs.changed }}"
           } >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: registry-out
           path: registry-out

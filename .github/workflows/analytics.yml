@@ -105,7 +105,7 @@ jobs:
           cd ../../../logs-archive && git add -A && { git diff --cached --quiet || { git commit -q -m "state $(date -u +%H:%MZ)" && git push origin HEAD:archive; }; }
       - name: Publish the dashboards as a workflow artifact (private repositories only)
         if: ${{ steps.cfg.outputs.proceed == 'true' && github.event.repository.private }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: fleet-dashboard
           path: live-out
