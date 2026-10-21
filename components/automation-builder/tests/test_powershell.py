@@ -235,7 +235,7 @@ def test_sign_ps1_signs_a_binary_with_a_pfx(tmp_path):
     assert r.returncode == 0, r.stderr + r.stdout
     assert password not in r.stdout + r.stderr
     sig = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
-                          f"(Get-AuthenticodeSignature -LiteralPath '{exe}').SignerCertificate.Subject"], capture_output=True, text=True)
+                          f"$env:PSModulePath=(Join-Path $env:ProgramFiles 'WindowsPowerShell\Modules')+';'+(Join-Path $env:windir 'System32\WindowsPowerShell\v1.0\Modules'); (Get-AuthenticodeSignature -LiteralPath '{exe}').SignerCertificate.Subject"], capture_output=True, text=True)
     assert "amx-test-signer" in sig.stdout
 
 

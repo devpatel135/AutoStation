@@ -23,6 +23,12 @@ param(
 
 Set-StrictMode -Version 2
 $ErrorActionPreference = 'Stop'
+# Windows PowerShell 5.1 can inherit a PowerShell 7 PSModulePath (CI runners, pwsh-launched shells) and then fail to
+# load Microsoft.PowerShell.Security (Get-Acl / Set-AuthenticodeSignature). Pin the built-in module path.
+if ($PSVersionTable.PSEdition -eq 'Desktop') {
+    $env:PSModulePath = (Join-Path $env:ProgramFiles 'WindowsPowerShell\Modules') + ';' + (Join-Path $env:windir 'System32\WindowsPowerShell\v1.0\Modules')
+}
+
 
 if ($Cleanup) {
   if (Test-Path -LiteralPath $Cleanup) {
