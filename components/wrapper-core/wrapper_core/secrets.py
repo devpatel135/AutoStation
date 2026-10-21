@@ -121,6 +121,9 @@ def restrict_to_owner(path: Path) -> None:
             if user:
                 subprocess.run(["icacls", str(path), "/inheritance:r", "/grant:r", f"{user}:F"],
                                capture_output=True, timeout=20, check=False)
+                # hardened hosts add explicit SYSTEM / Administrators / OWNER RIGHTS / Users / Everyone entries: owner-only means owner-only
+                subprocess.run(["icacls", str(path), "/remove:g", "*S-1-5-18", "*S-1-5-32-544", "*S-1-3-4", "*S-1-5-32-545",
+                                "*S-1-1-0", "*S-1-5-11"], capture_output=True, timeout=20, check=False)
         else:
             os.chmod(path, 0o600)
     except Exception:  # noqa: BLE001
