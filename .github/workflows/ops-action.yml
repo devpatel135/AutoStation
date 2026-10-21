@@ -65,8 +65,8 @@ jobs:
       MANIFEST_PATH: components/automation-registry/manifest.yaml
       DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: Apply the action (inputs travel as environment variables, never interpolated into a shell)
