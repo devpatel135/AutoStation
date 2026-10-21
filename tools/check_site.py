@@ -13,7 +13,7 @@ from urllib.parse import unquote, urlsplit
 
 REQUIRED = ["index.html", "404.html", ".nojekyll", "status.json", "assets/site.css", "assets/site.js", "install/index.html", "install/catalog.json",
             "install/bootstrap.ps1", "docs/index.html", "docs/search-index.json", "portal/index.html", "portal/admin.html", "dashboard/index.html",
-            "program/index.html", "migration/index.html"]
+            "program/index.html", "jobs/index.html", "machines/index.html", "queues/index.html", "schedules/index.html", "audit/index.html"]
 
 
 class _Page(HTMLParser):

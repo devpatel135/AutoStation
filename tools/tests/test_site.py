@@ -62,7 +62,7 @@ def test_demo_site_has_every_section_and_a_clean_link_check(demo_site):
     problems = check_site.check_site(site)
     assert problems == [], "\n".join(problems)
     for rel in ("index.html", "install/index.html", "docs/index.html", "portal/index.html", "portal/admin.html", "dashboard/index.html",
-                "program/index.html", "migration/index.html", "404.html", ".nojekyll", "status.json", "install/bootstrap.ps1", "install/catalog.json"):
+                "program/index.html", "jobs/index.html", "machines/index.html", "queues/index.html", "schedules/index.html", "audit/index.html", "404.html", ".nojekyll", "status.json", "install/bootstrap.ps1", "install/catalog.json"):
         assert (site / rel).exists(), rel
     assert len(html_files(site)) >= 30
 
@@ -70,7 +70,7 @@ def test_demo_site_has_every_section_and_a_clean_link_check(demo_site):
 def test_landing_has_role_based_entry_points(demo_site):
     page = (demo_site[0] / "index.html").read_text(encoding="utf-8")
     for needle in ("I need to install an automation", "I build automations", "I operate the fleet", "I approve changes",
-                   "We are migrating from UiPath", "I need to show the value", "install/index.html", "portal/admin.html", "docs/GETTING_STARTED.html"):
+                   "I run the automations day to day", "I need to show the value", "install/index.html", "portal/admin.html", "docs/GETTING_STARTED.html"):
         assert needle in page, needle
 
 
@@ -191,9 +191,10 @@ def test_installer_sha_from_file_and_from_the_release(tmp_path, monkeypatch):
 # ---- docs ---------------------------------------------------------------------------------------------------------------------
 def test_docs_site_renders_every_doc_with_nav_search_and_rewritten_links(demo_site):
     site = demo_site[0]
-    stems = {p.stem for p in (ROOT / "docs").glob("*.md")}
+    stems = {p.stem for p in (ROOT / "docs").glob("*.md")} - {"UIPATH_MIGRATION", "UIPATH_PARITY"}   # the UiPath docs are not published on the site
     for stem in stems:
         assert (site / "docs" / f"{stem}.html").exists(), stem
+    assert not (site / "docs" / "UIPATH_MIGRATION.html").exists() and not (site / "migration").exists()
     assert (site / "docs" / "assessment.html").exists()
     gs = (site / "docs" / "GETTING_STARTED.html").read_text(encoding="utf-8")
     assert 'href="WRAPPER_CORE_API.html"' in gs and 'href="AUTOMATION_STANDARD.html"' in gs         # .md links became site pages
@@ -254,36 +255,6 @@ def test_status_json_records_the_build(demo_site):
     assert st["schema_version"] == 1 and st["repo"] == "devpatel135/AutoStation" and "index.html" in st["pages"]
     assert re.fullmatch(r"[0-9a-f]{64}", st["registry"]["manifest_sha256"])
     assert st["installers"]["automation-certification-site"]["url"].endswith("/installers-latest/automation-certification-site-setup.exe")
-
-
-# ---- migration dashboard hook ------------------------------------------------------------------------------------------
-def test_migration_placeholder_then_real_dashboard(tmp_path):
-    site = tmp_path / "site"
-    build_site.build(site, ROOT)
-    if not (ROOT / "tools" / "uipath" / "dashboard.py").exists():
-        assert "Run the inventory scanner" in (site / "migration" / "index.html").read_text(encoding="utf-8")
-    # a repo that has the generator and an inventory gets the real page (fake generator keeps this test independent of tools/uipath)
-    repo = tmp_path / "repo"
-    shutil.copytree(ROOT / "docs", repo / "docs")
-    (repo / "components" / "automation-registry").mkdir(parents=True)
-    for f in ("manifest.yaml", "portal.config.json"):
-        shutil.copy(ROOT / "components" / "automation-registry" / f, repo / "components" / "automation-registry" / f)
-    (repo / "tools" / "uipath").mkdir(parents=True)
-    (repo / "tools" / "uipath" / "dashboard.py").write_text(
-        "import argparse, pathlib\np = argparse.ArgumentParser()\np.add_argument('--inventory'); p.add_argument('--status'); p.add_argument('--out')\n"
-        "a = p.parse_args()\no = pathlib.Path(a.out); o.mkdir(parents=True, exist_ok=True)\n"
-        "(o / 'index.html').write_text('<!doctype html><html><body><div class=\"page\"><h1>FAKE MIGRATION</h1></div></body></html>')\n", encoding="utf-8")
-    (repo / "migration").mkdir()
-    (repo / "migration" / "inventory.json").write_text("{}", encoding="utf-8")
-    site2 = tmp_path / "site2"
-    build_site.build(site2, repo)
-    page = (site2 / "migration" / "index.html").read_text(encoding="utf-8")
-    assert "FAKE MIGRATION" in page and "AutoStation home" in page
-    # a failing generator degrades to a placeholder with the reason, it does not break the site
-    (repo / "tools" / "uipath" / "dashboard.py").write_text("import sys\nsys.exit('boom')\n", encoding="utf-8")
-    site3 = tmp_path / "site3"
-    st = build_site.build(site3, repo)
-    assert "boom" in (site3 / "migration" / "index.html").read_text(encoding="utf-8") and any("boom" in n for n in st["notes"])
 
 
 # ---- the checker itself -----------------------------------------------------------------------------------------------------
@@ -389,8 +360,7 @@ def test_every_generated_page_has_a_csp_and_the_advisory_banner(demo_site):
         csp = m.group(1)
         assert "default-src 'none'" in csp and "base-uri 'none'" in csp and "form-action 'none'" in csp, rel
         assert "script-src" in csp and "*" not in csp and "http:" not in csp, rel
-        if not rel.startswith("migration/"):    # the migration page is rendered from local inventory files, not telemetry
-            assert BANNER in text, f"no advisory banner on {rel}"
+        assert BANNER in text, f"no advisory banner on {rel}"
 
 
 def test_dashboard_csp_only_allows_the_font_hosts_it_needs(demo_site):

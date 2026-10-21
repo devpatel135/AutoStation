@@ -78,6 +78,15 @@ def describe_slot(slot: dict, tz: str | None) -> str:
         return "Every hour" if n == 1 else f"Every {n} hours"
     if t == "poll":
         return f"Polls every {slot.get('every_minutes')} min for triggers"
+    if t == "weekdays":
+        return f"Every weekday at {slot.get('time')}{z}"
+    if t == "monthly":
+        day = slot.get("day", 1)
+        return f"Monthly on the {'last day' if str(day) == 'last' else 'day ' + str(day)} at {slot.get('time')}{z}"
+    if t == "interval":
+        return f"Every {slot.get('every_minutes')} min" + (f" between {slot['window']}" if slot.get("window") else "") + z
+    if t == "cron":
+        return f"Cron {slot.get('expr')}{z}"
     return str(t)
 
 

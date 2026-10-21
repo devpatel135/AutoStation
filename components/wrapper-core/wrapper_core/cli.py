@@ -22,6 +22,15 @@ def main(argv: list[str] | None = None) -> int:
     if argv and argv[0] == "assist":
         from . import assist
         return assist.main(argv[1:])
+    if argv and argv[0] == "approvals":
+        from .activities import approvals
+        return approvals.main(argv[1:])
+    if argv and argv[0] == "assets":
+        from . import assetconf
+        return assetconf.main(argv[1:])
+    if argv and argv[0] == "test":
+        from . import testing
+        return testing.main(argv[1:])
 
     p = argparse.ArgumentParser(prog="wrapper_core", description="AUTOSTATION wrapper-core")
     p.add_argument("--version", action="version", version=f"wrapper-core {__version__}")

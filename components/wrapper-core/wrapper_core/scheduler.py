@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Callable
 from xml.sax.saxutils import escape
 
-from . import manifest as mf
+from . import manifest as mf, schedule as _schedule
 from .paths import Paths, check_name, get_logger
 from .util import atomic_write_text, read_json, write_json
 
@@ -53,6 +53,8 @@ def _local_time(hhmm: str, tz_name: str | None) -> str:
 def slot_trigger_xml(slot: dict, tz_name: str | None) -> str:
     start_day = datetime.now().strftime("%Y-%m-%d")
     stype = slot["type"]
+    if stype in _schedule.NEW_TYPES:
+        return _schedule.trigger_xml(slot, tz_name, start_day)
     if stype == "daily":
         t = _local_time(str(slot["time"]), tz_name)
         return (f"<CalendarTrigger><StartBoundary>{start_day}T{t}:00</StartBoundary><Enabled>true</Enabled>"

@@ -14,7 +14,6 @@ from registry.portal import markdown
 # (file stem, group, one-line description) - order matters; unknown docs are appended under "More"
 KNOWN = [
     ("GETTING_STARTED", "Start here", "From a process to a running pilot automation"),
-    ("UIPATH_MIGRATION", "Start here", "Moving from UiPath: concept map, inventory, parallel run, cutover"),
     ("ACTIVITIES", "Start here", "The activity library: Excel, mail, files, queues, UI, HTTP, database"),
     ("WRAPPER_CORE_API", "Reference", "wrapper-core API: telemetry, retry, LLM seam, parameters"),
     ("AUTOMATION_STANDARD", "Reference", "The rules every automation is reviewed against"),
@@ -27,6 +26,8 @@ KNOWN = [
     ("SECURITY", "Security", "Trust boundaries, controls, known gaps"),
     ("VERIFY_IN_YOUR_ENVIRONMENT", "Security", "What CI cannot verify for you"),
 ]
+# repo docs that are deliberately not published on the site
+SKIP = {"UIPATH_MIGRATION", "UIPATH_PARITY"}
 GROUP_ORDER = ["Start here", "Reference", "Operate", "Security", "Components", "More"]
 
 
@@ -60,7 +61,7 @@ def collect(repo: Path) -> list[Doc]:
             docs.append(Doc(stem, _title(md, stem.replace("_", " ").title()), group, desc, f"docs/{stem}.md", md))
             seen.add(stem)
     for f in sorted((repo / "docs").glob("*.md")) if (repo / "docs").is_dir() else []:
-        if f.stem not in seen:
+        if f.stem not in seen and f.stem not in SKIP:
             md = f.read_text(encoding="utf-8")
             docs.append(Doc(f.stem, _title(md, f.stem), "More", "", f"docs/{f.name}", md))
     comp = repo / "components"

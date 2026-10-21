@@ -61,7 +61,12 @@ def run_dir():
 
 
 def assets() -> dict:
-    """Dynamic config assets (non-secret) for this ring, refreshed by self-heal on every run."""
-    from .paths import Paths
-    from .util import read_json
-    return read_json(Paths().assets_json, {}) or {}
+    """Dynamic config assets (non-secret): ring defaults from the registry (refreshed by self-heal on every run), overridden per machine,
+    per user and per schedule slot (``asset_<name>`` parameters). See :mod:`wrapper_core.assetconf` for the precedence and validation."""
+    try:
+        from .assetconf import effective_assets
+        return effective_assets()
+    except Exception:  # noqa: BLE001 - config trouble must never stop a run: fall back to the plain ring defaults
+        from .paths import Paths
+        from .util import read_json
+        return read_json(Paths().assets_json, {}) or {}

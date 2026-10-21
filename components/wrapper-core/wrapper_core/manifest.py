@@ -6,7 +6,7 @@ from datetime import datetime, time as dtime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from . import miniyaml, versions
+from . import miniyaml, schedule as _schedule, versions
 from .paths import CLASSIFICATIONS, RINGS
 
 SUPPORTED_SCHEMA = 1
@@ -14,7 +14,7 @@ _DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Su
 _HHMM = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
 _WINDOW = re.compile(r"^\s*([01]?\d|2[0-3]):([0-5]\d)\s*-\s*([01]?\d|2[0-3]):([0-5]\d)\s*$")
 _SHA = re.compile(r"^[0-9a-fA-F]{64}$")
-_SLOT_TYPES = ("daily", "weekly", "hourly", "poll")
+_SLOT_TYPES = ("daily", "weekly", "hourly", "poll", "monthly", "weekdays", "interval", "cron")
 
 
 class ManifestError(ValueError):
@@ -117,6 +117,10 @@ def in_maintenance(schedule: dict | None, now: datetime | None = None) -> dict |
     now = now or datetime.now(timezone.utc)
     tz = _tz(schedule.get("timezone"))
     local = now.astimezone(tz) if tz else now.astimezone()
+    from . import schedule as _sched
+    hit = _sched.in_blackout(schedule.get("blackouts"), local.date())  # calendar blackout dates (holidays, freezes) skip the run too
+    if hit:
+        return hit
     for w in schedule.get("maintenance_windows") or []:
         days = [str(d).capitalize() for d in (w.get("days") or [])]
         daily = w.get("daily")
@@ -215,6 +219,9 @@ def validate(m: dict) -> list[str]:
                 errs.append(f"{label}: hourly slot {slot.get('id')!r} needs every >= 1")
             if slot.get("type") == "poll" and int(slot.get("every_minutes", 0) or 0) < 1:
                 errs.append(f"{label}: poll slot {slot.get('id')!r} needs every_minutes >= 1")
+            if slot.get("type") in _schedule.NEW_TYPES:
+                errs.extend(_schedule.validate_slot(slot, label + ": slot"))
+        errs.extend(_schedule.validate_blackouts(sch.get("blackouts"), f"{label}: schedule"))
         for w in sch.get("maintenance_windows") or []:
             if w.get("daily") and not _WINDOW.match(str(w["daily"])):
                 errs.append(f"{label}: bad maintenance window {w['daily']!r}")

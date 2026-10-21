@@ -21,7 +21,7 @@ def build_landing(out, m: dict, cfg: SiteConfig, doc_stems: set[str], have: dict
         role("portal/admin.html", "I operate the fleet", "Kill-switch, rollback, promotion and on-demand runs as reviewed pull requests - no YAML editing.", "Admin panel"),
         role("dashboard/index.html", "I watch the fleet", "Run health, compliance signals (missed, slow, hung), item-level metrics, LLM diagnosis, failure evidence.", "Fleet dashboard"),
         role("docs/GOVERNANCE.html", "I approve changes", "Rings, promotion checklist, data classification, and what an approval means.", "Governance", "GOVERNANCE"),
-        role("migration/index.html", "We are migrating from UiPath", "Inventory your projects, classify them, track the migration wave by wave, retire licences.", "Migration dashboard", "migration"),
+        role("jobs/index.html", "I run the automations day to day", "Job history, machines, queues and approvals, schedules and the audit trail - the operator console.", "Jobs"),
         role("program/index.html", "I need to show the value", "Hours saved, retired licences, success rate, drift and top failure causes.", "Program dashboard"),
         role("docs/index.html", "I need an answer", "API reference, standard, runbooks, security model - searchable.", "Documentation"),
     ])
@@ -33,7 +33,7 @@ def build_landing(out, m: dict, cfg: SiteConfig, doc_stems: set[str], have: dict
     registry_link = ' &middot; <a href="registry/manifest.yaml">registry manifest</a>' if have.get("registry") else ""
     body = f"""
 <section class="hero"><div class="eyebrow">Unattended automation, owned by the team</div>
-<h1>The UiPath replacement that anyone can install and everyone can operate</h1>
+<h1>Unattended automation that anyone can install and everyone can operate</h1>
 <p>Scripted automations (Python, Node, PowerShell) run under Windows Task Scheduler as the signed-in user, heal and update themselves from a git-governed registry,
 log every item they process, and fall back to an LLM only where fixed logic cannot decide. No Orchestrator server, no per-robot licence.</p></section>
 {stats}
@@ -49,7 +49,7 @@ log every item they process, and fall back to an LLM only where fixed logic cann
 <a href="{esc(cfg.repo_url)}/issues/new/choose">Report a problem or request an automation</a> &middot; <a href="status.json">status.json</a>{registry_link}</p>
 """
     html_text = layout("AutoStation", body, cfg=cfg, depth=0, active="home",
-                       description="AutoStation: install, build, operate and govern unattended automations - the UiPath replacement.")
+                       description="AutoStation: install, build, operate and govern unattended automations - scripted, governed, self-healing.")
     write(out, "index.html", html_text)
     return "index.html"
 

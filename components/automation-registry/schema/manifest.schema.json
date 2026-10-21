@@ -104,11 +104,16 @@
       "required": ["id", "type"],
       "properties": {
         "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,40}$" },
-        "type": { "enum": ["daily", "weekly", "hourly", "poll"] },
+        "type": { "enum": ["daily", "weekly", "hourly", "poll", "monthly", "weekdays", "interval", "cron"] },
         "time": { "$ref": "#/$defs/hhmm" },
         "days": { "type": "array", "items": { "$ref": "#/$defs/day" } },
         "every": { "type": "integer", "minimum": 1 },
-        "every_minutes": { "type": "integer", "minimum": 1 },
+        "every_minutes": { "type": "integer", "minimum": 1, "maximum": 1440 },
+        "day": { "anyOf": [ { "type": "integer", "minimum": 1, "maximum": 31 }, { "enum": ["last"] },
+                            { "type": "array", "minItems": 1, "maxItems": 32, "items": { "anyOf": [ { "type": "integer", "minimum": 1, "maximum": 31 }, { "enum": ["last"] } ] } } ] },
+        "months": { "type": "array", "items": { "type": "integer", "minimum": 1, "maximum": 12 } },
+        "window": { "type": "string", "pattern": "^\\s*([01]?\\d|2[0-3]):[0-5]\\d\\s*-\\s*([01]?\\d|2[0-3]):[0-5]\\d\\s*$" },
+        "expr": { "type": "string", "maxLength": 100 },
         "params": { "type": "object" }
       },
       "additionalProperties": false
@@ -134,6 +139,10 @@
           "additionalProperties": false
         },
         "maintenance_windows": { "type": "array", "items": { "$ref": "#/$defs/maintenanceWindow" } },
+        "blackouts": { "type": "array", "maxItems": 500, "items": { "anyOf": [
+          { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+          { "type": "object", "properties": { "date": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" }, "from": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+                                              "to": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" }, "reason": { "type": "string", "maxLength": 120 } }, "additionalProperties": false } ] } },
         "slots": { "type": "array", "items": { "$ref": "#/$defs/slot" } }
       },
       "additionalProperties": false

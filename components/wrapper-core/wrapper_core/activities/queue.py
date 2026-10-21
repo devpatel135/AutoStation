@@ -11,7 +11,7 @@ multi-machine queue: the platform runs unattended on a single VDI session, and a
 
 or let :func:`run_queue` run the whole performer loop with the platform's retry classification.
 
-Statuses: new, in_progress, successful, failed_business, failed_system, needs_review.
+Statuses: new, in_progress, successful, failed_business, failed_system, needs_review, dead_letter (SLA expired / parked by hand; ``redrive`` re-queues).
 Ordering for ``next()``: priority 1 (high) .. 3 (low), then earliest ``deadline`` (none last), then queue time, then id.
 Telemetry: transitions emit ``item_processed`` events (success -> success, business failure -> skipped, exhausted system failure -> failed)
 so run summaries and dashboards count queue items exactly like items processed with ``wrapper.run_item``.
@@ -34,7 +34,10 @@ from ..logging import log_event, log_item
 from ..retry import Category, DataError, Escalation, LogicError, RetryPolicy, Skipped, SystemUnavailable, run_with_retry
 from ._common import data_dir, emit
 
-STATUSES = ("new", "in_progress", "successful", "failed_business", "failed_system", "needs_review")
+STATUSES = ("new", "in_progress", "successful", "failed_business", "failed_system", "needs_review", "dead_letter")
+MAX_PAYLOAD_BYTES = 1_000_000
+MAX_REFERENCE_CHARS = 200
+MAX_BULK = 100_000
 _clock: Callable[[], float] = time.time  # tests may replace
 
 
@@ -74,13 +77,14 @@ class QueueItem:
     output: Optional[Dict[str, Any]] = None
     review_decision: Optional[str] = None
     review_note: Optional[str] = None
+    max_retries: Optional[int] = None   # per-item override of the fail_system retry budget; None = use the caller value
 
     def __repr__(self) -> str:  # payloads may hold business data: keep repr short
         return f"QueueItem(id={self.id}, reference={self.reference!r}, status={self.status}, retry_no={self.retry_no})"
 
 
 _COLUMNS = ("id", "reference", "payload", "priority", "status", "retry_no", "queued_at", "defer_until", "deadline", "created_at",
-            "started_at", "ended_at", "worker", "reason", "output", "review_decision", "review_note")
+            "started_at", "ended_at", "worker", "reason", "output", "review_decision", "review_note", "max_retries")
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS items(
@@ -100,7 +104,8 @@ CREATE TABLE IF NOT EXISTS items(
   reason TEXT,
   output TEXT,
   review_decision TEXT,
-  review_note TEXT
+  review_note TEXT,
+  max_retries INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_items_pick ON items(status, priority, queued_at);
 CREATE INDEX IF NOT EXISTS idx_items_ref ON items(reference);
@@ -114,6 +119,9 @@ class Queue:
             for stmt in _SCHEMA.strip().split(";"):
                 if stmt.strip():
                     c.execute(stmt)
+            cols = {r["name"] for r in c.execute("PRAGMA table_info(items)").fetchall()}
+            if "max_retries" not in cols:  # databases written before per-item retry limits existed
+                c.execute("ALTER TABLE items ADD COLUMN max_retries INTEGER")
 
     # -- plumbing ----------------------------------------------------------------------------------------
     def _connect(self) -> sqlite3.Connection:
@@ -147,26 +155,70 @@ class Queue:
                          status=r["status"], retry_no=r["retry_no"], queue=self.name, deadline=r["deadline"],
                          defer_until=r["defer_until"], started_at=r["started_at"], reason=r["reason"],
                          output=json.loads(r["output"]) if r["output"] else None, review_decision=r["review_decision"],
-                         review_note=r["review_note"])
+                         review_note=r["review_note"], max_retries=r["max_retries"])
 
     # -- dispatcher side ---------------------------------------------------------------------------------
-    def add(self, reference: str, payload: Optional[Dict[str, Any]] = None, priority: int = 2, defer_until=None, deadline=None,
-            allow_duplicate: bool = False) -> bool:
-        """Add an item. Returns False (nothing added) if `reference` already exists and not `allow_duplicate`."""
+    @staticmethod
+    def _check_new(reference: Any, payload: Any, priority: Any, max_retries: Any) -> "tuple[str, str]":
+        ref = str(reference)
+        if not ref or len(ref) > MAX_REFERENCE_CHARS or any(ord(ch) < 32 for ch in ref):
+            raise ValueError(f"reference must be 1-{MAX_REFERENCE_CHARS} printable characters")
         if priority not in (1, 2, 3):
             raise ValueError("priority must be 1 (high), 2 (normal) or 3 (low)")
-        ref = str(reference)
+        if max_retries is not None and not (isinstance(max_retries, int) and not isinstance(max_retries, bool) and 0 <= max_retries <= 20):
+            raise ValueError("max_retries must be an integer 0-20")
+        body = json.dumps(payload or {}, default=str)
+        if len(body.encode("utf-8")) > MAX_PAYLOAD_BYTES:
+            raise ValueError(f"payload exceeds {MAX_PAYLOAD_BYTES} bytes")
+        return ref, body
+
+    def add(self, reference: str, payload: Optional[Dict[str, Any]] = None, priority: int = 2, defer_until=None, deadline=None,
+            allow_duplicate: bool = False, max_retries: Optional[int] = None) -> bool:
+        """Add an item. Returns False (nothing added) if `reference` already exists and not `allow_duplicate`.
+
+        ``defer_until`` hides the item until then; ``deadline`` is its SLA (earlier deadlines are served first, ``stats()`` counts breaches);
+        ``max_retries`` overrides the system-failure retry budget for this item."""
+        ref, body = self._check_new(reference, payload, priority, max_retries)
         now = _clock()
         with self._tx() as c:
             if not allow_duplicate and c.execute("SELECT 1 FROM items WHERE reference=? LIMIT 1", (ref,)).fetchone():
                 added = False
             else:
-                c.execute("INSERT INTO items(reference,payload,priority,status,queued_at,defer_until,deadline,created_at) "
-                          "VALUES(?,?,?,?,?,?,?,?)",
-                          (ref, json.dumps(payload or {}, default=str), priority, "new", now, _ts(defer_until), _ts(deadline), now))
+                c.execute("INSERT INTO items(reference,payload,priority,status,queued_at,defer_until,deadline,created_at,max_retries) "
+                          "VALUES(?,?,?,?,?,?,?,?,?)",
+                          (ref, body, priority, "new", now, _ts(defer_until), _ts(deadline), now, max_retries))
                 added = True
         emit("queue.add", queue=self.name, added=added)
         return added
+
+    def add_many(self, items: Any, priority: int = 2, defer_until=None, deadline=None, dedupe: bool = True,
+                 max_retries: Optional[int] = None) -> Dict[str, Any]:
+        """Bulk add in ONE transaction (all or nothing). Each element is ``(reference, payload)`` or a dict with ``reference``, ``payload`` and
+        optional ``priority`` / ``defer_until`` / ``deadline`` / ``max_retries``. Duplicate references (already queued, or repeated in the batch)
+        are skipped when ``dedupe``. At most 100,000 items per call. Returns ``{"added": n, "duplicates": n, "duplicate_references": [first 20]}``."""
+        rows = []
+        for it in items:
+            if len(rows) >= MAX_BULK:
+                raise ValueError(f"add_many accepts at most {MAX_BULK} items per call")
+            d = it if isinstance(it, dict) else {"reference": it[0], "payload": it[1] if len(it) > 1 else {}}
+            pr = d.get("priority", priority)
+            mr = d.get("max_retries", max_retries)
+            ref, body = self._check_new(d["reference"], d.get("payload"), pr, mr)
+            rows.append((ref, body, pr, _ts(d.get("defer_until", defer_until)), _ts(d.get("deadline", deadline)), mr))
+        now = _clock()
+        added, dups = 0, []
+        with self._tx() as c:
+            seen = set()
+            for ref, body, pr, du, dl, mr in rows:
+                if dedupe and (ref in seen or c.execute("SELECT 1 FROM items WHERE reference=? LIMIT 1", (ref,)).fetchone()):
+                    dups.append(ref)
+                    continue
+                seen.add(ref)
+                c.execute("INSERT INTO items(reference,payload,priority,status,queued_at,defer_until,deadline,created_at,max_retries) "
+                          "VALUES(?,?,?,?,?,?,?,?,?)", (ref, body, pr, "new", now, du, dl, now, mr))
+                added += 1
+        emit("queue.add_many", queue=self.name, added=added, duplicates=len(dups))
+        return {"added": added, "duplicates": len(dups), "duplicate_references": dups[:20]}
 
     # -- performer side ----------------------------------------------------------------------------------
     def next(self, worker: Optional[str] = None) -> Optional[QueueItem]:
@@ -209,6 +261,8 @@ class Queue:
 
     def fail_system(self, item: QueueItem, reason: str, max_retries: int = 3) -> str:
         """System exception: re-queue (retry_no + 1) until `max_retries` is exhausted, then fail. Returns the new status."""
+        if item.max_retries is not None:
+            max_retries = item.max_retries
         if item.retry_no < max_retries:
             with self._tx() as c:
                 cur = c.execute("UPDATE items SET status='new', retry_no=retry_no+1, queued_at=?, started_at=NULL, worker=NULL, reason=? "
@@ -251,6 +305,67 @@ class Queue:
         if not approve:
             log_item(r["reference"], "skipped", queue=self.name, reason="rejected in review", error_category="BUSINESS")
 
+    # -- dead letters, SLA, redrive ------------------------------------------------------------------------------
+    def dead_letter(self, item: QueueItem, reason: str) -> None:
+        """Park an in-progress item you cannot process and do not want retried (it stays visible; ``redrive`` re-queues it)."""
+        self._finish(item, "dead_letter", reason)
+        item.status, item.reason = "dead_letter", reason
+        log_event("queue_dead_letter", {"queue": self.name, "reference": item.reference, "reason": reason[:200]})
+
+    def expire_overdue(self, now: Optional[float] = None) -> int:
+        """Items still ``new`` whose SLA ``deadline`` has passed move to ``dead_letter`` (reason "SLA deadline passed"). Returns how many."""
+        t = _clock() if now is None else float(now)
+        with self._tx() as c:
+            cur = c.execute("UPDATE items SET status='dead_letter', ended_at=?, reason='SLA deadline passed before processing' "
+                            "WHERE status='new' AND deadline IS NOT NULL AND deadline < ?", (t, t))
+            n = cur.rowcount
+        if n:
+            log_event("queue_sla_expired", {"queue": self.name, "items": n})
+        return n
+
+    def redrive(self, statuses: Any = ("dead_letter", "failed_system"), reference: Optional[str] = None, reset_retries: bool = True,
+                limit: int = 1000) -> int:
+        """Put dead-lettered / system-failed items back to ``new`` (optionally only one ``reference``). Returns how many were re-queued."""
+        sts = list(statuses) if isinstance(statuses, (list, tuple, set)) else [statuses]
+        if not sts or any(x not in ("dead_letter", "failed_system", "failed_business", "needs_review") for x in sts):
+            raise ValueError("redrive: statuses must be among dead_letter, failed_system, failed_business, needs_review")
+        marks = ",".join("?" for _ in sts)
+        sql = f"SELECT id FROM items WHERE status IN ({marks})" + (" AND reference=?" if reference is not None else "") + " ORDER BY id LIMIT ?"
+        args = list(sts) + ([str(reference)] if reference is not None else []) + [max(1, min(int(limit), 100_000))]
+        with self._tx() as c:
+            ids = [r["id"] for r in c.execute(sql, args).fetchall()]
+            for i in ids:
+                c.execute("UPDATE items SET status='new', queued_at=?, started_at=NULL, ended_at=NULL, worker=NULL, reason=NULL"
+                          + (", retry_no=0" if reset_retries else "") + " WHERE id=?", (_clock(), i))
+        if ids:
+            log_event("queue_redrive", {"queue": self.name, "items": len(ids)})
+        return len(ids)
+
+    def stats(self, now: Optional[float] = None) -> Dict[str, Any]:
+        """Operational numbers: ``counts``, ``oldest_waiting_age_s`` (oldest visible ``new`` item), ``oldest_in_progress_age_s``,
+        ``deferred`` (hidden until later), ``overdue`` (past deadline, unfinished), ``sla_breached`` (finished after its deadline),
+        ``completed_last_hour`` and ``dead_letter``."""
+        t = _clock() if now is None else float(now)
+        conn = self._connect()
+        try:
+            def one(sql: str, *a: Any) -> Any:
+                return conn.execute(sql, a).fetchone()[0]
+            waiting = one("SELECT MIN(queued_at) FROM items WHERE status='new' AND (defer_until IS NULL OR defer_until<=?)", t)
+            running = one("SELECT MIN(started_at) FROM items WHERE status='in_progress'")
+            out = {
+                "oldest_waiting_age_s": round(t - waiting, 3) if waiting is not None else None,
+                "oldest_in_progress_age_s": round(t - running, 3) if running is not None else None,
+                "deferred": one("SELECT COUNT(*) FROM items WHERE status='new' AND defer_until>?", t),
+                "overdue": one("SELECT COUNT(*) FROM items WHERE status IN ('new','in_progress') AND deadline IS NOT NULL AND deadline<?", t),
+                "sla_breached": one("SELECT COUNT(*) FROM items WHERE ended_at IS NOT NULL AND deadline IS NOT NULL AND ended_at>deadline"),
+                "completed_last_hour": one("SELECT COUNT(*) FROM items WHERE status='successful' AND ended_at>=?", t - 3600),
+            }
+        finally:
+            conn.close()
+        out["counts"] = self.counts()
+        out["dead_letter"] = out["counts"]["dead_letter"]
+        return out
+
     # -- inspection / housekeeping --------------------------------------------------------------------------
     def counts(self) -> Dict[str, int]:
         out = {s: 0 for s in STATUSES}
@@ -263,6 +378,8 @@ class Queue:
         return out
 
     def items(self, status: Optional[str] = None, limit: int = 1000) -> List[QueueItem]:
+        if status is not None and status not in STATUSES:
+            raise ValueError(f"unknown status {status!r}")
         conn = self._connect()
         try:
             if status:
@@ -316,6 +433,27 @@ class Queue:
             for r in rows:
                 w.writerow([csv_safe(r[c], escape_formulas) for c in _COLUMNS])
         return str(dest)
+
+
+def _jsonl_export(self: "Queue", path: "str | Path") -> str:
+    """One JSON object per line (payload/output parsed). For machines; use export_csv for spreadsheets."""
+    conn = self._connect()
+    try:
+        rows = conn.execute("SELECT * FROM items ORDER BY id").fetchall()
+    finally:
+        conn.close()
+    dest = Path(path)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    with builtins.open(dest, "w", encoding="utf-8", newline="") as f:
+        for r in rows:
+            rec = {c: r[c] for c in _COLUMNS}
+            for k in ("payload", "output"):
+                rec[k] = json.loads(rec[k]) if rec[k] else None
+            f.write(json.dumps(rec, default=str) + chr(10))
+    return str(dest)
+
+
+Queue.export_jsonl = _jsonl_export  # type: ignore[attr-defined]
 
 
 def open(name: str, path: "str | Path | None" = None) -> Queue:  # noqa: A001 - mirrors the documented API (queue.open)

@@ -188,8 +188,23 @@ def status_counts(runs: list[dict]) -> dict:
 
 
 # ---------------------------------------------------------------------------------------------- schedule
-def _slot_times(slot: dict, tz, start: datetime, end: datetime) -> list[datetime]:
+_NEW_SLOT_TYPES = ("monthly", "weekdays", "interval", "cron")
+
+
+def _new_type_times(slot: dict, tz, start: datetime, end: datetime, blackouts=None) -> list[datetime]:
+    """Fire times of the newer slot types (monthly / weekdays / interval / cron) via wrapper-core's own schedule engine."""
+    try:
+        from wrapper_core import schedule as wc_schedule
+        times = wc_schedule.next_runs(slot, start - timedelta(seconds=1), n=2000, tz=tz, blackouts=blackouts)
+    except Exception:  # noqa: BLE001  (unknown/invalid slot: contribute no expectations rather than invent them)
+        return []
+    return [t for t in times if start <= t <= end]
+
+
+def _slot_times(slot: dict, tz, start: datetime, end: datetime, blackouts=None) -> list[datetime]:
     """Expected UTC fire times of one slot within [start, end]."""
+    if slot.get("type") in _NEW_SLOT_TYPES:
+        return _new_type_times(slot, tz, start, end, blackouts)
     out = []
     first = (start.astimezone(tz) - timedelta(days=1)).date()
     last = (end.astimezone(tz) + timedelta(days=1)).date()
@@ -223,7 +238,7 @@ def expected_runs(entry: dict, start: datetime, end: datetime) -> list[tuple[str
     for slot in sched.get("slots") or []:
         if slot.get("type") == "poll":
             continue
-        for t in _slot_times(slot, tz, start, end):
+        for t in _slot_times(slot, tz, start, end, sched.get("blackouts")):
             out.append((str(slot.get("id")), t))
     return sorted(out, key=lambda x: x[1])
 

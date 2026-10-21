@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import importlib
 
-_SUBMODULES = ("excel", "mail", "files", "http", "db", "queue", "credentials", "windows_ui", "pdf", "images", "notify")
+_SUBMODULES = ("excel", "mail", "files", "http", "db", "queue", "credentials", "windows_ui", "pdf", "images", "notify", "approvals", "connectors")
 
 __all__ = list(_SUBMODULES) + ["NotAvailable", "ActivityError"]
 

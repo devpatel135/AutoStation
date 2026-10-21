@@ -7,7 +7,7 @@ scripts are the small ones in `assets/site.js` and the portal/admin pages.
 
 | Path | Content | Built from |
 |---|---|---|
-| `/` | Landing with role-based entry (user, developer, operator, approver, UiPath migration, value) | `tools/site/site_landing.py` |
+| `/` | Landing with role-based entry (user, developer, operator, approver, value) | `tools/site/site_landing.py` |
 | `/install/` | Install center; one guide per automation (download, verify, silent install, Intune/SCCM, what changes on the machine, troubleshooting, report a problem) | manifest + `tools/site/site_install.py` |
 | `/install/catalog.json` | Machine-readable catalog (rings, installer URL + SHA-256, package hashes) | same |
 | `/install/bootstrap.ps1` | Download-verify-install script (SHA-256 against the published hash; no `iex`) | `tools/site/bootstrap.ps1` |
@@ -15,7 +15,11 @@ scripts are the small ones in `assets/site.js` and the portal/admin pages.
 | `/portal/` | Registry catalog, compatibility, governance, **fleet admin panel** (GitHub mode: `ops-action` workflow, PR and edit links) | `registry build-portal` |
 | `/dashboard/` | Fleet dashboard: signals, item-level metrics, retries, LLM, versions, failure evidence | `automation_logging` |
 | `/program/` | Programme/ROI: hours saved, licences avoided, success, drift, failure causes | `automation_logging/program.py` + `program.yaml` |
-| `/migration/` | UiPath migration dashboard (inventory, waves, licence retirement) or instructions to enable it | `tools/uipath/dashboard.py` |
+| `/jobs/` | **Jobs**: run history (newest 2000) with client-side search, filters, sorting and paging, a details drawer (retry audit, events, failure evidence) and deep links (`#status=failed&run=<id>`) | archive runs + `runs-detail.json`, `tools/site/site_ops.py`, `tools/site/jobs.js` |
+| `/machines/` | **Machines**: heartbeat freshness, installed versions vs the ring target (drift), last run, SILENT / VERSION_DRIFT / LAST_RUN_FAILED signals | archive heartbeats + manifest |
+| `/queues/` | **Queues & approvals**: latest queue statistics, dead letters, SLA breaches, approvals waiting and decided | `queue_stats`, `approval_requested`, `approval_decided` events |
+| `/schedules/` | **Schedules**: next fire times for every manifest slot (daily, weekdays, weekly, monthly, hourly, interval, poll, cron), maintenance windows and paused automations flagged | manifest |
+| `/audit/` | **Audit**: registry signing status, operator actions, pause / kill-switch state, every release with SHA-256 and the rings running it | `history/CHANGELOG.md`, manifest, `registry/manifest.yaml.sig`, lifecycle events |
 | `/registry/` | `manifest.yaml`, `triggers.json`, `index.json`, `artifacts/` - what endpoints self-heal from | `tools/build_registry.py` |
 | `/status.json` | Build info: commit, time, mode, registry hash, notes | `build_site.py` |
 
@@ -35,7 +39,7 @@ python -m http.server --directory site 8000              # then open http://loca
 | `--live-data DIR` | Real data (`DIR/archive`); no demo label. See the data-exposure notes in `docs/PIPELINES.md` before publishing |
 | `--fetch-installer-sha` | Read `<automation>-setup.exe.sha256` from the `installers-latest` release so install pages show the installer SHA-256 (offline builds show "see the release page") |
 | `--installer-sha-file JSON` | `{automation: sha256}` instead of fetching |
-| `--program-config` / `--migration-inventory` / `--migration-status` | Inputs for the programme and migration dashboards |
+| `--program-config` | Input for the programme dashboard |
 
 ## Design rules
 
@@ -45,6 +49,14 @@ python -m http.server --directory site 8000              # then open http://loca
 * **Honest empty states.** No fleet data -> placeholder pages that say how to turn it on, never invented numbers. Placeholder hashes are shown as `PLACEHOLDER`.
 * **One theme** (dark/light by system preference, toggle remembered), responsive, keyboard-accessible, no third-party scripts. The only external reference is an optional Google Fonts stylesheet.
 * **Install pages are self-contained**: someone with only the URL and a Windows PC can install, verify and uninstall without asking anyone.
+
+## Operator console notes
+
+* The telemetry pages (Jobs, Machines, Queues) show a "waiting for the first run" state until real data arrives; Schedules and Audit are built from the manifest and always render.
+* Everything from telemetry is clamped and HTML-escaped; the Jobs page keeps the table server-rendered and its script (`assets/jobs.js`) only uses `textContent`, so a forged
+  run cannot inject markup. `runs-detail.json` is fetched same-origin (the page CSP allows `connect-src 'self'`).
+* Queue and approval events are optional: automations that never emit `queue_stats` / `approval_*` simply leave those sections empty.
+* The UiPath migration page is no longer part of the site; the migration kit under `tools/uipath/` and `docs/UIPATH_*.md` stay in the repository.
 
 ## Adding a page or section
 

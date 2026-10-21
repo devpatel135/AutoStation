@@ -77,6 +77,31 @@ subjects, bodies, URLs with query strings, tokens or passwords. Credentials/secr
 | Orchestrator queue trigger | `poll` schedule slot + `queue.run_queue` | |
 | Orchestrator time trigger | schedule `slots` in the registry manifest | |
 
+
+## Orchestrator-class activities (approvals, connectors, queue operations)
+
+| UiPath | AutoStation | Notes |
+|---|---|---|
+| Action Center: Create Form Task / Wait For Form Task | `approvals.create(title, description, fields, expires_in_s)` -> `approvals.wait(id, timeout_s)` -> `Decision(approved, status, decided_by, note)` | local, on the machine that runs the automation. Default deny: rejected, expired and timed-out all return `approved=False` |
+| Action Center inbox | `python -m wrapper_core approvals list/show/approve/reject`, or `approvals ui` (local page on 127.0.0.1) | the page is not an identity system; see the module docstring for what it does and does not protect |
+| Add Queue Items (bulk) | `q.add_many([(ref, payload), ...])` | one transaction, dedupe by reference, <= 100,000 per call |
+| Queue item priority / deadline / defer | `q.add(ref, payload, priority=1, deadline=..., defer_until=..., max_retries=...)` | earliest deadline first within a priority; per-item retry budget |
+| Dead letter / retry exhausted | `q.dead_letter(item, why)`, `q.expire_overdue()`, `q.redrive()` | SLA-expired items go to `dead_letter`; `redrive` puts them (or exhausted `failed_system` items) back |
+| Queue statistics | `q.stats()` | counts, oldest waiting age, overdue, SLA breaches, completed in the last hour |
+| Queue export | `q.export_csv(path)` (formula-safe), `q.export_jsonl(path)` | |
+| Integration Service: Office 365 / Outlook / OneDrive / SharePoint | `connectors.Graph(credential, tenant).send_mail / list_files / get_file / upload_file` | app-only auth; uploads up to 4 MB (no upload sessions) |
+| Integration Service: Teams, Slack | `connectors.teams_post(cred, text)`, `connectors.slack_post(cred, text)` | the webhook URL is a stored credential and never reaches logs |
+| Integration Service: Jira | `connectors.Jira(url, cred).create_issue / transition_issue` | Jira Cloud (REST v2) |
+| HTTP Request with OAuth2 | `connectors.oauth2_token(token_url, cred, allowed_hosts=[...])` / `oauth2_auth(...)` | tokens cached in memory; the client secret only goes to the listed hosts |
+| Get Asset (per robot / per user) | `wrapper.assets()` / `credentials.get_asset(name)` with machine, user and slot-parameter overrides | see "Parameters, assets, environment" in WRAPPER_CORE_API.md |
+
+Connector rules (all enforced in code and covered by tests): secrets are read from `activities.credentials` only (no function accepts a raw token or
+password); https only, to an allow-listed host (`*.suffix` entries need a real subdomain; extra hosts must be passed explicitly); 429 is retried for every
+method honouring `Retry-After`, other server errors only for idempotent methods (a retried POST could send twice); response bodies are size-capped; inputs
+are validated (e-mail addresses, project keys, paths without `..`, text lengths). Errors are the platform's classified exceptions, so `wrapper.run_item` and
+the retry engine treat them like any other activity. Not provided: Graph upload sessions (files > 4 MB), delegated (user) OAuth flows, Jira Data Center
+auth variants, attachments.
+
 ## Examples
 
 ```python

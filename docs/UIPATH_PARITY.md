@@ -42,14 +42,14 @@ day to day. "Built" means it exists in this repo and is covered by tests or CI; 
 | Robots / machines | heartbeats, fleet versions, SILENT/VERSION_DRIFT signals | built |
 | Processes + releases + rollback | manifest versions per ring; promotion/rollback = reviewed PR (`ops-action`, admin panel) | built |
 | Jobs + logs | run logs per run with item telemetry, synopsis, evidence, retry audit | built |
-| Schedules | per-slot Task Scheduler tasks + login re-assertion; params per slot | built |
+| Schedules | per-slot Task Scheduler tasks (daily, weekdays, weekly, monthly, interval, cron, blackout calendar) + login re-assertion; params per slot | built |
 | Triggers (queue/file/mail/API) | `poll` slots + `activities.files.new_files` + queue + `triggers.json` / on-demand `trigger-add` | built (minute latency by design) |
-| Queues | durable local queue (single machine); multi-machine distribution is a gap by design | partial |
-| Assets / credentials | manifest `assets` (non-secret) + Windows Credential Manager API | built |
+| Queues | durable local queue: priority, deadline/SLA, defer, dedupe, retries + dead-letter, stats, export; multi-machine distribution is a gap by design | built (single machine) |
+| Assets / credentials | manifest `assets` (non-secret) with machine/user/slot overrides + Windows Credential Manager API | built |
 | Alerts | Jira / Teams / email / GitHub issue / dog-fooded notifier, dedupe, resolve | built |
 | Roles / audit | GitHub permissions, branch protection, PR history = audit trail | built (needs your repo settings) |
 | Insights / dashboards | Fleet dashboard, **Program/ROI dashboard** (hours saved, licences avoided, failure causes), migration dashboard | built |
-| Action Center | `queue.needs_review` + dashboard list | partial (no task UI beyond the list) |
+| Action Center | `activities.approvals` (human-in-the-loop tasks, expiry, audit) + local approval page/CLI + dashboard Queues & approvals page | built (local approver; not an identity system) |
 | Attended automation (Assistant) | not offered by design (redesign or `trigger-add`) | gap by design |
 
 ## For the migration programme

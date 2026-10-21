@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the whole AutoStation site (GitHub Pages): landing, install center, docs, registry portal, dashboards, program, migration.
+"""Build the whole AutoStation site (GitHub Pages): landing, install center, docs, registry portal, dashboards, program, operator console.
 
     python tools/build_site.py --out site --demo                       # everything, with synthetic fleet data (clearly labelled)
     python tools/build_site.py --out site --registry registry-out      # real registry (from tools/build_registry.py) + no fleet data yet
@@ -9,7 +9,7 @@
 Layout of ``site/``::
 
     index.html  install/ (index, <automation>.html, catalog.json, bootstrap.ps1)  docs/ (*.html, search-index.json, assessment.html)
-    portal/ (registry catalog + admin panel)  dashboard/  program/  migration/  registry/ (manifest.yaml, artifacts/...)  status.json
+    portal/ (registry catalog + admin panel)  dashboard/  program/  jobs/ machines/ queues/ schedules/ audit/  registry/ (manifest.yaml, artifacts/...)  status.json
 
 Everything is static. Nothing is fetched at build time unless ``--fetch-installer-sha`` is given (reads the ``.sha256`` release assets so
 install pages can show the installer hash).
@@ -22,7 +22,6 @@ import json
 import os
 import re
 import shutil
-import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -32,7 +31,7 @@ sys.path.insert(0, str(HERE / "site"))
 
 import site_common as sc  # noqa: E402
 from site_common import ROOT, SiteConfig, esc, now_iso, write  # noqa: E402
-import site_docs, site_install, site_landing  # noqa: E402
+import site_docs, site_install, site_landing, site_ops  # noqa: E402
 
 from registry import store as reg_store  # noqa: E402
 from registry.portal import build as portal_build  # noqa: E402
@@ -97,34 +96,9 @@ def build_dashboards(out: Path, archive: Path, manifest: Path | None, cfg: SiteC
     return {"errors": summary.get("errors", []), "stages": {k: v for k, v in summary.get("stages", {}).items() if k != "alert"}}
 
 
-def build_migration(out: Path, repo: Path, cfg: SiteConfig, inventory: Path | None, status: Path | None) -> str:
-    dash = repo / "tools" / "uipath" / "dashboard.py"
-    inv = inventory or (repo / "migration" / "inventory.json")
-    stat = status or (repo / "migration" / "status.yaml")
-    problem = ""
-    if dash.is_file() and Path(inv).is_file():
-        args = [sys.executable, str(dash), "--inventory", str(inv), "--out", str(out / "migration")]
-        if Path(stat).is_file():
-            args += ["--status", str(stat)]
-        r = subprocess.run(args, capture_output=True, text=True, cwd=repo)
-        if r.returncode == 0 and (out / "migration" / "index.html").is_file():
-            _inject(out / "migration" / "index.html", '<p style="margin:.2rem 0 .8rem"><a href="../index.html">&larr; AutoStation home</a></p>')
-            return "migration/index.html"
-        problem = f"The migration dashboard generator failed: {(r.stderr or r.stdout).strip()[-300:]}"
-        cfg.notes.append(problem)
-    msg = ("<p>The UiPath migration dashboard shows inventory, wave progress and licence retirement. It is generated from an inventory of your UiPath projects.</p>"
-           "<ol><li>Run the inventory scanner over your UiPath projects (<code>python tools/uipath/inventory.py &lt;projects-dir&gt; --out migration/</code>) and commit "
-           "<code>migration/inventory.json</code>.</li><li>Track status in <code>migration/status.yaml</code>.</li><li>Re-run the <em>site</em> workflow; this page fills in.</li></ol>"
-           f"<p><a href=\"../docs/index.html\">Documentation</a> &middot; <a href=\"{esc(cfg.repo_url)}/issues/new?template=uipath-migration-request.yml\">Request a migration</a></p>")
-    if problem:
-        msg = f'<div class="warnbox">{esc(problem)}</div>' + msg
-    return site_landing.build_placeholder(out, cfg, "migration/index.html", "UiPath migration", "migration", msg)
-
-
 def build(out: Path, repo: Path = ROOT, *, registry: Path | None = None, manifest: Path | None = None, demo: bool = False,
           demo_data: Path | None = None, live_data: Path | None = None, github_repo: str | None = None, fetch_installer_sha: bool = False,
-          installer_sha_file: Path | None = None, program_config: Path | None = None, migration_inventory: Path | None = None,
-          migration_status: Path | None = None, installer_url_template: str | None = None, now=None) -> dict:
+          installer_sha_file: Path | None = None, program_config: Path | None = None, installer_url_template: str | None = None, now=None) -> dict:
     out, repo = Path(out), Path(repo)
     if out.exists() and any(out.iterdir()) and not any((out / m).exists() for m in ("status.json", ".nojekyll")):
         raise SystemExit(f"error: --out {out} is not empty and does not look like a site build; refusing to wipe it")
@@ -240,12 +214,16 @@ def build(out: Path, repo: Path = ROOT, *, registry: Path | None = None, manifes
     docs_info = site_docs.build_docs_site(out, repo, cfg)
     pages += docs_info["pages"]
 
-    # ---- migration ---------------------------------------------------------------------------------------------
-    pages.append(build_migration(out, repo, cfg, Path(migration_inventory) if migration_inventory else None,
-                                 Path(migration_status) if migration_status else None))
+    # ---- operator console (jobs, machines, queues, schedules, audit) --------------------------------------------
+    ops_data = None
+    if archive:
+        from datetime import datetime, timezone
+        from automation_logging import analytics
+        ops_data = analytics.load_archive(archive, now or datetime.now(timezone.utc))
+    pages += site_ops.build_ops(out, cfg, m, ops_data, repo, (out / "registry") if registry else None, now)
 
     # ---- landing + 404 + status -------------------------------------------------------------------------------
-    have = {"migration": True} if (out / "migration" / "index.html").is_file() else {}
+    have = {}
     if (out / "registry" / "manifest.yaml").is_file():
         have["registry"] = True
     site_landing.build_landing(out, m, cfg, set(docs_info["docs"]), have)
@@ -276,16 +254,13 @@ def main(argv: list[str] | None = None) -> int:
                     help="read <automation>-setup.exe.sha256 from the installers-latest release at build time")
     ap.add_argument("--installer-sha-file", default=None, help="JSON {automation: sha256} instead of fetching")
     ap.add_argument("--program-config", default=None)
-    ap.add_argument("--migration-inventory", default=None)
-    ap.add_argument("--migration-status", default=None)
     a = ap.parse_args(argv)
     st = build(Path(a.out), Path(a.repo), registry=Path(a.registry) if a.registry else None, manifest=Path(a.manifest) if a.manifest else None,
                demo=a.demo, demo_data=Path(a.demo_data) if a.demo_data else None, live_data=Path(a.live_data) if a.live_data else None,
                github_repo=a.github_repo, fetch_installer_sha=a.fetch_installer_sha,
                installer_sha_file=Path(a.installer_sha_file) if a.installer_sha_file else None,
                program_config=Path(a.program_config) if a.program_config else None,
-               migration_inventory=Path(a.migration_inventory) if a.migration_inventory else None,
-               migration_status=Path(a.migration_status) if a.migration_status else None)
+               )
     print(f"site built in {a.out}: {len(st['pages'])} page(s), mode {st['mode']}, {st['registry']['automations']} automation(s)")
     for n in st["notes"]:
         print("note:", n)

@@ -118,7 +118,7 @@ def test_needs_review_roundtrip(q):
     assert again.reference == pending[0].reference and again.review_decision == "approved" and again.review_note == "ok by finance"
     q.succeed(again)
     q.resolve_review(pending[1].id, approve=False, note="fraud suspected")
-    assert q.counts() == {"new": 0, "in_progress": 0, "successful": 1, "failed_business": 1, "failed_system": 0, "needs_review": 0}
+    assert q.counts() == {"new": 0, "in_progress": 0, "successful": 1, "failed_business": 1, "failed_system": 0, "needs_review": 0, "dead_letter": 0}
     assert q.get(pending[1].reference).review_decision == "rejected"
     assert items_logged()[-1]["outcome"] == "skipped" and items_logged()[-1]["reason"] == "rejected in review"
     with pytest.raises(LogicError):

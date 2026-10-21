@@ -1,6 +1,6 @@
 name: site
 
-# Builds the whole site (landing, install center, docs, registry portal + admin panel, dashboards, program, migration) and
+# Builds the whole site (landing, install center, docs, registry portal + admin panel, dashboards, program, jobs, machines, queues, schedules, audit) and
 # deploys it to GitHub Pages. It also publishes the registry (manifest.yaml + artifacts) that installed machines self-heal from:
 #   https://<owner>.github.io/<repo>/registry/
 #

@@ -146,6 +146,30 @@ automations:
       - {on_automation: automation-other, on_status: success, slot: poll, params: {source: other}}
 ```
 
+
+### Schedule slot types and calendars (extension)
+
+Besides `daily`, `weekly`, `hourly` and `poll`, a slot may be:
+
+```yaml
+      slots:
+        - {id: month-end, type: monthly,  time: "18:00", day: last}                       # day: 1..31 | last | [1, 15, last]; months: [1, 4, 7, 10] optional
+        - {id: bizdays,   type: weekdays, time: "07:30"}                                  # Monday-Friday
+        - {id: office,    type: interval, every_minutes: 15, window: "08:00-18:00", days: [Monday, Tuesday]}
+        - {id: quarter,   type: cron,     expr: "0 6 1 1,4,7,10 *"}                       # minute hour day-of-month month day-of-week
+      blackouts:                                                                          # schedule-level: dates the automation must not run
+        - "2026-12-25"
+        - {date: "2027-01-01", reason: "New Year"}
+        - {from: "2026-12-28", to: "2026-12-31", reason: "year-end freeze"}
+```
+
+Each slot becomes native Task Scheduler triggers (`ScheduleByMonth`, `ScheduleByWeek`, repetition inside a window, one trigger per distinct cron time).
+Cron supports `*`, numbers, ranges, lists, steps, month and weekday names; if both day-of-month and day-of-week are restricted a day matches when either does.
+A cron slot that fires at more than 48 distinct times per day is refused (use `interval`). Fixed days of the month cannot be shifted across a calendar day
+when the schedule's time zone differs from the machine's by enough to change the date: such a slot is refused instead of mis-scheduled. Blackout dates are
+enforced at run time: the run is recorded as `skipped_maintenance` with the blackout as its window, whatever fired it. `wrapper_core.schedule.next_runs(slot, after, n, tz, blackouts)`
+is the pure function behind "when does this run next". `registry validate` checks all of it.
+
 Rules enforced by `registry validate`: every ring version exists in `versions`; sha256 is 64 hex; `requires` is satisfiable by the
 `compatibility` matrix for the ring versions; `paused` automations carry a `paused_reason`; maintenance windows parse;
 `dev`-ring-only versions never appear in `broad`.

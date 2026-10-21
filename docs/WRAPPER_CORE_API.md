@@ -88,3 +88,27 @@ lock → flush log spool → self-heal (manifest, kill-switch, install/update, a
      → maintenance window → compatibility check → [broker up] execute payload (watchdog, process-level retry)
      → status (success|partial|failed|hung) → synopsis (LLM, or deterministic) → run log + heartbeat → notify
 ```
+
+## Asset overrides, approvals and fixture tests
+
+**Assets (non-secret configuration).** `wrapper.assets()` returns the merged assets, lowest to highest precedence:
+
+1. ring default: `config/assets.json` (written by self-heal from the manifest `assets:` block)
+2. machine override: `%ProgramData%\AUTOMAGIX\assets.json` (admin-managed) or `$AUTOMAGIX_MACHINE_ASSETS`
+3. user override: `config/assets.user.json`
+4. slot parameters named `asset_<name>` (typed like the ring default: `asset_batch_size: "40"` becomes the integer 40)
+5. `AMX_ASSET_<NAME>` environment variable (development only; read by `credentials.get_asset`)
+
+Overrides are validated: names `[A-Za-z][A-Za-z0-9_.-]{0,63}`; values are scalars or small lists/mappings of scalars; files <= 256 KB; **secrets are refused**
+(names like password/token/secret/api key/credential, and values that look like keys, tokens or URLs with passwords); an override must have the same type as
+the ring default. Rejected entries are dropped and logged to `logs/wrapper.log`; they never stop a run. Inspect with `python -m wrapper_core assets show`
+(prints each value and the layer it came from) and `python -m wrapper_core assets validate <file>`.
+
+**Approvals** (`wrapper_core.activities.approvals`): `create`, `get`, `list_tasks` (also `approvals.list`), `decide`, `wait`, `expire_due`, `prune`, plus
+`python -m wrapper_core approvals list|show|approve|reject|ui|prune`. Telemetry events: `approval_requested` and `approval_decided` (ids, decision and a user hash only).
+
+**Fixture tests.** `python -m wrapper_core test <payload_dir> [--fixtures cases.json|cases.yaml] [--case NAME] [--json]` runs each case in a throw-away sandbox
+through the real lifecycle (offline, mock LLM) and checks its `expect` block. Case keys: `name`, `params`, `env` (only `AMX_*`, `AUTOMATION_*`, `TEST_*`),
+`dry_run`, `llm`, `ring`, `error_handling`, `expect`. `expect` keys: `status` (string or list), `exit_code`, `result` (subset match), `result_keys`,
+`items` (`success`/`skipped`/`failed`/`total` counts), `events` (`{event, min, max, data}`), `error_contains`, `max_duration_ms`. In pytest use
+`testing.run_payload(...)` with `testing.assert_run(run, status="success", items={"failed": 0})`. Exit code 1 if any case fails.

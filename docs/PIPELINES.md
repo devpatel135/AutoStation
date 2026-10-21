@@ -16,7 +16,7 @@ the enterprise option if you later move the control plane to GitLab; the manifes
         └──▶ site ──▶ build_registry (main + artifacts branch) ─▶ build_site ─▶ GitHub Pages
                           ├─ /registry/   manifest.yaml, triggers.json, artifacts/   ◀── endpoints self-heal from here
                           ├─ /install/    install center, catalog.json, bootstrap.ps1
-                          ├─ /docs/       searchable docs   /portal/ catalog + admin   /dashboard/ /program/ /migration/
+                          ├─ /docs/       searchable docs   /portal/ catalog + admin   /dashboard/ /program/ /jobs/ /machines/ /queues/ /schedules/ /audit/
  operators ──▶ admin panel ──▶ ops-action ──▶ PR (pause, resume, promote, rollback, fleet-*)   or   `triggers` branch (run now)
  endpoints ──▶ git push of unique ingest/* refs ──▶ logging repo ──▶ analytics (opt-in) ──▶ dashboards
 ```

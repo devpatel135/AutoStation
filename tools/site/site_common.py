@@ -95,8 +95,9 @@ def now_iso() -> str:
 
 NAV = [("index.html", "Home", "home"), ("install/index.html", "Install", "install"), ("docs/index.html", "Docs", "docs"),
        ("portal/index.html", "Catalog", "portal"), ("dashboard/index.html", "Dashboard", "dashboard"),
-       ("program/index.html", "Program", "program"), ("migration/index.html", "UiPath migration", "migration"),
-       ("portal/admin.html", "Admin", "admin")]
+       ("program/index.html", "Program", "program"), ("jobs/index.html", "Jobs", "jobs"), ("machines/index.html", "Machines", "machines"),
+       ("queues/index.html", "Queues", "queues"), ("schedules/index.html", "Schedules", "schedules"),
+       ("audit/index.html", "Audit", "audit"), ("portal/admin.html", "Admin", "admin")]
 
 EXTRA_CSS = r"""
 .hero { padding:1.4rem 0 .6rem; } .hero h1 { font-size:2rem; margin:.3rem 0 .6rem; } .hero p { font-size:15px; color:var(--fg-muted); max-width:62ch; }
@@ -213,7 +214,7 @@ def layout(title: str, body: str, *, cfg: SiteConfig, depth: int = 0, active: st
 </head><body><div class="page">
 <a class="sr" href="#main">Skip to content</a>
 <header class="top">
-  <div class="brand">{theme.LOGO_SVG}<div><div class="eyebrow">{esc(cfg.title)} &middot; UiPath replacement platform</div><div style="font-weight:700">{esc(title)}</div></div></div>
+  <div class="brand">{theme.LOGO_SVG}<div><div class="eyebrow">{esc(cfg.title)} &middot; unattended automation platform</div><div style="font-weight:700">{esc(title)}</div></div></div>
   <nav class="main" aria-label="Main">{links}<button id="theme-toggle" type="button" title="Toggle light/dark theme" aria-label="Toggle theme">Theme</button></nav>
 </header>
 <main id="main">{TELEMETRY_BANNER}{banner}{body}</main>

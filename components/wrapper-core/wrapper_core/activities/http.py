@@ -200,7 +200,9 @@ def _dig(obj: Any, dotted: Optional[str]) -> Any:
 class Client:
     def __init__(self, base_url: str = "", headers: Optional[Dict[str, str]] = None, auth: Any = None, retries: int = 3,
                  timeout: float = 30, backoff: float = 0.5, retry_post: bool = False, ca_file: Optional[str] = None,
-                 sleep: Callable[[float], None] = time.sleep):
+                 sleep: Callable[[float], None] = time.sleep, redact_path: bool = False):
+        """``redact_path=True`` keeps the URL path out of telemetry and error text (for webhook URLs, whose path IS the secret)."""
+        self.redact_path = redact_path
         self.base_url = base_url.rstrip("/")
         self.headers = dict(headers or {})
         if isinstance(auth, tuple) and len(auth) == 2:
@@ -241,7 +243,7 @@ class Client:
         auth_refreshed = False
         attempt = 0
         host = urllib.parse.urlsplit(url).netloc
-        log_path = urllib.parse.urlsplit(url).path  # never the query string
+        log_path = "/[redacted]" if self.redact_path else urllib.parse.urlsplit(url).path  # never the query string
         while True:
             h = dict(hdrs)
             if self.auth is not None:
@@ -270,7 +272,8 @@ class Client:
                     self.auth.invalidate()
                     auth_refreshed = True
                     continue
-                if isinstance(err, SystemUnavailable) and retryable_method and attempt < self.retries:
+                # 429 means "not processed, slow down": safe to retry for any method; other 5xx only for idempotent methods
+                if isinstance(err, SystemUnavailable) and (retryable_method or exc.code == 429) and attempt < self.retries:
                     ra = self._retry_after(exc)
                     self._sleep(ra if ra is not None else self.backoff * (2 ** attempt))  # Retry-After: 0 is a valid answer
                     attempt += 1
