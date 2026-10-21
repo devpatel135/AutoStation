@@ -116,7 +116,11 @@ jobs:
         run: |
           mkdir -p live
           cp components/automation-registry/manifest.yaml live/manifest.yaml
-          python -m automation_logging ingest --source dir --from "$GITHUB_WORKSPACE/../logs" --out live/archive
+          if ! python -m automation_logging ingest --source dir --from "$GITHUB_WORKSPACE/../logs" --out live/archive > ingest.log 2>&1; then
+            echo "::warning title=live ingest failed::$(tail -c 700 ingest.log | tr '\n' ' ')"
+            exit 1
+          fi
+          tail -n 30 ingest.log
         working-directory: components/automation-logging
         env:
           PYTHONPATH: ${{ github.workspace }}/components/wrapper-core
