@@ -56,7 +56,8 @@ def main() -> int:
             if os.environ.get("GITHUB_ACTIONS"):  # surface the failure as a check annotation (visible without log access)
                 import re
                 failed = re.findall(r"^(?:FAILED|ERROR) .*$", r.stdout, re.M)[:12]
-                body = "\n".join(failed) or (r.stdout[-1500:] + r.stderr[-1000:])
+                detail = re.findall(r"^E {3}.*$", r.stdout, re.M)[:25]  # pytest assertion detail lines
+                body = "\n".join(failed + detail) or (r.stdout[-1500:] + r.stderr[-1000:])
                 body = body.replace("%", "%25").replace("\r", "").replace("\n", "%0A")[:3500]
                 print(f"::error title={name} failed::{body}")
     print()
