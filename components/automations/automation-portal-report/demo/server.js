@@ -8,7 +8,7 @@ const root = path.join(__dirname, 'portal');
 const port = Number(process.argv[2] || process.env.PORT || 8099);
 
 const server = http.createServer((req, res) => {
-  const name = path.basename(new URL(req.url, 'http://localhost').pathname) || 'v1.html';
+  const name = path.basename(new URL(req.url, 'http://localhost').pathname) || 'portal.html';
   const file = path.join(root, name);
   if (!file.startsWith(root) || !fs.existsSync(file)) {
     res.writeHead(404, { 'Content-Type': 'text/plain' });
@@ -20,6 +20,10 @@ const server = http.createServer((req, res) => {
 });
 
 if (require.main === module) {
-  server.listen(port, '127.0.0.1', () => console.log(`demo portal on http://127.0.0.1:${port}/ (v1.html, v2.html)`));
+  server.listen(port, '127.0.0.1', () => console.log(`demo portal on http://127.0.0.1:${port}/ (portal.html, portal.html?v2)`));
+  // `localhost` often resolves to ::1 first (Node 18+/Windows): serve the fake account picker there too, loopback only.
+  const v6 = http.createServer(server.listeners('request')[0]);
+  v6.on('error', () => { /* no IPv6 loopback on this host: localhost falls back to 127.0.0.1 */ });
+  v6.listen(port, '::1');
 }
 module.exports = server;

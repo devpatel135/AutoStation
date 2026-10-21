@@ -5,3 +5,9 @@ entrypoint: main.py
 args: []
 requires: {wrapper_core: ">=0.1.0,<1.0.0", execution_framework: ">=0.1.0,<1.0.0"}
 timeout_s: 300
+# Defaults used when no registry manifest is reachable (standalone install); a manifest entry overrides these.
+schedule:
+  slots:
+    - {id: daily, type: daily, time: "09:00", params: {simulate: none}}
+  expected_duration_ms: {baseline: 60000, warn_threshold: 3.0}
+error_handling: {max_retries: 3, network_retry_wait_s: 60, backoff_multiplier: 2.0, skip_on_data_error: true}

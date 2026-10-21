@@ -27,6 +27,10 @@ if (Test-Path -LiteralPath $Out) {
 }
 $cfg['ring'] = $Ring
 $cfg['registry_url'] = $RegistryUrl
+if ($LogRemote -eq 'local') {
+    # standalone install: no logging server. Run logs land next to the install and can be collected/ingested later.
+    $LogRemote = Join-Path (Split-Path -Parent (Split-Path -Parent $Out)) 'local-logs'
+}
 $cfg['log_remote'] = $LogRemote
 $cfg['log_transport'] = $(if ($LogRemote -match '^(git@|ssh://)') { 'git-ssh' } else { 'dir' })
 if ($LlmEndpoint) { $cfg['llm_endpoint'] = $LlmEndpoint }

@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Sign in to your account (demo, redesigned)</title></head>
+<body>
+  <h1>Pick an account</h1>
+  <!-- Redesigned picker: no data-test-id and no #tilesHolder. The text-based fallback selector still matches. -->
+  <ul class="accounts">
+    <li><div role="button" tabindex="0" class="acct" data-who="dev">Dev Patel - devpatel@deloitte.com</div></li>
+    <li><div role="button" tabindex="0" class="acct" data-who="other">Someone Else - someone.else@example.com</div></li>
+  </ul>
+  <script>
+    document.querySelectorAll('.acct').forEach(function (el) {
+      el.addEventListener('click', function () {
+        var email = el.textContent.split(' - ')[1];
+        location.href = 'http://127.0.0.1:' + location.port + '/portal.html#signed-in=' + encodeURIComponent(email);
+      });
+    });
+  </script>
+</body>
+</html>

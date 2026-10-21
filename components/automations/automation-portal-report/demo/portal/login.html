@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Sign in to your account (demo)</title></head>
+<body>
+  <h1>Pick an account</h1>
+  <div id="tilesHolder">
+    <div class="table tile" role="button" tabindex="0" data-test-id="devpatel@deloitte.com" data-email="devpatel@deloitte.com">
+      <div>Dev Patel</div><small>devpatel@deloitte.com</small>
+    </div>
+    <div class="table tile" role="button" tabindex="0" data-test-id="someone.else@example.com" data-email="someone.else@example.com">
+      <div>Someone Else</div><small>someone.else@example.com</small>
+    </div>
+    <div class="table tile" role="button" tabindex="0" data-test-id="otherTile"><div>Use another account</div></div>
+  </div>
+  <script>
+    document.querySelectorAll('[data-email]').forEach(function (el) {
+      el.addEventListener('click', function () {
+        location.href = 'http://127.0.0.1:' + location.port + '/portal.html#signed-in=' + encodeURIComponent(el.getAttribute('data-email'));
+      });
+    });
+  </script>
+</body>
+</html>

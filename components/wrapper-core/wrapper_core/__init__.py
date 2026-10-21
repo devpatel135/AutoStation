@@ -21,13 +21,14 @@ from .llm import llm_call, llm_call_ex, log_llm_decision
 from .logging import log_event, log_item, track_item
 from .retry import (AuthExpired, AutomationError, Category, DataError, Escalation, LogicError, NetworkError,
                     RetryPolicy, SystemUnavailable, entrypoint, run_item, run_with_retry)
+from .evidence import add_evidence
 from .runctx import current as _current_run
 
 __all__ = [
     "__version__", "log_event", "log_item", "track_item", "llm_call", "llm_call_ex", "log_llm_decision",
     "run_item", "run_with_retry", "entrypoint", "RetryPolicy", "Escalation", "Category", "AutomationError",
     "NetworkError", "AuthExpired", "SystemUnavailable", "DataError", "LogicError",
-    "params", "param", "is_dry_run", "set_result", "emit_trigger", "run_dir", "assets",
+    "params", "param", "is_dry_run", "set_result", "emit_trigger", "run_dir", "assets", "add_evidence",
 ]
 
 

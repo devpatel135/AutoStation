@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Demo portal (target)</title></head>
+<body>
+  <h1>AI Season of Certifications - resources (demo)</h1>
+  <p id="status">loading</p>
+  <script>
+    // Demo of the real flow: an unauthenticated visit is bounced to the "Microsoft" account picker on another host
+    // (localhost vs 127.0.0.1), which returns here with #signed-in after a tile is chosen.
+    if (location.hash.indexOf('signed-in') === -1) {
+      var v = location.search.indexOf('v2') !== -1 ? 'login-v2.html' : 'login.html';
+      location.replace('http://localhost:' + location.port + '/' + v);
+    } else {
+      document.getElementById('status').textContent = 'signed in as ' + decodeURIComponent(location.hash.split('=')[1] || '');
+    }
+  </script>
+</body>
+</html>

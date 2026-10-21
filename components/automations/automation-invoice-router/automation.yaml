@@ -5,3 +5,12 @@ entrypoint: main.py
 args: []
 requires: {wrapper_core: ">=0.1.0,<1.0.0", execution_framework: ">=0.1.0,<1.0.0"}
 timeout_s: 900
+# Defaults used when no registry manifest is reachable (standalone install); a manifest entry overrides these.
+# inbox_dir / outbox_dir default to <AUTOMAGIX_HOME>/data/automation-invoice-router/{inbox,outbox}.
+schedule:
+  slots:
+    - {id: daily, type: daily, time: "08:00", params: {}}
+  expected_duration_ms: {baseline: 120000, warn_threshold: 3.0}
+error_handling: {max_retries: 3, network_retry_wait_s: 60, backoff_multiplier: 2.0, skip_on_data_error: true}
+data_classification: confidential
+llm_allowed_classification: confidential

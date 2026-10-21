@@ -26,7 +26,7 @@ def install_automation(name: str, paths: Paths | None = None, scheduler: Schedul
         return {"ok": False, "error": f"automation is paused: {heal.halt_reason}", "installed": heal.installed}
     if not paths.automation_dir(name).exists():
         return {"ok": False, "error": "payload not installed: " + ("; ".join(heal.errors) or "unknown"), "installed": heal.installed}
-    entry = mf.automation(heal.manifest, name) if heal.manifest else {}
+    entry = {**selfheal.payload_defaults(paths, name), **((mf.automation(heal.manifest, name) if heal.manifest else None) or {})}
     sched = scheduler or Scheduler(paths)
     touched = sched.register(name, (entry or {}).get("schedule"), force=True)
     sched.write_startup_script()
@@ -50,10 +50,9 @@ def maintain(paths: Paths | None = None, scheduler: Scheduler | None = None) -> 
             m = mf.parse(paths.manifest_cache.read_text(encoding="utf-8"))
     touched: dict[str, list[str]] = {}
     for name in sorted(selfheal.read_installed(paths)["automations"]):
-        entry = (mf.automation(m, name) if m else None)
-        if entry is None:
+        entry = {**selfheal.payload_defaults(paths, name), **((mf.automation(m, name) if m else None) or {})}
+        if not entry.get("schedule"):
             continue
-        halt, _ = mf.paused(m, name)
         touched[name] = sched.register(name, entry.get("schedule"))
     transport.flush_spool(paths)
     send_heartbeat(paths, "login")
@@ -82,6 +81,8 @@ def uninstall_automation(name: str, paths: Paths | None = None, scheduler: Sched
     if adir.exists():
         shutil.rmtree(adir, ignore_errors=True)
         report["removed"].append(str(adir))
+    for f in (paths.root / "bundled").glob(f"{name}.*"):
+        f.unlink(missing_ok=True)
     data = selfheal.read_installed(paths)
     data["automations"].pop(name, None)
     selfheal.write_installed(paths, data)

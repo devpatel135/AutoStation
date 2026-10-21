@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import manifest as mf
-from . import secrets, versions
+from . import miniyaml, secrets, versions
 from ._version import __version__ as WRAPPER_VERSION
 from .paths import Paths, get_logger
 from .util import atomic_write_text, read_json, sha256_file, write_json
@@ -235,6 +235,45 @@ def installed_automation_version(paths: Paths, name: str) -> str | None:
     return read_installed(paths)["automations"].get(name)
 
 
+PAYLOAD_DEFAULT_KEYS = ("schedule", "error_handling", "data_classification", "llm_allowed_classification", "notify_on_complete")
+
+
+def payload_defaults(paths: Paths, name: str) -> dict:
+    """Operational defaults a payload ships in its own ``automation.yaml`` (schedule, error_handling, ...). They apply only
+    when the registry manifest has nothing to say (offline / standalone installs); a manifest entry always wins."""
+    f = paths.automation_dir(name) / "automation.yaml"
+    try:
+        d = miniyaml.load(f) if f.exists() else {}
+    except (OSError, miniyaml.YamlError):
+        return {}
+    return {k: d[k] for k in PAYLOAD_DEFAULT_KEYS if isinstance(d, dict) and k in d}
+
+
+def install_bundled(paths: Paths, name: str) -> str | None:
+    """Install the payload bundled inside the installer (``<home>/bundled/<name>.zip`` + ``<name>.json``) when the
+    automation is not present yet. The installer is the trust root, so the sha256 in the sidecar (written at build time,
+    inside the signed .exe) is checked, but no registry is needed: a first install works offline / before a registry
+    exists. Self-heal later moves the payload to the ring's version when the registry is reachable."""
+    zp, meta_p = paths.root / "bundled" / f"{name}.zip", paths.root / "bundled" / f"{name}.json"
+    if paths.automation_dir(name).exists() or not zp.is_file() or not meta_p.is_file():
+        return None
+    meta = read_json(meta_p, {}) or {}
+    if not meta.get("sha256") or sha256_file(zp).lower() != str(meta["sha256"]).lower():
+        raise HealError(f"bundled payload for {name} failed its sha256 check")
+    target = paths.automation_dir(name)
+    staging = target.with_name(name + ".staging")
+    if staging.exists():
+        shutil.rmtree(staging, ignore_errors=True)
+    safe_extract(zp, staging)
+    atomic_write_text(staging / "VERSION", str(meta.get("version", "bundled")) + "\n")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    _swap(staging, target)
+    data = read_installed(paths)
+    data["automations"][name] = str(meta.get("version", "bundled"))
+    write_installed(paths, data)
+    return f"{name} -> {meta.get('version', 'bundled')} (bundled with the installer)"
+
+
 # --- the pass ----------------------------------------------------------------------------------------
 def fetch_manifest(paths: Paths, base: str, token: str | None) -> tuple[dict, bool]:
     """Return (manifest, offline). Falls back to the cached copy when the registry is unreachable."""
@@ -256,6 +295,14 @@ def run(paths: Paths, cfg: dict, automation: str | None) -> HealResult:
     ring = cfg["ring"]
     res = HealResult(ring=ring)
     log = get_logger(paths)
+    if automation:
+        try:
+            note = install_bundled(paths, automation)
+            if note:
+                res.installed.append(note)
+        except (HealError, OSError, zipfile.BadZipFile) as exc:
+            log.error("bundled install of %s failed: %s", automation, exc)
+            res.errors.append(f"bundled payload: {exc}")
     base = cfg.get("registry_url")
     if not base:
         res.errors.append("registry_url not configured")

@@ -206,6 +206,15 @@ Section "Install" SecInstall
 !endif
   !insertmacro RunPS "restrict-acl.ps1" '-Path "$INSTDIR\secrets"'
 
+!ifdef HAVE_PAYLOAD
+  ; bundled payload: the signed installer is the trust root, so the first install works without any registry; self-heal
+  ; replaces it with the ring's version later (sha256-verified against the manifest) when the registry is reachable
+  DetailPrint "Bundling ${AUTOMATION} ${VERSION}..."
+  CreateDirectory "$INSTDIR\bundled"
+  SetOutPath "$INSTDIR\bundled"
+  File "@@STAGE_DIR@@\bundled\*.*"
+!endif
+
   ; 6. hand over to wrapper-core: dynamic assembly + Task Scheduler + Startup maintenance script
   DetailPrint "Installing ${AUTOMATION} (wrapper-core install)..."
   System::Call 'Kernel32::SetEnvironmentVariable(t, t)i("AUTOMAGIX_HOME", "$INSTDIR").r9'
@@ -271,6 +280,8 @@ Section "Uninstall"
     RMDir /r "$INSTDIR\wrapper-core"
     RMDir /r "$INSTDIR\execution-framework"
     RMDir /r "$INSTDIR\automations"
+    RMDir /r "$INSTDIR\bundled"
+    RMDir /r "$INSTDIR\local-logs"
     RMDir /r "$INSTDIR\state"
     RMDir /r "$INSTDIR\bin"
     RMDir /r "$INSTDIR\runs"

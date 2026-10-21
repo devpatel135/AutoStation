@@ -74,6 +74,7 @@ class Config:
     publisher: str = "AUTOMAGIX"
     icon: str = ""
     wrapper_core_zip: str = ""
+    automation_zip: str = ""      # optional: payload bundled INSIDE the installer (offline-capable first install)
     python_embed_zip: str = ""
     known_hosts_file: str = ""
     base_dir: Path = field(default_factory=Path.cwd)
@@ -114,15 +115,16 @@ def load_config(src: Path | dict, base_dir: Path | None = None) -> Config:
     registry = _clean("registry_url", raw.get("registry_url")).rstrip("\\")
     log_remote = _clean("log_remote", raw.get("log_remote"))
     dev_dir_remote = ring == "dev" and re.match(r"^([A-Za-z]:[\\/]|\\\\|/)", log_remote)  # dev ring may log to a share
-    if not LOG_REMOTE_RE.match(log_remote) and not dev_dir_remote:
-        raise BuildError("config: log_remote must be an ssh git remote (git@host:path.git or ssh://...)")
+    if log_remote != "local" and not LOG_REMOTE_RE.match(log_remote) and not dev_dir_remote:
+        raise BuildError("config: log_remote must be an ssh git remote (git@host:path.git or ssh://...), or 'local' "
+                         "(logs stay in <install dir>/local-logs: a standalone install with no logging server)")
     llm = _clean("llm_endpoint", raw.get("llm_endpoint", ""), allow_empty=True)
     if llm and not URL_RE.match(llm):
         raise BuildError("config: llm_endpoint must be an http(s):// URL")
     return Config(automation=name, version=version, registry_url=registry, log_remote=log_remote, ring=ring,
                   llm_endpoint=llm, llm_model=_clean("llm_model", raw.get("llm_model", ""), allow_empty=True),
                   publisher=_clean("publisher", raw.get("publisher", "AUTOMAGIX")), icon=raw.get("icon", "") or "",
-                  wrapper_core_zip=raw.get("wrapper_core_zip", "") or "", python_embed_zip=raw.get("python_embed_zip", "") or "",
+                  wrapper_core_zip=raw.get("wrapper_core_zip", "") or "", automation_zip=raw.get("automation_zip", "") or "", python_embed_zip=raw.get("python_embed_zip", "") or "",
                   known_hosts_file=raw.get("known_hosts_file", "") or "", base_dir=base)
 
 
@@ -218,7 +220,7 @@ def stage_build(cfg: Config, stage: Path, env: dict, allow_missing_secrets: bool
     if stage.exists():
         shutil.rmtree(stage)
     stage.mkdir(parents=True)
-    flags = {"HAVE_ICON": False, "HAVE_PYTHON_EMBED": False, "HAVE_SSH_KEY": False, "HAVE_TOKEN": False, "HAVE_KNOWN_HOSTS": False}
+    flags = {"HAVE_PAYLOAD": False, "HAVE_ICON": False, "HAVE_PYTHON_EMBED": False, "HAVE_SSH_KEY": False, "HAVE_TOKEN": False, "HAVE_KNOWN_HOSTS": False}
 
     # scripts
     (stage / "scripts").mkdir()
@@ -240,6 +242,20 @@ def stage_build(cfg: Config, stage: Path, env: dict, allow_missing_secrets: bool
         raise BuildError("wrapper_core_zip must contain VERSION and wrapper_core/__init__.py (use package.py)")
     wrapper_version = vfile.read_text(encoding="utf-8").strip()
     versions.parse(wrapper_version)
+
+    # bundled automation payload: the installer itself is the trust root, so a first install works with no registry
+    if cfg.automation_zip:
+        az = _resolve(cfg, cfg.automation_zip)
+        if not az.is_file():
+            raise BuildError(f"automation_zip not found: {az}")
+        with zipfile.ZipFile(az) as zf:
+            if "automation.yaml" not in zf.namelist():
+                raise BuildError("automation_zip must contain automation.yaml at its root (use package.py automation ...)")
+        (stage / "bundled").mkdir()
+        shutil.copyfile(az, stage / "bundled" / f"{cfg.automation}.zip")
+        meta = {"name": cfg.automation, "version": cfg.version, "sha256": hashlib.sha256(az.read_bytes()).hexdigest()}
+        (stage / "bundled" / f"{cfg.automation}.json").write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
+        flags["HAVE_PAYLOAD"] = True
 
     # interpreter
     if cfg.python_embed_zip:

@@ -14,6 +14,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import evidence as evidence_mod
 from . import manifest as mf
 from . import miniyaml, notify, runctx, selfheal, transport, versions
 from ._version import __version__ as WRAPPER_VERSION
@@ -23,6 +24,7 @@ from .logging import log_event
 from .paths import Paths, get_logger, platform_config
 from .retry import (Category, Escalation, RetryPolicy, Skipped, AuthExpired, DataError, LogicError, NetworkError,
                     SystemUnavailable, classify_text, run_with_retry)
+from .redact import redacted_json
 from .synopsis import build as build_synopsis
 from .util import hostname, iso, new_run_id, read_json, user_hash, utcnow, write_json
 
@@ -227,10 +229,22 @@ def _finalise(paths: Paths, record: dict, ctx, dry_run: bool, use_llm: bool = Tr
     record["events"] = events
     record["items"] = _aggregate_items(events)
     record["synopsis"], record["synopsis_source"] = build_synopsis(record, use_llm=use_llm)
+    ev_payload = None
+    if os.environ.get("AMX_EVIDENCE") == "always" or record.get("status") in evidence_mod.FAILURE_STATUSES:
+        err = record.get("error") or {}
+        stderr_tail = _tail(ctx.run_dir / "stderr.log", 2000)
+        ctx_text = json.dumps({"status": record.get("status"), "error": err, "exit_code": record.get("exit_code"),
+                               "stderr_tail": stderr_tail, "last_events": json.loads(redacted_json(events[-20:]))},
+                              indent=2, default=str)
+        ev_payload = evidence_mod.collect(ctx.run_dir, record["run_id"], record["automation"], {"context.txt": ctx_text})
+        if ev_payload:
+            record["evidence"] = [{"name": f["name"], "size": f["size"], "content_type": f["content_type"]} for f in ev_payload["files"]]
     if dry_run:
         print(json.dumps({k: v for k, v in record.items() if k != "events"}, indent=2, default=str))
         return
     transport.emit("run", record["automation"], record["run_id"], record, paths)
+    if ev_payload:
+        transport.emit("evidence", record["automation"], record["run_id"], ev_payload, paths)
 
 
 def run_automation(name: str, slot_id: str | None = None, dry_run: bool = False, paths: Paths | None = None,
@@ -258,7 +272,7 @@ def run_automation(name: str, slot_id: str | None = None, dry_run: bool = False,
 
         heal = selfheal.run(paths, cfg, name)
         m = heal.manifest
-        entry = (mf.automation(m, name) if m else None) or {}
+        entry = {**selfheal.payload_defaults(paths, name), **((mf.automation(m, name) if m else None) or {})}
         schedule = entry.get("schedule")
         slots = (schedule or {}).get("slots") or []
         slot = next((s for s in slots if str(s.get("id")) == slot_id), None) if slot_id else (slots[0] if slots else None)

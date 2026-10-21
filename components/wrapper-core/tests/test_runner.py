@@ -342,3 +342,59 @@ def test_names_cannot_escape_directories():
         with pytest.raises(ValueError):
             check_name(bad)
     assert check_name("automation-hello_world.v2") == "automation-hello_world.v2"
+
+
+def _bundle(home, name="auto-b", version="1.2.3", code=HELLO, extra_yaml=""):
+    import hashlib
+    import zipfile
+    from wrapper_core import miniyaml
+    d = home / "bundled"
+    d.mkdir(parents=True, exist_ok=True)
+    desc = {"name": name, "version": version, "runtime": "python", "entrypoint": "main.py", "timeout_s": 60}
+    zp = d / f"{name}.zip"
+    with zipfile.ZipFile(zp, "w") as z:
+        z.writestr("automation.yaml", miniyaml.dumps(desc) + extra_yaml)
+        z.writestr("main.py", code)
+    (d / f"{name}.json").write_text(json.dumps({"name": name, "version": version, "sha256": hashlib.sha256(zp.read_bytes()).hexdigest()}))
+    return zp
+
+
+def test_bundled_payload_installs_and_runs_with_no_registry(monkeypatch, tmp_path):
+    monkeypatch.setenv("AUTOMAGIX_REGISTRY_URL", str(tmp_path / "does-not-exist"))
+    p = Paths().ensure()
+    _bundle(p.root)
+    out = run("auto-b", "adhoc")
+    rec = out.record
+    assert rec["status"] == "success" and rec["items"]["success"] == 3
+    assert any("bundled with the installer" in i for i in rec["self_heal"]["installed"])
+    assert any("unreachable" in e or "registry" in e.lower() for e in rec["self_heal"]["errors"])
+    assert selfheal.installed_automation_version(p, "auto-b") == "1.2.3"
+
+
+def test_tampered_bundle_is_refused(monkeypatch, tmp_path):
+    monkeypatch.setenv("AUTOMAGIX_REGISTRY_URL", str(tmp_path / "nope"))
+    p = Paths().ensure()
+    zp = _bundle(p.root)
+    zp.write_bytes(zp.read_bytes() + b"tamper")
+    rec = run("auto-b", "adhoc").record
+    assert rec["status"] == "self_heal_failed" and "sha256" in json.dumps(rec["self_heal"])
+    assert not p.automation_dir("auto-b").exists()
+
+
+def test_payload_default_schedule_registers_tasks_without_a_manifest(monkeypatch, tmp_path):
+    monkeypatch.setenv("AUTOMAGIX_REGISTRY_URL", str(tmp_path / "nope"))
+    p = Paths().ensure()
+    _bundle(p.root, extra_yaml='schedule:\n  slots:\n    - {id: daily, type: daily, time: "09:00", params: {mode: "bundled"}}\n')
+    from wrapper_core.scheduler import Scheduler
+
+    class R:
+        returncode, stdout, stderr = 0, "", ""
+
+    calls = []
+    sched = Scheduler(p, runner=lambda args, input_text=None: calls.append(args) or R())
+    res = lifecycle.install_automation("auto-b", scheduler=sched)
+    assert res["ok"] and any(c[:2] == ["schtasks", "/Create"] for c in calls)
+    rec = run("auto-b", "daily").record
+    assert rec["status"] == "success" and rec["params"] == {"mode": "bundled"}
+    lifecycle.uninstall_automation("auto-b", scheduler=sched)
+    assert not (p.root / "bundled" / "auto-b.zip").exists()
