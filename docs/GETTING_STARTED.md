@@ -64,7 +64,7 @@ python -m pytest                                              # your tests + the
 
 `wrapper_core.testing.run_payload(...)` is the same harness for your tests (simulate failures, assert on the run log).
 Examples to copy from: `components/automations/` — `automation-hello-world` (every feature), `automation-invoice-router`
-(headless + LLM patterns 1 and 2 with grounding), `automation-notifier` (alerting), `automation-portal-report`
+(headless + LLM patterns 1 and 2 with grounding), `automation-notifier` (alerting), `automation-certification-site`
 (Playwright + resilience).
 
 ## 5. Register and release

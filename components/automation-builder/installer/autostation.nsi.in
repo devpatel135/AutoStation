@@ -23,12 +23,8 @@ ManifestDPIAware true
 !define DEFAULT_RING    "@@DEFAULT_RING@@"
 !define REGISTRY_URL    "@@REGISTRY_URL@@"
 !define LOG_REMOTE      "@@LOG_REMOTE@@"
-; standalone installs (log_remote "local") keep logs on disk: git/ssh are not prerequisites
-!if "${LOG_REMOTE}" == "local"
-  !define GIT_ARG "-SkipGit"
-!else
-  !define GIT_ARG ""
-!endif
+; git/ssh are prerequisites only for the ssh log transport (standalone "local" and github-api installs need neither)
+!define GIT_ARG "@@GIT_ARG@@"
 !define LLM_ENDPOINT    "@@LLM_ENDPOINT@@"
 !define LLM_MODEL       "@@LLM_MODEL@@"
 !define WRAPPER_VERSION "@@WRAPPER_VERSION@@"
@@ -180,6 +176,17 @@ Section "Install" SecInstall
     DetailPrint "wrapper-core $R2 already installed - keeping it."
   ${EndIf}
 
+!ifdef HAVE_FRAMEWORK
+  ; execution-framework: Node runtime + playwright-core bundled, so browser automations run with nothing pre-installed
+  ${IfNot} ${FileExists} "$INSTDIR\execution-framework\VERSION"
+    DetailPrint "Installing execution-framework (Node runtime)..."
+    SetOutPath "$INSTDIR\execution-framework"
+    File /r "@@STAGE_DIR@@\execution-framework\*.*"
+  ${Else}
+    DetailPrint "execution-framework already installed - keeping it (self-heal keeps it current)."
+  ${EndIf}
+!endif
+
   ; 4. platform configuration (real JSON escaping done by the script)
   !insertmacro RunPS "write-platform-config.ps1" '-Out "$INSTDIR\config\platform.json" -Ring "$Ring" -RegistryUrl "${REGISTRY_URL}" -LogRemote "${LOG_REMOTE}" -LlmEndpoint "${LLM_ENDPOINT}" -LlmModel "${LLM_MODEL}"'
   ${If} $0 != 0
@@ -208,6 +215,15 @@ Section "Install" SecInstall
   !insertmacro RunPS "set-credential.ps1" '-Target "AUTOMAGIX/registry_token" -SecretFile "$PLUGINSDIR\sec\registry_token"'
   ${If} $0 != 0
     !insertmacro FailInstall "Could not store the registry token (exit code $0)." 7
+  ${EndIf}
+!endif
+!ifdef HAVE_LOG_TOKEN
+  DetailPrint "Protecting the logging token with DPAPI..."
+  SetOutPath "$PLUGINSDIR\sec"
+  File "@@STAGE_DIR@@\secrets\logging_token"
+  !insertmacro RunPS "protect-secret.ps1" '-InFile "$PLUGINSDIR\sec\logging_token" -OutFile "$INSTDIR\secrets\logging_token.dpapi" -DeleteInput'
+  ${If} $0 != 0
+    !insertmacro FailInstall "Could not protect the logging token (exit code $0)." 9
   ${EndIf}
 !endif
   !insertmacro RunPS "restrict-acl.ps1" '-Path "$INSTDIR\secrets"'

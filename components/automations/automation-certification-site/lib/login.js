@@ -37,6 +37,7 @@ function hostOf(url) {
  *   target          the portal itself (signed in / no auth challenge)
  *   account-picker  Microsoft "Pick an account" (tiles listed)
  *   credential      Microsoft is asking for a password / code / MFA - a human or SSO step this automation never performs
+ *   signin          Microsoft asks for an e-mail address (this browser profile is not signed in yet: sign in once by hand)
  *   other           anything else (still loading, error page, unrelated site)
  * state: {url, title, text, hasTile}
  */
@@ -49,6 +50,7 @@ function classifyPage(state, targetUrl = DEFAULT_URL, opts = {}) {
   if (isLoginHost(host)) {
     if (state.hasTile || /pick an account/i.test(text)) return 'account-picker';
     if (/enter password|enter code|approve sign.?in|verify your identity|sign in with a security key|stay signed in/i.test(text)) return 'credential';
+    if (/email, phone, or skype|enter your email|no account\?/i.test(text)) return 'signin';
     return 'other';
   }
   return 'other';

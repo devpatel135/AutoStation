@@ -188,3 +188,94 @@ def test_doctor_reports_without_crashing_and_never_leaks_secrets(monkeypatch, tm
     assert "tok-should-never-print" not in str(res)
     assert all(r["status"] in ("PASS", "WARN", "FAIL") for r in res)
     assert doctor.main(["--offline", "--json"]) in (0, 1)
+
+
+def _fake_github(state):
+    """Minimal fake of the GitHub REST endpoints the log transport uses (branch bootstrap + contents PUT)."""
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    class H(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def _send(self, code, obj):
+            data = json.dumps(obj).encode()
+            self.send_response(code)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def _auth(self):
+            state.setdefault("auth", []).append(self.headers.get("Authorization"))
+
+        def do_GET(self):
+            self._auth()
+            if self.path.endswith("/git/ref/heads/ingest"):
+                return self._send(200 if state.get("branch") else 404, {"object": {"sha": "abc"}})
+            if self.path.endswith("/git/ref/heads/main"):
+                return self._send(200, {"object": {"sha": "abc"}})
+            if self.path.endswith("/repos/o/logs"):
+                return self._send(200, {"default_branch": "main"})
+            self._send(404, {})
+
+        def do_POST(self):
+            self._auth()
+            self.rfile.read(int(self.headers["Content-Length"]))
+            state["branch"] = True
+            self._send(201, {})
+
+        def do_PUT(self):
+            self._auth()
+            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            path = self.path.split("/contents/", 1)[1]
+            if path in state.setdefault("files", {}):
+                return self._send(422, {"message": "Invalid request. \"sha\" wasn't supplied."})
+            if state.get("fail_once"):
+                state["fail_once"] = False
+                return self._send(409, {"message": "conflict"})
+            state["files"][path] = body
+            self._send(201, {})
+
+    srv = HTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv
+
+
+def test_github_api_transport_uploads_artefacts_idempotently(monkeypatch):
+    import base64
+    state = {"fail_once": True}
+    srv = _fake_github(state)
+    try:
+        monkeypatch.setenv("AUTOMAGIX_GITHUB_API", f"http://127.0.0.1:{srv.server_port}")
+        monkeypatch.setenv("AUTOMAGIX_LOGGING_TOKEN", "ghp_test_token")
+        monkeypatch.setenv("AUTOMAGIX_LOG_TRANSPORT", "github-api")
+        monkeypatch.setenv("AUTOMAGIX_LOG_REMOTE", "o/logs")
+        p = Paths().ensure()
+        assert transport.emit("run", "auto-a", "RID1", {"hello": "world"}, p) is True      # branch created, 409 retried
+        assert transport.emit("run", "auto-a", "RID1", {"hello": "world"}, p) is True      # duplicate -> idempotent
+        files = state["files"]
+        assert list(files) == ["ingest/pilot/run/auto-a/RID1.json"]
+        assert json.loads(base64.b64decode(files["ingest/pilot/run/auto-a/RID1.json"]["content"])) == {"hello": "world"}
+        assert files["ingest/pilot/run/auto-a/RID1.json"]["branch"] == "ingest"
+        assert set(state["auth"]) == {"Bearer ghp_test_token"}
+    finally:
+        srv.shutdown()
+
+
+def test_github_api_transport_without_token_spools(monkeypatch):
+    monkeypatch.setenv("AUTOMAGIX_LOG_TRANSPORT", "github-api")
+    monkeypatch.setenv("AUTOMAGIX_LOG_REMOTE", "o/logs")
+    monkeypatch.setenv("AUTOMAGIX_GITHUB_API", "http://127.0.0.1:9")
+    p = Paths().ensure()
+    assert transport.emit("run", "a", "R1", {"x": 1}, p) is False
+    assert len(list(p.spool.glob("*.json"))) == 1
+
+
+def test_transport_is_inferred_from_the_remote_shape():
+    from wrapper_core.paths import platform_config
+    import os
+    for remote, want in [("git@github.com:o/r.git", "git-ssh"), ("o/logs", "github-api"), ("C:/logs", "dir"), ("/var/logs", "dir"), ("local", "dir")]:
+        os.environ["AUTOMAGIX_LOG_REMOTE"] = remote
+        os.environ.pop("AUTOMAGIX_LOG_TRANSPORT", None)
+        assert platform_config(Paths())["log_transport"] == want, remote

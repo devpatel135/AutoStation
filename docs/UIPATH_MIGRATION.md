@@ -96,7 +96,7 @@ and poll its status.
 
 * **Classification and field extraction** = LLM *pattern 1*: `wrapper.llm_call(prompt, context=document_text, schema={...}, caller=...)`.
   The document text goes in `context` only (never in the prompt), the answer is schema-validated, and **it is never trusted blindly**:
-  re-check that every extracted value actually appears in the source text (see `components/automations/automation-invoice-router/router/extract.py`),
+  re-check that every extracted value actually appears in the source text (see `components/examples/automation-invoice-router/router/extract.py`),
   and route money/records with deterministic rules.
 * **Summaries/anomaly flags** = *pattern 2* with a deterministic fallback when the LLM is unavailable (`llm_call` returns `None`).
 * **Data classification gate:** set `data_classification` and `llm_allowed_classification` honestly; above the approved level the platform withholds the

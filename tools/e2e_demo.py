@@ -102,12 +102,12 @@ def main() -> int:
     packaged: dict[str, dict] = {}
     for kind, name, src, ver in [("component", "wrapper-core", stage / "wrapper-core", (C / "wrapper-core" / "VERSION").read_text().strip()),
                                  ("component", "execution-framework", stage / "execution-framework", (C / "execution-framework" / "VERSION").read_text().strip())] + \
-                                [("automation", n, C / "automations" / n, miniyaml.load(C / "automations" / n / "automation.yaml")["version"]) for n in AUTOMATIONS]:
+                                [("automation", n, C / "examples" / n, miniyaml.load(C / "examples" / n / "automation.yaml")["version"]) for n in AUTOMATIONS]:
         r = sh([PY, package, kind, name, src, "--version", ver, "--out", pkg_dir])
         info = json.loads(r.stdout.strip().splitlines()[-1])
         packaged[name] = {"kind": kind, "version": ver, "zip": pkg_dir / info["url"], **info}
         print(f"   {name} {ver}  sha256={info['sha256'][:12]}…  {info.get('size', '?')} bytes")
-    r2 = sh([PY, package, "automation", "automation-hello-world", C / "automations" / "automation-hello-world",
+    r2 = sh([PY, package, "automation", "automation-hello-world", C / "examples" / "automation-hello-world",
              "--version", "1.0.0", "--out", out / "repro"])
     expect(json.loads(r2.stdout.strip().splitlines()[-1])["sha256"] == packaged["automation-hello-world"]["sha256"], "packaging is reproducible (same inputs -> same sha256)")
 
@@ -158,7 +158,7 @@ def main() -> int:
     m["automations"]["automation-notifier"]["schedule"]["slots"] = [
         {"id": "hourly", "type": "hourly", "every": 1, "params": {"signals_url": str(out / "signals.json"), "channel": "outbox", "min_severity": "medium"}}]
     manifest.write_text(miniyaml.dumps(m), encoding="utf-8")
-    shutil.copytree(C / "automations" / "automation-invoice-router" / "sample_data" / "inbox", out / "inbox")
+    shutil.copytree(C / "examples" / "automation-invoice-router" / "sample_data" / "inbox", out / "inbox")
     v = reg("validate", "--artifacts", reg_dir, check=False)
     expect(v.returncode == 0, "registry validate passes (ring order, sha256, compatibility)\n" + (v.stdout + v.stderr).strip()[-400:] if v.returncode else "registry validate passes (ring order, sha256, compatibility)")
 

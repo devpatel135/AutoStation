@@ -30,7 +30,6 @@ the enterprise option if you later move the control plane to GitLab; the manifes
 | `release.yml` | push to `main` touching `components/**`, manual | Runs the tests, `tools/build_registry.py`, publishes new package zips to `registry-artifacts`, opens/refreshes PR `registry/auto-dev-ring` | `OPS_BOT_TOKEN` (optional, see below) |
 | `site.yml` | push to `main`, every 6 h, after `installer-dev`, manual | Builds registry + site, validates links/install pages, deploys to Pages | Pages source = GitHub Actions |
 | `ops-action.yml` | manual (admin panel / `gh workflow run`) | Applies pause/resume/promote/rollback/fleet-pause/fleet-resume as a **pull request**; `trigger-add` to the `triggers` branch | `OPS_BOT_TOKEN` (optional), `Allow GitHub Actions to create pull requests` |
-| `analytics.yml` | every 30 min, manual — **off by default** | Ingests run logs from the private logging repo, computes signals, diagnoses, alerts, builds dashboards | variables/secrets below |
 | `codeql.yml` | push, PR, weekly | CodeQL for Python and JavaScript | nothing |
 | `dependabot.yml` | weekly | Updates for Actions, npm (framework), pip (wrapper-core, builder image) | nothing |
 
@@ -43,7 +42,8 @@ the enterprise option if you later move the control plane to GitLab; the manifes
 | `LLM_KEY` | secret | analytics | LLM API key for failure diagnosis (CI side only; endpoints never see it) |
 | `JIRA_TOKEN` | secret | analytics | Jira API token (alert channel `jira`) |
 | `TEAMS_WEBHOOK_URL` | secret | analytics | Teams incoming webhook (alert channel `teams`) |
-| `AUTOSTATION_LIVE_ANALYTICS` | variable | analytics | `true` enables the workflow at all |
+| `AUTOSTATION_LOG_REPO` | variable (optional) | installers, site | `owner/name` of the private logs repo (default `<owner>/AutoStation-logs`) |
+| `LOGGING_TOKEN` | secret | installers, site | fine-grained PAT (contents rw on `AutoStation-logs`): turns on connected installers and live dashboards, see [LIVE_LOGGING](LIVE_LOGGING.md) |
 | `AUTOSTATION_LOGGING_REPO` | variable | analytics | `owner/name` of the private logging repo |
 | `AUTOSTATION_ALLOW_PUBLIC_DASHBOARD` | variable | analytics | `true` lets analytics run in a **public** repo (see data exposure below) |
 | `AUTOSTATION_LIVE_TO_PAGES` | variable | analytics, site | `true`: analytics builds the full site with LIVE data and deploys it; `site.yml` then stands down |
@@ -115,7 +115,7 @@ of `installers-latest`. Signed production installers use the GitLab pipeline (`-
 Run logs and dashboards describe your fleet: host names, item ids (invoice numbers...), error text, LLM diagnoses, evidence screenshots. In a **public**
 repository, workflow artifacts and GitHub Pages are public. Therefore:
 
-* `analytics.yml` is **off** unless `AUTOSTATION_LIVE_ANALYTICS=true`, and it **refuses to run in a public repo** unless `AUTOSTATION_ALLOW_PUBLIC_DASHBOARD=true`.
+* Live analytics now runs inside `site.yml` (every 30 minutes, when `LOGGING_TOKEN` exists). GitHub Pages is public: see the exposure notes in [LIVE_LOGGING](LIVE_LOGGING.md).
 * In a private repository its default output is a **workflow artifact** (`fleet-dashboard`), visible only to people with repository access.
 * It never publishes to Pages unless `AUTOSTATION_LIVE_TO_PAGES=true`. Pages of a private repository are public on most plans unless you use GitHub Enterprise Cloud's
   private Pages access control - verify that before enabling, or keep the dashboards inside the logging repository / an internal host instead.

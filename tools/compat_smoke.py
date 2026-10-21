@@ -48,7 +48,7 @@ def main() -> int:
     else:
         print(f"(no manifest at {mpath}; skipping manifest checks)")
 
-    for d in sorted((C / "automations").iterdir()):
+    for d in sorted(list((C / "automations").iterdir()) + list((C / "examples").iterdir())):
         desc_file = d / "automation.yaml"
         if not desc_file.exists():
             continue
@@ -58,7 +58,7 @@ def main() -> int:
         if not versions.satisfies(fw, req.get("execution_framework")):
             problems.append(f"{d.name}: requires execution_framework {req.get('execution_framework')} but checkout is {fw}")
 
-    r = run_payload(C / "automations" / "automation-hello-world", {"simulate": "network"},
+    r = run_payload(C / "examples" / "automation-hello-world", {"simulate": "network"},
                     error_handling={"max_retries": 3, "network_retry_wait_s": 0, "backoff_multiplier": 1.0, "skip_on_data_error": True})
     ok = r.record.get("status") == "success" and r.record["items"]["success"] == 5 and bool(r.events("retry_event")) and r.record.get("synopsis")
     print(f"lifecycle smoke: status={r.record.get('status')} items={r.record.get('items')} retries={len(r.events('retry_event'))}")

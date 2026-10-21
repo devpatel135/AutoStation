@@ -52,7 +52,7 @@ PS_SCRIPTS = HERE.parent / "installer" / "scripts"
 STAGE_SCRIPTS = ["install-check.ps1", "protect-secret.ps1", "restrict-acl.ps1", "set-credential.ps1",
                  "configure-python.ps1", "write-platform-config.ps1", "first-run.ps1"]
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
-LOG_REMOTE_RE = re.compile(r"^(git@[A-Za-z0-9.-]+:[\w./~-]+|ssh://[\w.@:/~-]+)$")
+LOG_REMOTE_RE = re.compile(r"^(git@[A-Za-z0-9.-]+:[\w./~-]+|ssh://[\w.@:/~-]+|[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)$")  # ssh remote, or owner/repo (github-api)
 URL_RE = re.compile(r"^(https?://|mock://)\S+$")
 RINGS = ("dev", "pilot", "broad")
 
@@ -74,6 +74,7 @@ class Config:
     publisher: str = "AUTOMAGIX"
     icon: str = ""
     wrapper_core_zip: str = ""
+    framework_zip: str = ""       # optional: execution-framework (Node + node_modules) bundled in the installer
     automation_zip: str = ""      # optional: payload bundled INSIDE the installer (offline-capable first install)
     python_embed_zip: str = ""
     known_hosts_file: str = ""
@@ -124,7 +125,7 @@ def load_config(src: Path | dict, base_dir: Path | None = None) -> Config:
     return Config(automation=name, version=version, registry_url=registry, log_remote=log_remote, ring=ring,
                   llm_endpoint=llm, llm_model=_clean("llm_model", raw.get("llm_model", ""), allow_empty=True),
                   publisher=_clean("publisher", raw.get("publisher", "AUTOMAGIX")), icon=raw.get("icon", "") or "",
-                  wrapper_core_zip=raw.get("wrapper_core_zip", "") or "", automation_zip=raw.get("automation_zip", "") or "", python_embed_zip=raw.get("python_embed_zip", "") or "",
+                  wrapper_core_zip=raw.get("wrapper_core_zip", "") or "", automation_zip=raw.get("automation_zip", "") or "", framework_zip=raw.get("framework_zip", "") or "", python_embed_zip=raw.get("python_embed_zip", "") or "",
                   known_hosts_file=raw.get("known_hosts_file", "") or "", base_dir=base)
 
 
@@ -154,6 +155,7 @@ def render_nsi(cfg: Config, wrapper_version: str, flags: dict[str, bool], outfil
         "PUBLISHER": cfg.publisher, "DEFAULT_RING": cfg.ring, "REGISTRY_URL": cfg.registry_url, "LOG_REMOTE": cfg.log_remote,
         "LLM_ENDPOINT": cfg.llm_endpoint, "LLM_MODEL": cfg.llm_model, "WRAPPER_VERSION": numeric_version(wrapper_version),
         "STAGE_DIR": stage_dir, "OUTFILE": outfile, "ICON": icon,
+        "GIT_ARG": "" if cfg.log_remote.startswith(("git@", "ssh://")) else "-SkipGit",
     }
     out = tpl
     for key, val in values.items():
@@ -220,7 +222,7 @@ def stage_build(cfg: Config, stage: Path, env: dict, allow_missing_secrets: bool
     if stage.exists():
         shutil.rmtree(stage)
     stage.mkdir(parents=True)
-    flags = {"HAVE_PAYLOAD": False, "HAVE_ICON": False, "HAVE_PYTHON_EMBED": False, "HAVE_SSH_KEY": False, "HAVE_TOKEN": False, "HAVE_KNOWN_HOSTS": False}
+    flags = {"HAVE_FRAMEWORK": False, "HAVE_LOG_TOKEN": False, "HAVE_PAYLOAD": False, "HAVE_ICON": False, "HAVE_PYTHON_EMBED": False, "HAVE_SSH_KEY": False, "HAVE_TOKEN": False, "HAVE_KNOWN_HOSTS": False}
 
     # scripts
     (stage / "scripts").mkdir()
@@ -242,6 +244,16 @@ def stage_build(cfg: Config, stage: Path, env: dict, allow_missing_secrets: bool
         raise BuildError("wrapper_core_zip must contain VERSION and wrapper_core/__init__.py (use package.py)")
     wrapper_version = vfile.read_text(encoding="utf-8").strip()
     versions.parse(wrapper_version)
+
+    # bundled execution-framework (Node runtime + playwright-core): lets browser automations run with nothing pre-installed
+    if cfg.framework_zip:
+        fz = _resolve(cfg, cfg.framework_zip)
+        if not fz.is_file():
+            raise BuildError(f"framework_zip not found: {fz}")
+        safe_extract(fz, stage / "execution-framework")
+        if not (stage / "execution-framework" / "VERSION").exists() or not (stage / "execution-framework" / "index.js").exists():
+            raise BuildError("framework_zip must contain VERSION and index.js (use package.py component execution-framework ...)")
+        flags["HAVE_FRAMEWORK"] = True
 
     # bundled automation payload: the installer itself is the trust root, so a first install works with no registry
     if cfg.automation_zip:
@@ -292,6 +304,13 @@ def stage_build(cfg: Config, stage: Path, env: dict, allow_missing_secrets: bool
             raise BuildError("LOGGING_SSH_KEY_FILE does not look like a private key")
         _write_private(stage / "secrets" / "logging_key", key.rstrip("\n") + "\n")
         flags["HAVE_SSH_KEY"] = True
+    log_token = _read_env_file(env, "LOGGING_TOKEN_FILE", "LOGGING_TOKEN")
+    if log_token is not None:
+        log_token = log_token.strip()
+        if not log_token or "\n" in log_token:
+            raise BuildError("logging token must be a single non-empty line")
+        _write_private(stage / "secrets" / "logging_token", log_token)
+        flags["HAVE_LOG_TOKEN"] = True
     if token is not None:
         token = token.strip()
         if not token or "\n" in token:

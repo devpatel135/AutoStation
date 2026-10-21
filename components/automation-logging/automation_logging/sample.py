@@ -31,7 +31,7 @@ def build(now: datetime | None = None, seed: int = 7, days: int = 14) -> tuple[l
                                                                     "1.1.0": {"url": "a-1.1.0.zip", "sha256": "2" * 64}},
                                                           slots=[{"id": "daily", "type": "daily", "time": "09:00"}], baseline=180000,
                                                           catalog={"minutes_per_item": 4}),
-        "automation-portal-report": syn.automation_entry("Quarterly compliance report submission on portal Y", "compliance-ops@example.com",
+        "automation-certification-site": syn.automation_entry("Quarterly compliance report submission on portal Y", "compliance-ops@example.com",
                                                          version="2.0.1", slots=[{"id": "daily", "type": "daily", "time": "07:30"}],
                                                          baseline=300000, classification="confidential", llm_allowed="internal",
                                                          maintenance=[{"daily": "02:00-04:00"}], catalog={"minutes_per_item": 12}),
@@ -47,7 +47,7 @@ def build(now: datetime | None = None, seed: int = 7, days: int = 14) -> tuple[l
         base = today - timedelta(days=day_offset) + timedelta(hours=hh, minutes=mm)
         return base + timedelta(seconds=rnd.randint(0, 90) if jitter else 0)
 
-    hosts_for = {"automation-invoice-router": HOSTS[:3], "automation-portal-report": HOSTS[3:5], "automation-example-hello": HOSTS[:2] + HOSTS[5:],
+    hosts_for = {"automation-invoice-router": HOSTS[:3], "automation-certification-site": HOSTS[3:5], "automation-example-hello": HOSTS[:2] + HOSTS[5:],
                  "automation-notifier": HOSTS[:1]}
     for a, hs in hosts_for.items():
         arts.append(syn.lifecycle_record("installed", a, hs[0], at(days, 8)))
@@ -75,14 +75,14 @@ def build(now: datetime | None = None, seed: int = 7, days: int = 14) -> tuple[l
             r = make("automation-invoice-router", host, start, version="1.2.0", ring="pilot" if hi else "broad",
                      duration_ms=rnd.randint(150000, 190000), items=items, retries=retries, params={"date_range": "yesterday"})
             by_key.setdefault(("automation-invoice-router", host), []).append(r)
-        for hi, host in enumerate(hosts_for["automation-portal-report"]):
+        for hi, host in enumerate(hosts_for["automation-certification-site"]):
             start = at(d, 7, 30)
             if start > now - timedelta(minutes=30) or d == 2:   # nobody ran on day -2: MISSED
                 continue
             items = [(f"RPT-{d}-{i}", "success", rnd.randint(8000, 15000), None) for i in range(rnd.randint(4, 8))]
-            r = make("automation-portal-report", host, start, version="2.0.1", duration_ms=rnd.randint(240000, 310000), items=items,
+            r = make("automation-certification-site", host, start, version="2.0.1", duration_ms=rnd.randint(240000, 310000), items=items,
                      params={"quarter": "Q3"})
-            by_key.setdefault(("automation-portal-report", host), []).append(r)
+            by_key.setdefault(("automation-certification-site", host), []).append(r)
         for host in hosts_for["automation-example-hello"]:
             if host == "VDI-0306" and d < 3:
                 continue  # this machine went dark 3 days ago -> SILENT
@@ -113,22 +113,22 @@ def build(now: datetime | None = None, seed: int = 7, days: int = 14) -> tuple[l
             done += 1
     r["items"] = {"total": r["items"]["total"], "success": r["items"]["success"] - done, "skipped": r["items"]["skipped"], "failed": done}
     r.update(status="partial", synopsis=f"Routed {r['items']['success']} invoices to AP; {done} failed with missing vendor data and need review.")
-    r = latest("automation-portal-report", HOSTS[3])[0]     # hung then killed
+    r = latest("automation-certification-site", HOSTS[3])[0]     # hung then killed
     r.update(status="hung", exit_code=1, duration_ms=3_600_000, hung_detected=True,
              error={"category": "SYSTEM_UNAVAILABLE", "type": "Escalation", "message": "run exceeded timeout_s and was killed", "attempts": 1},
-             synopsis="automation-portal-report hung waiting on the portal and was killed after 60 minutes.")
-    r = latest("automation-portal-report", HOSTS[4])[0]     # slow + stuck on an old version, self-heal failing
+             synopsis="automation-certification-site hung waiting on the portal and was killed after 60 minutes.")
+    r = latest("automation-certification-site", HOSTS[4])[0]     # slow + stuck on an old version, self-heal failing
     r.update(version="2.0.0", duration_ms=900_000, self_heal_errors=None)
     r["automation_version"] = "2.0.0"
-    r["self_heal"] = {"installed": [], "offline": False, "errors": ["automation-portal-report 2.0.1: sha256 mismatch (staged download corrupt)"]}
-    r["synopsis"] = "automation-portal-report finished slowly (15m) on version 2.0.0; self-heal could not install 2.0.1."
+    r["self_heal"] = {"installed": [], "offline": False, "errors": ["automation-certification-site 2.0.1: sha256 mismatch (staged download corrupt)"]}
+    r["synopsis"] = "automation-certification-site finished slowly (15m) on version 2.0.0; self-heal could not install 2.0.1."
     # UNEXPECTED: ran inside the 02:00-04:00 maintenance window yesterday
-    make("automation-portal-report", HOSTS[4], at(1, 2, 30), version="2.0.1", duration_ms=250000, items=[("RPT-X", "success", 9000, None)])
+    make("automation-certification-site", HOSTS[4], at(1, 2, 30), version="2.0.1", duration_ms=250000, items=[("RPT-X", "success", 9000, None)])
 
     # heartbeats: daily login pings; VDI-0306 stops 3 days ago
-    ver = {"automation-portal-report": "2.0.1", "automation-invoice-router": "1.2.0"}
+    ver = {"automation-certification-site": "2.0.1", "automation-invoice-router": "1.2.0"}
     for host in HOSTS:
-        autos_on = {a: ("2.0.0" if (a == "automation-portal-report" and host == HOSTS[4]) else ver.get(a, "1.0.0" if a != "automation-notifier" else "0.3.0"))
+        autos_on = {a: ("2.0.0" if (a == "automation-certification-site" and host == HOSTS[4]) else ver.get(a, "1.0.0" if a != "automation-notifier" else "0.3.0"))
                     for a, hs in hosts_for.items() if host in hs}
         last_day = 3 if host == "VDI-0306" else 0
         for d in range(days, last_day - 1, -1):

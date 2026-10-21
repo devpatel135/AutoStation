@@ -23,7 +23,7 @@ components/
   automation-registry/   manifest.yaml + schema + operator CLI (promote/pause/rollback/…) + Pages portal:
                          catalog, installers, fleet admin panel (MR/pipeline generator), governance, compatibility.
   automations/           hello-world (test) · invoice-router (headless + LLM patterns 1&2) ·
-                         portal-report (Playwright + self-healing) · notifier (dog-fooded alerting)
+                         (published: certification-site; reference examples live in components/examples)
 tools/                   new_automation.py scaffolder · test_all.py · e2e_demo.py · compat_smoke.py
 docs/                    SPEC · AUTOMATION_STANDARD · GOVERNANCE · RUNBOOKS · SECURITY · API reference · getting started
 ```
@@ -31,16 +31,16 @@ docs/                    SPEC · AUTOMATION_STANDARD · GOVERNANCE · RUNBOOKS �
 In production each `components/*` directory is its own GitLab project (each carries its own `.gitlab-ci.yml`;
 `git subtree split --prefix=components/<name>` gives you the history-preserving split).
 
-## Download an installer (real `.exe`, no admin)
+## Download the installer (real `.exe`, no admin, nothing to install first)
 
-Every automation has a self-contained per-user installer (bundled Python + payload; works before any server exists):
+**[automation-certification-site-setup.exe](https://github.com/devpatel135/AutoStation/releases/download/installers-latest/automation-certification-site-setup.exe)**
+· [sha256](https://github.com/devpatel135/AutoStation/releases/download/installers-latest/automation-certification-site-setup.exe.sha256)
+· [install page](https://devpatel135.github.io/AutoStation/install/automation-certification-site.html)
 
-| Automation | Download |
-|---|---|
-| automation-hello-world | [setup.exe](https://github.com/devpatel135/AutoStation/releases/download/installers-latest/automation-hello-world-setup.exe) · [sha256](https://github.com/devpatel135/AutoStation/releases/download/installers-latest/automation-hello-world-setup.exe.sha256) |
-| automation-invoice-router | [setup.exe](https://github.com/devpatel135/AutoStation/releases/download/installers-latest/automation-invoice-router-setup.exe) · [sha256](https://github.com/devpatel135/AutoStation/releases/download/installers-latest/automation-invoice-router-setup.exe.sha256) |
-| automation-notifier | [setup.exe](https://github.com/devpatel135/AutoStation/releases/download/installers-latest/automation-notifier-setup.exe) · [sha256](https://github.com/devpatel135/AutoStation/releases/download/installers-latest/automation-notifier-setup.exe.sha256) |
-| automation-portal-report (Deloitte develop login example) | [setup.exe](https://github.com/devpatel135/AutoStation/releases/download/installers-latest/automation-portal-report-setup.exe) · [sha256](https://github.com/devpatel135/AutoStation/releases/download/installers-latest/automation-portal-report-setup.exe.sha256) |
+The installer bundles Python, wrapper-core, a Node runtime with Playwright and the automation, registers its schedule, and runs it.
+It opens `https://develop.deloitte.com/ai-season-of-certifications#subpage/res`, clicks the `devpatel@deloitte.com` Microsoft account
+tile and stops. Every run is logged and every run/sign-in checks GitHub for a newer version (self-heal). One-time setup for live
+dashboards: [`docs/LIVE_LOGGING.md`](docs/LIVE_LOGGING.md).
 
 Unsigned builds trigger Windows SmartScreen ("More info → Run anyway"); compare the SHA-256 first. Install center with per-automation
 pages: https://devpatel135.github.io/AutoStation/install/ . Troubleshoot any machine: `python -m wrapper_core doctor`.
@@ -52,7 +52,7 @@ Replacing UiPath? Start at [`docs/UIPATH_PARITY.md`](docs/UIPATH_PARITY.md) and 
 python -m pip install pytest pydantic jinja2
 python tools/test_all.py                                   # all suites
 python tools/e2e_demo.py --out e2e-out                     # whole platform end to end → e2e-out/public/index.html
-python -m wrapper_core dev components/automations/automation-hello-world --param simulate=network
+python -m wrapper_core dev components/examples/automation-hello-world --param simulate=network
 python tools/new_automation.py automation-my-thing --description "…" --owner me-team@example.com
 ```
 

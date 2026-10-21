@@ -1,24 +1,25 @@
 name: site
 
 # Builds the whole site (landing, install center, docs, registry portal + admin panel, dashboards, program, migration) and
-# deploys it to GitHub Pages. It also publishes the registry (manifest.yaml + artifacts) that endpoints self-heal from:
-# https://<owner>.github.io/<repo>/registry/
-# One-time setup: Settings -> Pages -> Build and deployment -> Source: GitHub Actions.
+# deploys it to GitHub Pages. It also publishes the registry (manifest.yaml + artifacts) that installed machines self-heal from:
+#   https://<owner>.github.io/<repo>/registry/
+#
+# LIVE DATA: the dashboards are built from the real run logs that installed automations push to the private logs repo
+# <owner>/AutoStation-logs (branch `ingest`). That needs the repository secret LOGGING_TOKEN (a fine-grained PAT, contents
+# read+write on the logs repo only; see docs/LIVE_LOGGING.md). Every 30 minutes and after every release/installer build
+# this workflow ingests the logs, recomputes the compliance signals and republishes. Without the secret the dashboards show
+# an honest "waiting for the first run" state - never demo data.
+# NOTE: GitHub Pages sites are public; run logs contain host names, user hashes and automation events (never secrets).
 on:
   push:
     branches: [main]
   schedule:
-    - cron: "17 */6 * * *"
+    - cron: "*/30 * * * *"
   workflow_run:
-    workflows: [installers]
+    workflows: [installers, release]
     types: [completed]
     branches: [main]
   workflow_dispatch:
-    inputs:
-      data:
-        description: "Dashboard data: demo (synthetic, labelled) or none (placeholders)"
-        required: false
-        default: demo
 
 permissions:
   contents: read
@@ -31,12 +32,12 @@ concurrency:
 
 jobs:
   build:
-    # when live analytics publishes to Pages (analytics.yml), this workflow stays out of its way
-    if: ${{ vars.AUTOSTATION_LIVE_TO_PAGES != 'true' && (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success') }}
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     env:
-      SITE_DATA: ${{ inputs.data || vars.AUTOSTATION_SITE_DATA || 'demo' }}
       GH_TOKEN: ${{ github.token }}
+      LOG_REPO: ${{ vars.AUTOSTATION_LOG_REPO || format('{0}/AutoStation-logs', github.repository_owner) }}
+      LOGGING_TOKEN: ${{ secrets.LOGGING_TOKEN }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -51,7 +52,7 @@ jobs:
             echo "exists=true" >> "$GITHUB_OUTPUT"
           else
             echo "exists=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::no registry-artifacts branch yet - run the 'release' workflow once (see docs/PIPELINES.md)"
+            echo "::notice::no registry-artifacts branch yet - the release workflow creates it"
           fi
       - name: Build the registry from main + published artifacts
         id: registry
@@ -66,11 +67,35 @@ jobs:
             cp ../tr/components/automation-registry/triggers.json registry-out/triggers.json
             echo "overlaid triggers.json from the triggers branch"
           fi
+      - name: Fetch the live run logs (private logs repo, branch ingest)
+        id: logs
+        run: |
+          if [ -z "$LOGGING_TOKEN" ]; then
+            echo "live=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::LOGGING_TOKEN secret not set - dashboards will show the waiting state (see docs/LIVE_LOGGING.md)"
+            exit 0
+          fi
+          if git clone --quiet --depth 1 --branch ingest "https://x-access-token:${LOGGING_TOKEN}@github.com/${LOG_REPO}.git" ../logs 2>/dev/null; then
+            echo "live=true" >> "$GITHUB_OUTPUT"
+            echo "fetched $(find ../logs/ingest -name '*.json' 2>/dev/null | wc -l) log artefact(s) from ${LOG_REPO}"
+          else
+            echo "live=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::${LOG_REPO} has no 'ingest' branch yet (no installed automation has reported) - waiting state"
+          fi
+      - name: Ingest, analyse, diagnose and build the live data
+        if: ${{ steps.logs.outputs.live == 'true' }}
+        run: |
+          mkdir -p live
+          cp components/automation-registry/manifest.yaml live/manifest.yaml
+          python -m automation_logging ingest --source dir --from "$GITHUB_WORKSPACE/../logs" --out live/archive
+        working-directory: components/automation-logging
+        env:
+          PYTHONPATH: ${{ github.workspace }}/components/wrapper-core
       - name: Build the site
         run: |
           ARGS="--out site --fetch-installer-sha"
           if [ "${{ steps.registry.outcome }}" = "success" ]; then ARGS="$ARGS --registry registry-out"; fi
-          if [ "$SITE_DATA" = "demo" ]; then ARGS="$ARGS --demo"; fi
+          if [ "${{ steps.logs.outputs.live }}" = "true" ]; then ARGS="$ARGS --live-data components/automation-logging/live"; fi
           python tools/build_site.py $ARGS
       - name: Check the generated site (links, install pages)
         run: python tools/check_site.py site

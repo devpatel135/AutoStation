@@ -123,7 +123,7 @@ def sha256_file(p: Path) -> str:
 def _stage_framework(src: Path, tmp: Path) -> Path:
     """Ship the runtime, not the repo: no tests/tools/CI files. node_modules only when a lockfile pins it (determinism)."""
     dest = tmp / "execution-framework"
-    has_lock = (src / "package-lock.json").is_file()
+    has_lock = (src / "package-lock.json").is_file() or (src / "node_modules" / "playwright-core" / "package.json").is_file()  # exact-pinned, dependency-free
 
     def ignore(d, names):
         skip = {n for n in names if n in FRAMEWORK_EXCLUDE_FILES}
@@ -151,7 +151,7 @@ def _requires(desc: dict | None) -> dict:
 
 def build(repo: Path, manifest_path: Path, out: Path, artifacts_dir: Path | None = None, bootstrap: bool = False,
           bootstrap_rings: str = "all", default_owner: str = "automation-platform@example.com",
-          write_manifest: Path | None = None, new_dir: Path | None = None) -> dict:
+          write_manifest: Path | None = None, new_dir: Path | None = None, auto_promote: bool = False) -> dict:
     repo, manifest_path, out = Path(repo), Path(manifest_path), Path(out)
     pkg = _package_module()
     m = copy.deepcopy(store.load_manifest(manifest_path))
@@ -238,6 +238,11 @@ def build(repo: Path, manifest_path: Path, out: Path, artifacts_dir: Path | None
                     res = ops.add_version(m, s.name, s.version, rec, kind=s.kind)
                     added.append(f"{s.name} {s.version} -> dev")
                     _ = res
+                    if auto_promote:
+                        # continuous delivery for a small fleet: every ring follows main (pilot, then broad)
+                        for ring in ("pilot", "broad"):
+                            ops.promote(m, s.name, ring, s.version)
+                        added.append(f"{s.name} {s.version} -> pilot, broad (auto-promote)")
             except OpError as exc:
                 errors.append(f"{s.name} {s.version}: {exc}")
 
@@ -271,12 +276,14 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--write-manifest", default=None, help="write the regenerated manifest back to this path (when changed and valid)")
     ap.add_argument("--bootstrap", action="store_true")
     ap.add_argument("--bootstrap-rings", choices=["all", "dev"], default="all")
+    ap.add_argument("--auto-promote", action="store_true", help="new versions go to dev, pilot AND broad immediately (no promotion PRs)")
     ap.add_argument("--default-owner", default="automation-platform@example.com")
     ap.add_argument("--github-output", default=os.environ.get("GITHUB_OUTPUT"), help="append changed=true/false, new=N to this file (GitHub Actions)")
     a = ap.parse_args(argv)
     manifest = Path(a.manifest) if a.manifest else Path(a.repo) / "components" / "automation-registry" / "manifest.yaml"
     res = build(Path(a.repo), manifest, Path(a.out), Path(a.artifacts_dir) if a.artifacts_dir else None, a.bootstrap, a.bootstrap_rings,
-                a.default_owner, Path(a.write_manifest) if a.write_manifest else None, Path(a.new_dir) if a.new_dir else None)
+                a.default_owner, Path(a.write_manifest) if a.write_manifest else None, Path(a.new_dir) if a.new_dir else None,
+                a.auto_promote)
     for line in res["added"]:
         print("added  ", line)
     for line in res["reused"]:

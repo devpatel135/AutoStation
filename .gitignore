@@ -12,3 +12,4 @@ dist/
 *.key
 *.pem
 id_rsa*
+components/execution-framework/node/

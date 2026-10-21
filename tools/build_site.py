@@ -182,10 +182,12 @@ def build(out: Path, repo: Path = ROOT, *, registry: Path | None = None, manifes
         for e in dash_info.get("errors", []):
             cfg.notes.append(f"dashboard stage {e.get('stage')}: {e.get('error')}")
     else:
-        msg = ("<p>No fleet data has been published yet, so there is nothing to chart. Endpoints push run logs to the logging repository; the analytics workflow turns them "
-               "into this dashboard.</p><ol><li>Install an automation (see the <a href=\"../install/index.html\">install center</a>).</li>"
-               "<li>Enable live analytics (<code>AUTOSTATION_LIVE_ANALYTICS</code>, see <a href=\"../docs/PIPELINES.html\">PIPELINES</a>).</li></ol>"
-               "<p>Want to see what it looks like? Build the site with <code>--demo</code>.</p>")
+        msg = ("<p><strong>Waiting for the first run.</strong> Nothing is charted yet because no installed automation has reported. "
+               "Installed automations push every run's log, heartbeat and failure evidence to the private logs repository; this site ingests it "
+               "every 30 minutes and after every release.</p><ol><li>Install the automation from the <a href=\"../install/index.html\">install center</a> "
+               "(use the connected installer) and let it run once.</li>"
+               "<li>One-time setup if you have not done it: <a href=\"../docs/LIVE_LOGGING.html\">Live logging setup</a> (create the private logs repo and add the "
+               "<code>LOGGING_TOKEN</code> secret).</li></ol>")
         for rel, title, active in (("dashboard/index.html", "Fleet dashboard", "dashboard"), ("program/index.html", "Program dashboard", "program")):
             pages.append(site_landing.build_placeholder(out, cfg, rel, title, active, msg))
 

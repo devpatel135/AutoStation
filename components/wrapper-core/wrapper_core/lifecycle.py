@@ -54,9 +54,19 @@ def maintain(paths: Paths | None = None, scheduler: Scheduler | None = None) -> 
         if not entry.get("schedule"):
             continue
         touched[name] = sched.register(name, entry.get("schedule"))
+    # ping the registry at every sign-in: pick up new versions / the kill-switch without waiting for the next scheduled run
+    updated: dict[str, list[str]] = {}
+    for name in sorted(selfheal.read_installed(paths)["automations"]):
+        try:
+            heal = selfheal.run(paths, cfg, name)
+            if heal.installed:
+                updated[name] = heal.installed
+                send_lifecycle(paths, "updated", name, {"installed": heal.installed, "via": "login-check"})
+        except Exception as exc:  # noqa: BLE001 - an update check must never break sign-in
+            log.warning("update check for %s failed: %s", name, exc)
     transport.flush_spool(paths)
     send_heartbeat(paths, "login")
-    return {"touched": touched}
+    return {"touched": touched, "updated": updated}
 
 
 def _other_automations_need(paths: Paths, removed: str) -> bool:

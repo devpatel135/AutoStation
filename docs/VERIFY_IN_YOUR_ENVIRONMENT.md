@@ -32,14 +32,14 @@ cd components/execution-framework
 node --version                     # >= 18
 find . -name "*.js" -not -path "./node_modules/*" -print0 | xargs -0 -n1 node --check
 node --test test/                  # unit tests (pure logic + fakes; no browser needed)
-cd ../automations/automation-portal-report && node --test test/
+cd ../automations/automation-certification-site && node --test test/
 ```
 Good: no syntax errors, all tests pass. If a test fails it is a real defect in code that could not be executed at authoring
 time — fix it before continuing. Then the live check (needs Edge and `npm ci` from your internal mirror):
 ```bash
 cd components/execution-framework && npm ci --omit=dev
-node ../automations/automation-portal-report/demo/server.js &      # local demo portal
-python -m wrapper_core dev ../automations/automation-portal-report --param portal_url=http://127.0.0.1:8099/v2.html
+node ../automations/automation-certification-site/demo/server.js &      # local demo portal
+python -m wrapper_core dev ../automations/automation-certification-site --param portal_url=http://127.0.0.1:8099/v2.html
 ```
 Good: run status `success`; the `selector_healed` event appears for the changed button (v2 page) and the LLM mock proposes
 the new selector.

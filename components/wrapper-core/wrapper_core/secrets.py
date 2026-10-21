@@ -197,6 +197,21 @@ def get_registry_token(paths: Paths | None = None) -> str | None:
     return None
 
 
+def get_logging_token(paths: Paths | None = None) -> str | None:
+    """Token for the github-api log transport: env (dev/CI) -> DPAPI file written by the installer."""
+    tok = os.environ.get("AUTOMAGIX_LOGGING_TOKEN")
+    if tok:
+        return tok.strip()
+    paths = paths or Paths()
+    f = paths.secrets / "logging_token.dpapi"
+    if f.exists():
+        try:
+            return unprotect_file(f).decode("utf-8").strip()
+        except SecretError:
+            return None
+    return None
+
+
 def get_llm_key() -> str | None:
     key = os.environ.get("AUTOSTATION_LLM_KEY") or credman_read("AUTOMAGIX/llm_key")
     return key.strip() if key else None

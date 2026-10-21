@@ -197,7 +197,7 @@ def test_real_repo_bootstrap_produces_a_valid_registry(tmp_path):
     res = br.build(ROOT, ROOT / "components" / "automation-registry" / "manifest.yaml", tmp_path / "out", bootstrap=True)
     assert res["ok"], res["errors"]
     m = manifest_of(tmp_path / "out")
-    assert {"automation-hello-world", "automation-invoice-router", "automation-portal-report", "automation-notifier"} <= set(m["automations"])
+    assert {"automation-certification-site"} <= set(m["automations"])
     assert set(m["components"]) == {"wrapper-core", "execution-framework"}
     for name, e in m["automations"].items():
         assert all(v["sha256"] != br.PLACEHOLDER for v in e["versions"].values())

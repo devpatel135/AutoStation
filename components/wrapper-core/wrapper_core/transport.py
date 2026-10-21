@@ -96,6 +96,85 @@ class GitSshTransport(Transport):
             raise TransportError(f"git {args[0]} failed: {(r.stderr or r.stdout).strip()[:300]}")
 
 
+class GitHubApiTransport(Transport):
+    """Push artefacts to a (private) GitHub logs repo over HTTPS with the Contents API - no git, no ssh, stdlib only.
+
+    One new file per artefact at ``ingest/<ring>/<kind>/<name>/<id>.json`` on the branch ``ingest`` (created on first use).
+    The token is a fine-grained PAT limited to that one repo (contents: write), DPAPI-protected on the endpoint. Protect the
+    logs repo's default branch with a ruleset so the token can only ever add logs. Re-sending an existing artefact is a
+    no-op (HTTP 422 'sha wasn't supplied' = it is already there).
+    """
+
+    def __init__(self, repo: str, ring: str, paths: Paths | None = None, branch: str = "ingest", timeout_s: int = 30):
+        super().__init__(ring)
+        self.repo, self.paths, self.branch, self.timeout_s = repo, paths or Paths(), branch, timeout_s
+        self.api = os.environ.get("AUTOMAGIX_GITHUB_API", "https://api.github.com").rstrip("/")
+        self._branch_ready = False
+
+    def _call(self, method: str, url: str, body: dict | None = None) -> tuple[int, dict]:
+        import urllib.error
+        import urllib.request
+        token = secrets.get_logging_token(self.paths)
+        if not token:
+            raise TransportError("logging token missing (secrets/logging_token.dpapi or AUTOMAGIX_LOGGING_TOKEN)")
+        req = urllib.request.Request(self.api + url, method=method, data=json.dumps(body).encode("utf-8") if body is not None else None,
+                                     headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json",
+                                              "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "autostation-wrapper-core",
+                                              "Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout_s) as r:  # noqa: S310 - fixed GitHub API host
+                raw = r.read().decode("utf-8") or "{}"
+                return r.status, json.loads(raw)
+        except urllib.error.HTTPError as exc:
+            try:
+                detail = json.loads(exc.read().decode("utf-8") or "{}")
+            except ValueError:
+                detail = {}
+            return exc.code, detail
+        except (urllib.error.URLError, OSError) as exc:
+            raise TransportError(f"GitHub API unreachable: {exc}") from exc
+
+    def _ensure_branch(self) -> None:
+        if self._branch_ready:
+            return
+        code, _ = self._call("GET", f"/repos/{self.repo}/git/ref/heads/{self.branch}")
+        if code == 404:
+            code, repo = self._call("GET", f"/repos/{self.repo}")
+            if code != 200:
+                raise TransportError(f"cannot read repo {self.repo}: HTTP {code}")
+            default = repo.get("default_branch", "main")
+            code, ref = self._call("GET", f"/repos/{self.repo}/git/ref/heads/{default}")
+            if code != 200:
+                raise TransportError(f"logs repo {self.repo} has no commits yet (add a README first): HTTP {code}")
+            code, _ = self._call("POST", f"/repos/{self.repo}/git/refs", {"ref": f"refs/heads/{self.branch}", "sha": ref["object"]["sha"]})
+            if code not in (201, 422):  # 422 = created concurrently by another machine
+                raise TransportError(f"cannot create branch {self.branch}: HTTP {code}")
+        elif code != 200:
+            raise TransportError(f"cannot read branch {self.branch}: HTTP {code}")
+        self._branch_ready = True
+
+    def send(self, kind: str, name: str, art_id: str, payload: dict) -> None:
+        import base64
+        import time
+        self._ensure_branch()
+        path = f"ingest/{safe_name(self.ring)}/{rel_path(kind, name, art_id)}"
+        body = {"message": f"{kind} {name} {art_id}", "branch": self.branch,
+                "content": base64.b64encode((json.dumps(payload, indent=2, default=str) + "\n").encode("utf-8")).decode("ascii")}
+        last = ""
+        for attempt in range(4):
+            code, detail = self._call("PUT", f"/repos/{self.repo}/contents/{path}", body)
+            if code in (200, 201):
+                return
+            if code == 422 and "sha" in str(detail.get("message", "")):
+                return  # already uploaded (idempotent re-send)
+            last = f"HTTP {code} {str(detail.get('message', ''))[:120]}"
+            if code in (409, 429, 500, 502, 503, 504) or (code == 403 and "rate" in last.lower()):
+                time.sleep(min(2 ** attempt, 8))  # concurrent commit on the same branch / throttling: retry
+                continue
+            break
+        raise TransportError(f"GitHub upload failed: {last}")
+
+
 def get_transport(paths: Paths | None = None) -> Transport | None:
     paths = paths or Paths()
     cfg = platform_config(paths)
@@ -104,6 +183,8 @@ def get_transport(paths: Paths | None = None) -> Transport | None:
         return None
     if cfg["log_transport"] == "git-ssh":
         return GitSshTransport(remote, cfg["ring"], paths)
+    if cfg["log_transport"] == "github-api":
+        return GitHubApiTransport(remote, cfg["ring"], paths)
     return DirTransport(remote, cfg["ring"])
 
 

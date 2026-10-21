@@ -13,7 +13,7 @@ import check_py39_syntax  # noqa: E402
 import check_workflows as cw  # noqa: E402
 
 WORKFLOWS = ROOT / ".github" / "workflows"
-MINE = ["release.yml", "site.yml", "ops-action.yml", "analytics.yml", "codeql.yml"]
+MINE = ["release.yml", "site.yml", "ops-action.yml", "codeql.yml"]
 # pre-existing workflows owned elsewhere: tolerated findings (reported to the maintainer, not blockers here)
 TOLERATED = {"ci.yml": ["declare 'permissions'"], "installer-dev.yml": []}
 
@@ -59,15 +59,24 @@ def test_every_workflow_is_described_in_the_docs():
         assert p.name in doc, f"{p.name} is not described in docs/PIPELINES.md"
 
 
-def test_analytics_is_off_by_default_and_never_silently_public():
-    text = (WORKFLOWS / "analytics.yml").read_text(encoding="utf-8")
-    assert "vars.AUTOSTATION_LIVE_ANALYTICS == 'true'" in text
-    assert "github.event.repository.private || vars.AUTOSTATION_ALLOW_PUBLIC_DASHBOARD == 'true'" in text
-    # the only Pages deployment is behind the explicit opt-in
-    assert "vars.AUTOSTATION_LIVE_TO_PAGES == 'true'" in text
-    assert text.count("deploy-pages") == 1 and "needs.analyze.result == 'success'" in text
-    # upload-artifact of dashboards only for private repositories
-    assert re.search(r"fleet-dashboard", text) and "github.event.repository.private" in text.split("upload-artifact")[0].splitlines()[-3] + "".join(text.split("upload-artifact")[0].splitlines()[-4:])
+def test_live_site_needs_the_logging_token_and_never_falls_back_to_demo_data():
+    text = (WORKFLOWS / "site.yml").read_text(encoding="utf-8")
+    assert "LOGGING_TOKEN" in text and "--live-data" in text
+    assert "--demo" not in text                      # the published site is live data or an honest waiting state, never synthetic
+    assert "cron:" in text and "workflow_run" in text
+
+
+def test_installer_workflow_publishes_the_download_and_smoke_tests_the_browser_run():
+    text = (WORKFLOWS / "installer-dev.yml").read_text(encoding="utf-8")
+    assert "installers-latest" in text and "build_framework_bundle.py" in text
+    assert r"execution-framework\node\node.exe" in text and "account_selected" in text
+    assert real("installer-dev.yml") == []
+    assert "LOGGING_TOKEN" in text and "/NORUN" in text      # smoke must not pollute live logs
+
+
+def test_release_auto_promotes_and_stays_append_only():
+    text = (WORKFLOWS / "release.yml").read_text(encoding="utf-8")
+    assert "--auto-promote" in text and "append-only" in text and "build_framework_bundle.py" in text
 
 
 def test_ops_action_passes_inputs_via_env_not_shell_interpolation():
@@ -80,7 +89,7 @@ def test_ops_action_passes_inputs_via_env_not_shell_interpolation():
 
 def test_release_enforces_append_only_artifacts_branch():
     text = (WORKFLOWS / "release.yml").read_text(encoding="utf-8")
-    assert "grep -v '^A'" in text and "append-only" in text and "registry/auto-dev-ring" in text
+    assert "grep -v '^A'" in text and "append-only" in text
     assert "--bootstrap" in text and "tools/build_registry.py" in text
 
 

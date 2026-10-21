@@ -1,22 +1,31 @@
 name: release
 
-# Packages every component + automation, publishes NEW immutable zips to the append-only `registry-artifacts` branch and opens a
-# pull request with the regenerated manifest (new versions enter the DEV ring only; promotion is a human PR - see docs/PIPELINES.md).
-# Installers are NOT built here: the `installer-dev` workflow owns the rolling `installers-latest` release.
+# Continuous delivery of the registry that every installed machine self-heals from.
+# On every push to main that touches a component/automation: test -> bundle the Node runtime into the execution-framework ->
+# package everything (deterministic zips) -> publish NEW immutable zips to the append-only `registry-artifacts` branch ->
+# regenerate manifest.yaml with the new versions in EVERY ring (auto-promote) and commit it to main -> the `site` workflow
+# republishes https://<owner>.github.io/<repo>/registry/ . Machines pick the new version up on their next run / sign-in.
+# A released version is immutable: change code => bump `version` (automation.yaml) or VERSION (components), or this fails loudly.
 on:
   push:
     branches: [main]
-    paths: ["components/**", "tools/build_registry.py", ".github/workflows/release.yml"]
+    paths:
+      - "components/automations/**"
+      - "components/wrapper-core/**"
+      - "components/execution-framework/**"
+      - "components/automation-registry/**"
+      - "tools/build_registry.py"
+      - "tools/build_framework_bundle.py"
+      - ".github/workflows/release.yml"
   workflow_dispatch:
     inputs:
       bootstrap:
-        description: "First run: seed a complete manifest from the repo (current version goes into every ring)"
+        description: "Rebuild the manifest from scratch from the repo (drops automations that are no longer in components/automations)"
         type: boolean
         default: false
 
 permissions:
   contents: write
-  pull-requests: write
 
 concurrency:
   group: release
@@ -26,7 +35,7 @@ jobs:
   registry:
     runs-on: ubuntu-latest
     env:
-      GH_TOKEN: ${{ secrets.OPS_BOT_TOKEN || secrets.GITHUB_TOKEN }}
+      GH_TOKEN: ${{ github.token }}
       BOOTSTRAP_INPUT: ${{ inputs.bootstrap }}
     steps:
       - uses: actions/checkout@v4
@@ -35,9 +44,14 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
       - run: python -m pip install pytest pydantic jinja2
       - name: Test the platform before releasing anything
         run: python tools/test_all.py
+      - name: Bundle Node + playwright-core into the execution-framework (the shipped runtime)
+        run: python tools/build_framework_bundle.py
       - name: Fetch the published artifacts branch (empty on the first run)
         id: artifacts
         run: |
@@ -50,13 +64,13 @@ jobs:
             echo "exists=false" >> "$GITHUB_OUTPUT"
             echo "::notice::registry-artifacts does not exist yet: this run bootstraps it"
           fi
-      - name: Build the registry (immutability + dev-ring rules enforced)
+      - name: Build the registry (immutability rules enforced; new versions go to every ring)
         id: build
         run: |
           BOOT=""
           if [ "$BOOTSTRAP_INPUT" = "true" ] || [ "${{ steps.artifacts.outputs.exists }}" = "false" ]; then BOOT="--bootstrap"; fi
           python tools/build_registry.py --out registry-out --artifacts-dir ../ra --new-dir new-artifacts \
-            --write-manifest components/automation-registry/manifest.yaml $BOOT
+            --write-manifest components/automation-registry/manifest.yaml --auto-promote $BOOT
       - name: Publish new packages to registry-artifacts (append-only)
         if: ${{ steps.build.outputs.new != '0' }}
         run: |
@@ -68,7 +82,7 @@ jobs:
           mkdir -p artifacts
           cp -r "$GITHUB_WORKSPACE/new-artifacts/artifacts/." artifacts/
           if [ ! -f README.md ]; then
-            printf '# registry-artifacts\n\nAppend-only store of released package zips. Never edit or delete files here; released versions are immutable.\nPublished through https://github.com/%s/actions/workflows/release.yml\n' "$GITHUB_REPOSITORY" > README.md
+            printf '# registry-artifacts\n\nAppend-only store of released package zips. Never edit or delete files here; released versions are immutable.\n' > README.md
           fi
           git add -A
           if git diff --cached --name-status | grep -v '^A' | grep -q .; then
@@ -78,27 +92,15 @@ jobs:
           fi
           git commit -q -m "release ${GITHUB_SHA::7}: $(git diff --cached --name-only | wc -l) package file(s)" || true
           git push origin HEAD:registry-artifacts
-      - name: Open or refresh the dev-ring pull request
+      - name: Commit the regenerated manifest to main (all rings follow main)
         if: ${{ steps.build.outputs.changed == 'true' }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git checkout -q -B registry/auto-dev-ring
-          git add components/automation-registry/manifest.yaml
-          git commit -q -m "registry: dev-ring update from ${GITHUB_SHA::7}" || { echo "nothing to commit"; exit 0; }
-          git push --force origin registry/auto-dev-ring
-          {
-            echo "Automatic registry update from \`${GITHUB_SHA::7}\`."
-            echo
-            echo "- New versions are assigned to the **dev** ring only."
-            echo "- Review the manifest diff, then promote with \`python -m registry promote <name> --to pilot\` (or the admin panel)."
-            echo "- Packages are already published (immutable) on the \`registry-artifacts\` branch."
-          } > pr-body.md
-          if [ "$(gh pr list --head registry/auto-dev-ring --state open --json number --jq 'length')" = "0" ]; then
-            gh pr create --base main --head registry/auto-dev-ring --title "registry: dev-ring update" --body-file pr-body.md
-          else
-            gh pr edit registry/auto-dev-ring --body-file pr-body.md
-          fi
+          git add components/automation-registry/manifest.yaml components/automation-registry/history 2>/dev/null || git add components/automation-registry/manifest.yaml
+          git commit -q -m "registry: release ${GITHUB_SHA::7} to all rings [skip ci]" || { echo "nothing to commit"; exit 0; }
+          git pull --rebase --quiet origin main
+          git push origin HEAD:main
       - name: Summary
         if: ${{ always() }}
         run: |

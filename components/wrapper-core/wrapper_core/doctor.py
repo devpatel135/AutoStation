@@ -110,6 +110,10 @@ def run_checks(paths: Paths | None = None, online: bool = True) -> list[dict]:
     spooled = len(list(paths.spool.glob("*.json"))) if paths.spool.exists() else 0
     add("unsent log spool", PASS if spooled == 0 else WARN, f"{spooled} item(s)",
         "logs could not be sent; they retry on the next run. Check connectivity/keys." if spooled else "")
+    if transport == "github-api":
+        tok = paths.secrets / "logging_token.dpapi"
+        add("logging token (DPAPI)", PASS if tok.exists() else FAIL, "present" if tok.exists() else "missing",
+            "this installer was built without live logging; use the connected installer from the install page" if not tok.exists() else "")
     if transport == "git-ssh":
         key = paths.secrets / "logging_key.dpapi"
         add("logging key (DPAPI)", PASS if key.exists() else FAIL, "present" if key.exists() else "missing",

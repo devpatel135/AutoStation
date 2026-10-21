@@ -38,7 +38,7 @@ jobs:
       - name: Framework + automation tests
         run: |
           cd components/execution-framework && node --test
-          cd ../automations/automation-portal-report && node --test
+          cd ../automations/automation-certification-site && node --test
 
   integration:
     needs: python

@@ -110,7 +110,9 @@ def platform_config(paths: Paths | None = None) -> dict:
         if os.environ.get(env):
             cfg[key] = os.environ[env]
     cfg.setdefault("ring", "broad")
-    cfg.setdefault("log_transport", "dir" if not cfg.get("log_remote", "").startswith(("git@", "ssh://")) else "git-ssh")
+    remote = cfg.get("log_remote", "")
+    cfg.setdefault("log_transport", "git-ssh" if remote.startswith(("git@", "ssh://")) else
+                   "github-api" if re.match(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", remote) and not remote.startswith(("/", ".")) else "dir")
     if cfg["ring"] not in RINGS:
         raise ValueError(f"invalid ring {cfg['ring']!r}; expected one of {RINGS}")
     return cfg

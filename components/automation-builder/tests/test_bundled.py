@@ -64,3 +64,47 @@ def test_missing_payload_file_is_reported(tmp_path):
     cfg = config(tmp_path, automation_zip="nope.zip")
     with pytest.raises(bi.BuildError, match="not found"):
         bi.stage_build(cfg, tmp_path / "s3", {}, allow_missing_secrets=True)
+
+
+def fw_zip(path):
+    with zipfile.ZipFile(path, "w") as z:
+        z.writestr("VERSION", "0.3.0\n")
+        z.writestr("index.js", "module.exports = {};\n")
+        z.writestr("node/node.exe", "MZ-fake-node")
+        z.writestr("node_modules/playwright-core/package.json", "{}")
+    return path
+
+
+def test_framework_bundle_and_logging_token_are_staged_and_rendered(tmp_path):
+    fw_zip(tmp_path / "fw.zip")
+    tok = tmp_path / "tok.txt"
+    tok.write_text("github_pat_SECRETTOKENVALUE0123456789\n")
+    cfg = config(tmp_path, framework_zip="fw.zip", log_remote="devpatel135/AutoStation-logs")
+    stage = tmp_path / "stage"
+    flags, wv = bi.stage_build(cfg, stage, {"LOGGING_TOKEN_FILE": str(tok)}, allow_missing_secrets=True)
+    assert flags["HAVE_FRAMEWORK"] and flags["HAVE_LOG_TOKEN"]
+    assert (stage / "execution-framework" / "node" / "node.exe").exists()
+    assert (stage / "secrets" / "logging_token").read_text() == "github_pat_SECRETTOKENVALUE0123456789"
+    nsi = stage / "i.nsi"
+    nsi.write_text(bi.render_nsi(cfg, wv, flags, str(tmp_path / "o.exe"), ".", icon=""), encoding="utf-8")
+    assert vn.validate(nsi) == []
+    text = nsi.read_text(encoding="utf-8")
+    assert "SECRETTOKENVALUE" not in text                      # secrets never appear in the script
+    assert '!define GIT_ARG "-SkipGit"' in text                # github-api transport needs no git
+    assert "logging_token.dpapi" in text and "execution-framework" in text
+
+
+def test_ssh_remote_still_requires_git(tmp_path):
+    cfg = config(tmp_path, log_remote="git@github.com:o/r.git")
+    stage = tmp_path / "s"
+    flags, wv = bi.stage_build(cfg, stage, {}, allow_missing_secrets=True)
+    text = bi.render_nsi(cfg, wv, flags, "o.exe", ".", icon="")
+    assert '!define GIT_ARG ""' in text
+
+
+def test_framework_zip_must_be_a_real_framework(tmp_path):
+    with zipfile.ZipFile(tmp_path / "bad.zip", "w") as z:
+        z.writestr("readme.txt", "x")
+    cfg = config(tmp_path, framework_zip="bad.zip")
+    with pytest.raises(bi.BuildError, match="framework_zip"):
+        bi.stage_build(cfg, tmp_path / "s4", {}, allow_missing_secrets=True)

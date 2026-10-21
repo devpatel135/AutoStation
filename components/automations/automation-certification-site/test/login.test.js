@@ -29,6 +29,7 @@ test('page classification', () => {
   assert.equal(classifyPage({ url: 'https://login.microsoftonline.com/x', hasTile: true, text: '' }, target), 'account-picker');
   assert.equal(classifyPage({ url: 'https://login.microsoftonline.com/x', text: 'Enter password' }, target), 'credential');
   assert.equal(classifyPage({ url: 'https://login.microsoftonline.com/x', text: 'Approve sign in request' }, target), 'credential');
+  assert.equal(classifyPage({ url: 'https://login.microsoftonline.com/x', text: 'Sign in Email, phone, or Skype' }, target), 'signin');
   assert.equal(classifyPage({ url: 'https://login.microsoftonline.com/x', text: 'loading' }, target), 'other');
   assert.equal(classifyPage({ url: 'https://evil.example.com/' }, target), 'other');
   assert.equal(classifyPage({ url: 'about:blank' }, target), 'other');

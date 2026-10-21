@@ -1,26 +1,33 @@
 name: installers
 
-# Builds a REAL, self-contained per-user installer (.exe) for every example automation with NSIS on a Windows runner,
-# smoke-tests the Python ones (silent install -> bundled payload -> scheduled task -> first run logged -> uninstall), and
-# publishes them to the rolling GitHub Release `installers-latest`, which is what every Download button points to:
-#   https://github.com/devpatel135/AutoStation/releases/download/installers-latest/<automation>-setup.exe
-# The installers are UNSIGNED unless signing secrets are configured (Windows SmartScreen will warn: "More info -> Run anyway").
-# Standalone by design: the payload is bundled inside the .exe and run logs stay in <install>\local-logs, so a download works
-# before any registry / logging server exists. The registry (self-heal/updates) is https://devpatel135.github.io/AutoStation/registry/.
+# Builds the REAL, self-contained per-user installer (.exe) for the published automation with NSIS on a Windows runner,
+# smoke-tests it (silent install -> bundled Node + Playwright -> scheduled task -> a real headless-Edge run of the automation
+# against a local demo page -> logs -> uninstall) and publishes it to the rolling GitHub Release `installers-latest`, which is
+# what every Download button points to:
+#   https://github.com/<owner>/<repo>/releases/download/installers-latest/<automation>-setup.exe
+#
+# The installer contains: embedded Python + wrapper-core, the execution-framework with a Node runtime and playwright-core,
+# and the automation payload. Nothing needs to be installed first. Updates then arrive through the registry
+# (https://<owner>.github.io/<repo>/registry/), which every run and every sign-in checks.
+#
+# LIVE LOGGING: if the repository secret LOGGING_TOKEN exists, the installer is built "connected": every run's log,
+# heartbeat and failure evidence is pushed over HTTPS to the private logs repo <owner>/AutoStation-logs (override with the
+# variable AUTOSTATION_LOG_REPO). Without the secret it is a standalone build and logs stay in <install>\local-logs.
+# Unsigned installers trigger Windows SmartScreen ("More info -> Run anyway"); compare the published SHA-256 first.
 on:
   push:
     branches: [main]
-    paths: ["components/automation-builder/**", "components/wrapper-core/**", "components/automations/**", ".github/workflows/installer-dev.yml"]
+    paths:
+      - "components/automation-builder/**"
+      - "components/wrapper-core/**"
+      - "components/automations/**"
+      - "components/execution-framework/**"
+      - "tools/build_framework_bundle.py"
+      - ".github/workflows/installer-dev.yml"
   workflow_dispatch:
     inputs:
-      registry_url:
-        description: Registry base URL baked into the installers (self-heal/updates)
-        default: https://devpatel135.github.io/AutoStation/registry/
-      log_remote:
-        description: "'local' (default, standalone) or an ssh git remote for the logging repo"
-        default: local
       ring:
-        description: Default ring baked into the installers
+        description: Default ring baked into the installer
         default: broad
       python_embed_url:
         description: python.org embeddable zip
@@ -29,56 +36,59 @@ on:
 permissions:
   contents: read
 
+env:
+  AUTOMATION: automation-certification-site
+
 jobs:
   build:
     runs-on: windows-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - automation: automation-hello-world
-            smoke: true
-          - automation: automation-invoice-router
-            smoke: true
-          - automation: automation-notifier
-            smoke: false
-          - automation: automation-portal-report
-            smoke: false
     env:
-      AUTOMATION: ${{ matrix.automation }}
+      LOG_TOKEN_SET: ${{ secrets.LOGGING_TOKEN != '' }}
+      LOG_REPO: ${{ vars.AUTOSTATION_LOG_REPO || format('{0}/AutoStation-logs', github.repository_owner) }}
+      PAGES_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/registry/
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
       - run: python -m pip install jinja2 pytest pydantic
       - name: Install NSIS
         run: choco install nsis -y --no-progress
-      - name: Package wrapper-core + payload, write build config
+      - name: Bundle Node + playwright-core into the execution-framework
+        run: python tools/build_framework_bundle.py
+      - name: Package wrapper-core, execution-framework and the payload; write the build config
         shell: bash
         run: |
-          REG="${{ inputs.registry_url }}"; REG="${REG:-https://devpatel135.github.io/AutoStation/registry/}"
-          LOG="${{ inputs.log_remote }}"; LOG="${LOG:-local}"
           RING="${{ inputs.ring }}"; RING="${RING:-broad}"
           EMB="${{ inputs.python_embed_url }}"; EMB="${EMB:-https://www.python.org/ftp/python/3.12.7/python-3.12.7-embed-amd64.zip}"
+          if [ "$LOG_TOKEN_SET" = "true" ]; then LOG="$LOG_REPO"; echo "connected build: logs go to $LOG_REPO"; else LOG="local"; echo "::notice::LOGGING_TOKEN secret not set: building a STANDALONE installer (logs stay on the machine)"; fi
           mkdir -p build/stage/wrapper-core build/pkg vendor
           cp -r components/wrapper-core/wrapper_core build/stage/wrapper-core/
           cp components/wrapper-core/VERSION build/stage/wrapper-core/VERSION
           WV="$(tr -d '\r\n' < components/wrapper-core/VERSION)"
+          FV="$(tr -d '\r\n' < components/execution-framework/VERSION)"
           python components/automation-builder/scripts/package.py component wrapper-core build/stage/wrapper-core --version "$WV" --out build/pkg
+          python -c "import sys; sys.path.insert(0,'tools'); import build_registry as br; from pathlib import Path; print(br._stage_framework(Path('components/execution-framework'), Path('build/stage')))"
+          python components/automation-builder/scripts/package.py component execution-framework build/stage/execution-framework --version "$FV" --out build/pkg
           V=$(python -c "import sys; sys.path.insert(0,'components/wrapper-core'); from wrapper_core import miniyaml; print(miniyaml.load('components/automations/$AUTOMATION/automation.yaml')['version'])")
           python components/automation-builder/scripts/package.py automation "$AUTOMATION" "components/automations/$AUTOMATION" --version "$V" --out build/pkg
           curl -fsSL -o vendor/python-embed.zip "$EMB"
           cat > build/build.json <<EOF
           {"automation": "$AUTOMATION", "version": "$V", "ring": "$RING",
-           "registry_url": "$REG", "log_remote": "$LOG",
+           "registry_url": "$PAGES_URL", "log_remote": "$LOG",
            "llm_endpoint": "", "publisher": "AutoStation",
            "wrapper_core_zip": "../build/pkg/components/wrapper-core-$WV.zip",
+           "framework_zip": "../build/pkg/components/execution-framework-$FV.zip",
            "automation_zip": "../build/pkg/automations/$AUTOMATION-$V.zip",
            "python_embed_zip": "../vendor/python-embed.zip"}
           EOF
           echo "AUTOMATION_VERSION=$V" >> "$GITHUB_ENV"
-      - name: Render + compile installer (NSIS)
+      - name: Render + compile the installer (NSIS)
+        env:
+          LOGGING_TOKEN: ${{ secrets.LOGGING_TOKEN }}
         run: python components/automation-builder/scripts/build_installer.py --config build/build.json --out build/out --allow-missing-secrets --makensis "C:/Program Files (x86)/NSIS/makensis.exe"
       - name: Stage release files (stable + versioned names, sha256)
         shell: pwsh
@@ -96,10 +106,9 @@ jobs:
           Get-ChildItem release | Select-Object Name, Length | Format-Table -AutoSize
       - uses: actions/upload-artifact@v4
         with:
-          name: installer-${{ matrix.automation }}
+          name: installer
           path: release/*
-      - name: Smoke - silent per-user install (payload is bundled; no registry needed)
-        if: ${{ matrix.smoke }}
+      - name: Smoke - silent per-user install (everything is bundled; nothing else installed)
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -107,47 +116,70 @@ jobs:
             $m = ($_.Exception.Message -replace '[\r\n]+', ' | ')
             Write-Host "::error title=smoke failed::$m"
             $h = Join-Path $env:LOCALAPPDATA 'AUTOMAGIX'
-            if (Test-Path $h) { Get-ChildItem $h -Recurse -Depth 2 -ErrorAction SilentlyContinue | Select-Object -First 60 -ExpandProperty FullName | Out-Host }
+            if (Test-Path $h) { Get-ChildItem $h -Recurse -Depth 2 -ErrorAction SilentlyContinue | Select-Object -First 80 -ExpandProperty FullName | Out-Host }
             Get-Content (Join-Path $h 'logs\wrapper.log') -ErrorAction SilentlyContinue | Select-Object -Last 40 | Out-Host
             exit 1
           }
-          $p = Start-Process -FilePath "release/$env:AUTOMATION-setup.exe" -ArgumentList '/S' -Wait -PassThru
+          # /NORUN: the smoke run below must not push a CI run into the live logs
+          $p = Start-Process -FilePath "release/$env:AUTOMATION-setup.exe" -ArgumentList '/S', '/NORUN' -Wait -PassThru
           if ($p.ExitCode -ne 0) { throw "installer exit code $($p.ExitCode)" }
           $home_ = Join-Path $env:LOCALAPPDATA 'AUTOMAGIX'
-          foreach ($f in @('python\python.exe', 'wrapper-core\wrapper_core\__init__.py', "automations\$env:AUTOMATION\automation.yaml", 'state\installed.json', 'config\platform.json')) {
+          foreach ($f in @('python\python.exe', 'wrapper-core\wrapper_core\__init__.py', 'execution-framework\node\node.exe',
+                           'execution-framework\node_modules\playwright-core\package.json', 'execution-framework\VERSION',
+                           "automations\$env:AUTOMATION\automation.yaml", 'state\installed.json', 'config\platform.json')) {
             if (-not (Test-Path (Join-Path $home_ $f))) { throw "missing after install: $f" }
           }
-          Get-Content (Join-Path $home_ 'config\platform.json')
+          Get-Content (Join-Path $home_ 'config\platform.json') | Out-Host
+          if ($env:LOG_TOKEN_SET -eq 'true' -and -not (Test-Path (Join-Path $home_ 'secrets\logging_token.dpapi'))) { throw 'connected build but no DPAPI logging token was installed' }
           schtasks /Query /TN "AUTOMAGIX\$env:AUTOMATION-daily" | Out-Host
           if ($LASTEXITCODE -ne 0) { throw 'scheduled task was not registered' }
           Write-Host 'install OK'
           exit 0
-      - name: Smoke - first run reaches the local log folder
-        if: ${{ matrix.smoke }}
+      - name: Smoke - a real run of the installed automation (bundled Node + Playwright + Edge) against a local demo page
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          $srv = $null
           trap {
             $m = ($_.Exception.Message -replace '[\r\n]+', ' | ')
             Write-Host "::error title=smoke failed::$m"
-            Get-Content (Join-Path $env:LOCALAPPDATA 'AUTOMAGIX\logs\wrapper.log') -ErrorAction SilentlyContinue | Select-Object -Last 40 | Out-Host
+            $h = Join-Path $env:LOCALAPPDATA 'AUTOMAGIX'
+            Get-ChildItem (Join-Path $h 'runs') -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 30 -ExpandProperty FullName | Out-Host
+            Get-ChildItem (Join-Path $h 'runs') -Recurse -Filter stderr.log -ErrorAction SilentlyContinue | ForEach-Object { Get-Content $_.FullName -Tail 30 } | Out-Host
+            Get-Content (Join-Path $h 'logs\wrapper.log') -ErrorAction SilentlyContinue | Select-Object -Last 40 | Out-Host
+            if ($srv) { Stop-Process -Id $srv.Id -Force -ErrorAction SilentlyContinue }
             exit 1
           }
-          $logs = Join-Path $env:LOCALAPPDATA 'AUTOMAGIX\local-logs'
-          $deadline = (Get-Date).AddSeconds(150)
-          $runs = @()
-          while ((Get-Date) -lt $deadline) {
-            $runs = @(Get-ChildItem -Recurse -Path $logs -Filter *.json -ErrorAction SilentlyContinue | Where-Object { $_.FullName -match 'ingest[\\/][a-z]+[\\/]run[\\/]' })
-            if ($runs.Count -gt 0) { break }
-            Start-Sleep -Seconds 3
+          $home_ = Join-Path $env:LOCALAPPDATA 'AUTOMAGIX'
+          $payload = Join-Path $home_ "automations\$env:AUTOMATION"
+          $node = Join-Path $home_ 'execution-framework\node\node.exe'
+          $srv = Start-Process -FilePath $node -ArgumentList 'demo\server.js' -WorkingDirectory $payload -PassThru -WindowStyle Hidden
+          $up = $false
+          foreach ($i in 1..30) {
+            try { Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:8099/portal.html' -TimeoutSec 2 | Out-Null; $up = $true; break } catch { Start-Sleep -Seconds 1 }
           }
-          if ($runs.Count -eq 0) { throw 'no run log arrived in local-logs after install' }
-          $rec = Get-Content $runs[0].FullName -Raw | ConvertFrom-Json
-          Write-Host "first run: status=$($rec.status) items=$($rec.items.total) synopsis=$($rec.synopsis)"
-          if ($rec.status -ne 'success') { throw "first run status was $($rec.status): $($rec.error | ConvertTo-Json -Compress)" }
+          if (-not $up) { throw 'demo portal did not start' }
+          $logs = Join-Path $home_ 'smoke-logs'
+          $env:AUTOMAGIX_HOME = $home_
+          $env:PYTHONPATH = Join-Path $home_ 'wrapper-core'
+          $env:AUTOMAGIX_LOG_TRANSPORT = 'dir'; $env:AUTOMAGIX_LOG_REMOTE = $logs
+          $env:AUTOMAGIX_NO_TOAST = '1'
+          $env:AUTOMATION_PARAM_PORTAL_URL = 'http://127.0.0.1:8099/portal.html'
+          $env:AUTOMATION_PARAM_PICKER_HOST = 'localhost:8099'
+          $env:AUTOMATION_PARAM_HEADLESS = 'true'
+          $env:AUTOMATION_PARAM_TIMEOUT_S = '45'
+          & (Join-Path $home_ 'python\python.exe') -m wrapper_core run $env:AUTOMATION --slot daily
+          $code = $LASTEXITCODE
+          Stop-Process -Id $srv.Id -Force -ErrorAction SilentlyContinue
+          $run = Get-ChildItem -Recurse -Path $logs -Filter *.json -ErrorAction SilentlyContinue | Where-Object { $_.FullName -match 'run[\\/]' } | Select-Object -First 1
+          if (-not $run) { throw "no run log was written (exit code $code)" }
+          $rec = Get-Content $run.FullName -Raw | ConvertFrom-Json
+          Write-Host "run: status=$($rec.status) result=$($rec.result | ConvertTo-Json -Compress) synopsis=$($rec.synopsis)"
+          if ($rec.status -ne 'success') { throw "run status was $($rec.status): $($rec.error | ConvertTo-Json -Compress)" }
+          if ($rec.result.state -ne 'account_selected') { throw "expected the account tile to be clicked, got state '$($rec.result.state)'" }
+          Write-Host 'browser automation OK: the account tile was clicked and the run stopped'
           exit 0
       - name: Smoke - uninstall removes everything it installed
-        if: ${{ matrix.smoke }}
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -168,7 +200,7 @@ jobs:
           exit 0
 
   publish:
-    # Rolling pre-release that every Download button links to.
+    # Rolling pre-release that every Download button links to; stale assets (removed automations) are deleted.
     needs: build
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
@@ -177,17 +209,20 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          pattern: installer-*
+          name: installer
           path: dist
-          merge-multiple: true
       - name: Publish to the rolling release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
           ls -la dist
-          NOTES="Rolling release rebuilt on every change under components/. Stable names: <automation>-setup.exe (always the latest), plus versioned copies. SHA-256 files sit next to each installer. UNSIGNED unless signing is configured: Windows SmartScreen shows 'Windows protected your PC' -> More info -> Run anyway (verify the SHA-256 first). Per-user install, no admin rights."
+          NOTES="Rolling release rebuilt on every change under components/. Stable name: <automation>-setup.exe (always the latest), plus a versioned copy; SHA-256 files sit next to each installer. UNSIGNED unless signing is configured: Windows SmartScreen shows 'Windows protected your PC' -> More info -> Run anyway (verify the SHA-256 first). Per-user install, no admin rights, nothing to install first."
           gh release view installers-latest >/dev/null 2>&1 || gh release create installers-latest --target "${{ github.sha }}" --prerelease --title "AutoStation installers (latest)" --notes "$NOTES"
           gh release edit installers-latest --notes "$NOTES" --prerelease
           gh release upload installers-latest dist/* --clobber
+          KEEP=$(ls dist | tr '\n' ' ')
+          for a in $(gh release view installers-latest --json assets --jq '.assets[].name'); do
+            case " $KEEP " in *" $a "*) ;; *) echo "deleting stale asset $a"; gh release delete-asset installers-latest "$a" -y ;; esac
+          done
           gh release view installers-latest --json assets --jq '.assets[].name'
