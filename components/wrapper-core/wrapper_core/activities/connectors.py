@@ -170,7 +170,7 @@ class Graph:
         if bool(user) == bool(drive_id):
             raise ValueError("give exactly one of user (a mailbox/UPN or id) or drive_id")
         if drive_id:
-            if not _DRIVE_ID.fullmatch(drive_id):
+            if not _DRIVE_ID.fullmatch(drive_id) or set(drive_id) <= {"."}:  # "." and ".." would walk the Graph URL
                 raise ValueError("drive_id has invalid characters")
             return f"/drives/{urllib.parse.quote(drive_id, safe='')}"
         if not (_EMAIL.fullmatch(user or "") or _GUID.fullmatch(user or "")):

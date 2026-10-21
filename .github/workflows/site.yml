@@ -35,10 +35,12 @@ jobs:
     timeout-minutes: 20
     if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
+    environment: production
     env:
       GH_TOKEN: ${{ github.token }}
       LOG_REPO: ${{ vars.AUTOSTATION_LOG_REPO || format('{0}/AutoStation-logs', github.repository_owner) }}
-      LOGGING_TOKEN: ${{ secrets.LOGGING_TOKEN }}
+      # a read-only token is preferred when you create one (LOGS_READ_TOKEN); the installer's write token is the fallback
+      LOGGING_TOKEN: ${{ secrets.LOGS_READ_TOKEN || secrets.LOGGING_TOKEN }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -79,7 +81,16 @@ jobs:
         if: ${{ steps.registry.outcome == 'success' }}
         env:
           REGISTRY_SIGNING_SEED: ${{ secrets.REGISTRY_SIGNING_SEED }}
-        run: python tools/sign_registry.py --registry-dir registry-out
+        run: |
+          if [ -n "$REGISTRY_SIGNING_SEED" ]; then
+            # a re-run of an old workflow run must not re-sign an OLDER manifest with a fresh signed_at (that would defeat rollback protection)
+            HEAD_SHA="$(git ls-remote "https://github.com/${GITHUB_REPOSITORY}.git" refs/heads/main | cut -f1)"
+            if [ -z "$HEAD_SHA" ] || [ "$HEAD_SHA" != "$GITHUB_SHA" ]; then
+              echo "::error title=stale run::this run is for ${GITHUB_SHA} but main is at ${HEAD_SHA:-unknown}; refusing to sign or deploy. A newer run covers it."
+              exit 1
+            fi
+          fi
+          python tools/sign_registry.py --registry-dir registry-out
       - name: Fetch the live run logs (private logs repo, branch ingest)
         id: logs
         run: |
@@ -88,7 +99,10 @@ jobs:
             echo "::notice::LOGGING_TOKEN secret not set - dashboards will show the waiting state (see docs/LIVE_LOGGING.md)"
             exit 0
           fi
-          if git clone --quiet --depth 1 --branch ingest "https://x-access-token:${LOGGING_TOKEN}@github.com/${LOG_REPO}.git" ../logs 2>/dev/null; then
+          AUTH="$(printf 'x-access-token:%s' "$LOGGING_TOKEN" | base64 -w0)"
+          echo "::add-mask::$AUTH"
+          if git -c "http.extraheader=Authorization: Basic $AUTH" clone --quiet --depth 1 --branch ingest "https://github.com/${LOG_REPO}.git" ../logs 2>/dev/null; then
+            rm -rf ../logs/.git
             echo "live=true" >> "$GITHUB_OUTPUT"
             echo "fetched $(find ../logs/ingest -name '*.json' 2>/dev/null | wc -l) log artefact(s) from ${LOG_REPO}"
           else
@@ -96,7 +110,9 @@ jobs:
             echo "::notice::${LOG_REPO} has no 'ingest' branch yet (no installed automation has reported) - waiting state"
           fi
       - name: Ingest, analyse, diagnose and build the live data
+        id: ingest
         if: ${{ steps.logs.outputs.live == 'true' }}
+        continue-on-error: true
         run: |
           mkdir -p live
           cp components/automation-registry/manifest.yaml live/manifest.yaml
@@ -104,12 +120,26 @@ jobs:
         working-directory: components/automation-logging
         env:
           PYTHONPATH: ${{ github.workspace }}/components/wrapper-core
-      - name: Build the site
+      - name: Build the site (with the live data)
+        id: site_live
+        if: ${{ steps.ingest.outcome == 'success' }}
+        continue-on-error: true
+        env:
+          REGISTRY_OUTCOME: ${{ steps.registry.outcome }}
         run: |
-          ARGS="--out site --fetch-installer-sha"
-          if [ "${{ steps.registry.outcome }}" = "success" ]; then ARGS="$ARGS --registry registry-out"; fi
-          if [ "${{ steps.logs.outputs.live }}" = "true" ]; then ARGS="$ARGS --live-data components/automation-logging/live"; fi
+          ARGS="--out site --fetch-installer-sha --live-data components/automation-logging/live"
+          if [ "$REGISTRY_OUTCOME" = "success" ]; then ARGS="$ARGS --registry registry-out"; fi
           python tools/build_site.py $ARGS
+      - name: Build the site without live data (no logs, or the live-data steps failed - the registry must still deploy)
+        if: ${{ steps.site_live.outcome != 'success' }}
+        env:
+          REGISTRY_OUTCOME: ${{ steps.registry.outcome }}
+        run: |
+          rm -rf site
+          ARGS="--out site --fetch-installer-sha"
+          if [ "$REGISTRY_OUTCOME" = "success" ]; then ARGS="$ARGS --registry registry-out"; fi
+          python tools/build_site.py $ARGS
+          if [ "${{ steps.logs.outputs.live }}" = "true" ]; then echo "::warning title=live data skipped::the live-data steps failed; the site was built without them"; fi
       - name: Check the generated site (links, install pages)
         run: python tools/check_site.py site
       - uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5

@@ -184,8 +184,8 @@ def test_next_runs_respects_the_slot_timezone_and_degrades_gracefully():
     after = datetime(2026, 10, 21, 12, 0, tzinfo=timezone.utc)
     tzs, note = site_ops.next_runs({"type": "daily", "time": "09:00"}, "America/New_York", after, 1)
     assert note == "" or "timezone" in note
-    if "timezone" not in note:       # tz database present: 09:00 EDT = 13:00 UTC
-        assert hours(tzs) == ["2026-10-22 13:00"]
+    if "timezone" not in note:       # tz database present: 09:00 EDT = 13:00 UTC, later the same day than 12:00 UTC
+        assert hours(tzs) == ["2026-10-21 13:00"]
     t2, note2 = site_ops.next_runs({"type": "daily", "time": "09:00"}, "Not/AZone", after, 1)
     assert hours(t2) == ["2026-10-22 09:00"] and "unknown timezone" in note2
     for bad in ({"type": "teleport"}, {"type": "daily"}, {"type": "daily", "time": "25:99"}, {"type": "cron", "cron": "* *"}, {"type": "cron", "cron": "x y z a b"}, "nope", None, {}):

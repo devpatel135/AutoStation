@@ -96,10 +96,16 @@ def now_iso() -> str:
 NAV = [("index.html", "Home", "home"), ("install/index.html", "Install", "install"), ("docs/index.html", "Docs", "docs"),
        ("portal/index.html", "Catalog", "portal"), ("dashboard/index.html", "Dashboard", "dashboard"),
        ("program/index.html", "Program", "program"), ("jobs/index.html", "Jobs", "jobs"), ("machines/index.html", "Machines", "machines"),
+       ("reliability/index.html", "Reliability", "reliability"), ("errors/index.html", "Errors", "errors"),
        ("queues/index.html", "Queues", "queues"), ("schedules/index.html", "Schedules", "schedules"),
        ("audit/index.html", "Audit", "audit"), ("portal/admin.html", "Admin", "admin")]
 
 EXTRA_CSS = r"""
+.gs { position:relative; display:inline-block; margin:0 .4rem; } .gs input { width:15rem; max-width:44vw; padding:.3rem .6rem; border:1px solid var(--border); border-radius:6px; background:var(--surface); color:var(--fg); font:12px var(--mono); }
+.gs ul { position:absolute; right:0; top:2rem; z-index:20; list-style:none; margin:0; padding:.25rem; width:min(30rem,92vw); max-height:60vh; overflow:auto; background:var(--surface); border:1px solid var(--border); border-radius:8px; box-shadow:0 6px 24px rgba(0,0,0,.35); }
+.gs li a { display:grid; grid-template-columns:5.5rem 1fr; gap:.1rem .6rem; padding:.35rem .5rem; border-radius:5px; text-decoration:none; color:var(--fg); font-size:12.5px; }
+.gs li a:hover, .gs li a:focus { background:var(--surface2); outline:none; } .gs-t { grid-row:span 2; font:10px var(--mono); text-transform:uppercase; color:var(--accent); align-self:center; }
+.gs-s { color:var(--fg-muted); font-size:11.5px; } .gs-empty { padding:.5rem; color:var(--fg-muted); font-size:12px; }
 .hero { padding:1.4rem 0 .6rem; } .hero h1 { font-size:2rem; margin:.3rem 0 .6rem; } .hero p { font-size:15px; color:var(--fg-muted); max-width:62ch; }
 .roles { display:grid; grid-template-columns:repeat(auto-fit,minmax(250px,1fr)); gap:.9rem; margin:1.2rem 0; }
 .role { display:flex; flex-direction:column; gap:.4rem; text-decoration:none; color:var(--fg); }
@@ -173,9 +179,25 @@ def write_assets(out: Path) -> None:
 
 
 # Pages load only same-origin CSS/JS (plus the small inline theme bootstrap) and fetch only the same-origin search index.
-CSP = ("default-src 'none'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; "
+CSP = ("default-src 'none'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'{hashes}; "
        "connect-src 'self'; base-uri 'none'; form-action 'none'")
-CSP_META = f'<meta http-equiv="Content-Security-Policy" content="{CSP}">'
+# Scripts: same-origin files plus EXACTLY the inline blocks this generator authored (allowed by SHA-256), never 'unsafe-inline' - so markup
+# injected through a forged telemetry value cannot execute even if escaping failed somewhere. style-src keeps 'unsafe-inline' (the pages use style
+# attributes; CSS cannot run script). A <meta> CSP cannot carry frame-ancestors (GitHub Pages sets no headers): clickjacking is out of scope here.
+# The standalone single-file pages (fleet dashboard, program, registry portal) still use inline handlers and keep script-src 'unsafe-inline';
+# everything they print is escaped. Moving them to external scripts + hashes is a tracked follow-up (docs/SITE.md).
+_INLINE_SCRIPT = re.compile(r"<script>(.*?)</script>", re.S)
+
+
+def csp_meta(*inline_scripts: str) -> str:
+    """The page CSP, allowing exactly the given (generator-authored) inline script bodies."""
+    import base64
+    import hashlib
+    hs = "".join(" 'sha256-" + base64.b64encode(hashlib.sha256(code.encode("utf-8")).digest()).decode("ascii") + "'" for code in inline_scripts)
+    return '<meta http-equiv="Content-Security-Policy" content="' + CSP.replace("{hashes}", hs) + '">'
+
+
+CSP_META = csp_meta()
 TELEMETRY_NOTICE = "Telemetry is submitted by installed clients and is not authenticated; treat numbers as advisory"
 TELEMETRY_BANNER = f'<div class="banner" role="note"><strong>Advisory data.</strong> {TELEMETRY_NOTICE}.</div>'
 
@@ -199,13 +221,14 @@ def harden_html(text: str) -> str:
 def layout(title: str, body: str, *, cfg: SiteConfig, depth: int = 0, active: str = "", description: str = "", extra_head: str = "",
           extra_js: str = "") -> str:
     base = "../" * depth
+    csp = csp_meta(theme.THEME_HEAD_JS, *_INLINE_SCRIPT.findall(extra_js or ""))   # hashes come from the AUTHORED snippets, not from the final HTML
     links = "".join(f'<a href="{base}{href}"{" class=active aria-current=page" if key == active else ""}>{esc(label)}</a>' for href, label, key in NAV)
     banner = ""
     if cfg.demo and active in ("dashboard", "program", "home"):
         banner = '<div class="demo-banner"><strong>DEMO DATA.</strong> Dashboards on this site are generated from synthetic fleet history until live analytics is enabled (see docs/PIPELINES.md).</div>'
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
-{CSP_META}
+{csp}
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{esc(title)} - {esc(cfg.title)}</title>
 {f'<meta name="description" content="{esc(description)}">' if description else ''}
@@ -215,13 +238,34 @@ def layout(title: str, body: str, *, cfg: SiteConfig, depth: int = 0, active: st
 <a class="sr" href="#main">Skip to content</a>
 <header class="top">
   <div class="brand">{theme.LOGO_SVG}<div><div class="eyebrow">{esc(cfg.title)} &middot; unattended automation platform</div><div style="font-weight:700">{esc(title)}</div></div></div>
-  <nav class="main" aria-label="Main">{links}<button id="theme-toggle" type="button" title="Toggle light/dark theme" aria-label="Toggle theme">Theme</button></nav>
+  <nav class="main" aria-label="Main">{links}<form id="gs-form" class="gs" role="search"><input id="gsearch" type="search" maxlength="80" placeholder="Search automations, runs, errors" aria-label="Search automations, runs and errors" autocomplete="off"><ul id="gs-results" hidden></ul></form><button id="theme-toggle" type="button" title="Toggle light/dark theme" aria-label="Toggle theme">Theme</button></nav>
 </header>
 <main id="main">{TELEMETRY_BANNER}{banner}{body}</main>
 <footer class="foot">{esc(cfg.title)} &middot; built {esc(cfg.built_at)} {('&middot; commit ' + esc(cfg.commit)) if cfg.commit else ''} &middot;
 <a href="{esc(cfg.repo_url)}">{esc(cfg.repo)}</a> &middot; static site: no server, no tracking.</footer>
-</div><script src="{base}assets/site.js"></script>{extra_js}</body></html>
+</div><script src="{base}assets/site.js"></script><script src="{base}assets/gsearch.js" data-base="{base}" defer></script>{extra_js}</body></html>
 """
+
+
+BUILD_WARNINGS: list[str] = []      # page builders that failed on this build (reported by build_site and in status.json)
+
+
+def guarded(out, cfg: SiteConfig, rel_dir: str, title: str, fn, *args, active: str = "") -> list[str]:
+    """Run one page builder. Telemetry is attacker-authored, so a record nobody anticipated must never fail the whole site build
+    (that would also block the registry and an emergency pause from deploying): a failure becomes a visible placeholder page + a
+    warning, and every other page is unaffected."""
+    try:
+        return fn(out, cfg, *args)
+    except Exception as exc:  # noqa: BLE001
+        import sys as _sys
+        msg = f"{rel_dir}: {type(exc).__name__}"
+        BUILD_WARNINGS.append(msg)
+        _sys.stderr.write(f"::warning title=page builder failed::{msg} - a placeholder page was written; the rest of the site is unaffected\n")
+        body = (f"<h1>{esc(title)}</h1><div class=\"card\"><p><strong>This page could not be built from the current telemetry.</strong> "
+                "A record it could not handle was skipped in favour of keeping the rest of the site (and the registry) up to date. "
+                "Check the <code>site</code> workflow log for the warning, then fix or remove the offending artefact in the logs repo.</p></div>")
+        write(out, f"{rel_dir}/index.html", layout(title, body, cfg=cfg, depth=1, active=active))
+        return [f"{rel_dir}/index.html"]
 
 
 def read_json(path: Path, default=None):

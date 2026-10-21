@@ -8,6 +8,12 @@ from .util import hostname, iso, user_hash, utcnow
 
 def send_heartbeat(paths: Paths, phase: str, automation: str | None = None, run_id: str | None = None,
                    expected_finish_at: str | None = None) -> bool:
+    if phase in ("login", "idle"):  # a heartbeat that shows the machine is idle: a good moment to repair what would fail the next run
+        try:
+            from . import remediation
+            remediation.proactive_pass(paths)
+        except Exception:  # noqa: BLE001 - housekeeping must never stop a heartbeat
+            pass
     cfg = platform_config(paths)
     snap = selfheal._versions_snapshot(paths)
     now = utcnow()

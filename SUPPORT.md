@@ -1,14 +1,14 @@
 # Getting help
 
-| I need to... | Go to |
+| I need to... | Go here |
 |---|---|
-| **Install** an automation | the [install center](https://devpatel135.github.io/AutoStation/install/) - per-automation guides, hash verification, Intune/SCCM settings |
-| **Fix** an installed automation that failed or did not run | open an [automation failure issue](https://github.com/devpatel135/AutoStation/issues/new?template=bug-automation-failure.yml); the run id lets us find logs, evidence and the LLM diagnosis |
-| **Propose** a new automation | [new automation request](https://github.com/devpatel135/AutoStation/issues/new?template=new-automation-request.yml) |
-| **Migrate** a UiPath process | [UiPath migration request](https://github.com/devpatel135/AutoStation/issues/new?template=uipath-migration-request.yml) and the migration guide in the [docs](https://devpatel135.github.io/AutoStation/docs/) |
-| **Get access** (pilot ring, roles, secrets) | [access request](https://github.com/devpatel135/AutoStation/issues/new?template=access-request.yml) - never paste secrets |
-| **Learn how it works** | [documentation](https://devpatel135.github.io/AutoStation/docs/) (searchable): getting started, API, standard, runbooks, security |
-| **Report a vulnerability** | [private security advisory](https://github.com/devpatel135/AutoStation/security/advisories/new) - not a public issue |
+| install an automation | the install center: https://devpatel135.github.io/AutoStation/install/ |
+| check an installed machine | `python -m wrapper_core doctor` (PASS / WARN / FAIL with fixes) |
+| report that an automation failed or did not run | New issue, "Automation failure / problem" (the run id is enough: logs and evidence are on the dashboard) |
+| request a new automation | New issue, "New automation request" |
+| report an outage or a bad release | New issue, "Incident" (operators: pause the automation first, see docs/RUNBOOKS.md section 1) |
+| report a security problem | **privately**: https://github.com/devpatel135/AutoStation/security/advisories/new (never a public issue) |
+| understand how it works | the docs: https://devpatel135.github.io/AutoStation/docs/ |
 
-Operators: the kill-switch, rollback and promotion actions live in the [admin panel](https://devpatel135.github.io/AutoStation/portal/admin.html); the runbooks are in `docs/RUNBOOKS.md`.
-Every automation's owner (a distribution list) is shown on its install page and receives its alerts.
+Automatic `ops-signal` issues are opened by the health pipeline when the fleet looks wrong (a machine went silent, a scheduled run was missed, a run hung,
+a machine is on the wrong version, or the daily installer canary failed). They close themselves when the problem clears; see docs/PIPELINES.md.

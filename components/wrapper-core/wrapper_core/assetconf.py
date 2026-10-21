@@ -46,6 +46,42 @@ def machine_assets_path() -> Optional[Path]:
     return Path(pd) / "AUTOMAGIX" / "assets.json" if pd else None
 
 
+_TRUST_CACHE: Dict[tuple, Tuple[bool, str]] = {}
+_ADMIN_OWNERS = ("BUILTIN\\Administrators", "NT AUTHORITY\\SYSTEM", "NT SERVICE\\TrustedInstaller")
+
+
+def machine_file_trusted(path: Path) -> Tuple[bool, str]:
+    """May this machine-wide file feed every user's runs? Only when an administrator owns it (Windows: Administrators / SYSTEM /
+    TrustedInstaller; POSIX: root, not group/world writable). A file a standard user created in the shared ProgramData folder is ignored,
+    because that user could otherwise inject configuration into other users' runs. The explicit AUTOMAGIX_MACHINE_ASSETS override is the
+    caller's own choice and is not checked. Fails closed; cached per file version."""
+    try:
+        st = path.stat()
+    except OSError as exc:
+        return False, f"cannot stat: {exc}"
+    key = (str(path), st.st_mtime_ns, st.st_size)
+    if key in _TRUST_CACHE:
+        return _TRUST_CACHE[key]
+    result: Tuple[bool, str]
+    if os.name == "nt":
+        import subprocess
+        env = dict(os.environ, AMX_ASSET_PATH=str(path))
+        env.pop("PSModulePath", None)
+        try:
+            r = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", "(Get-Acl -LiteralPath $env:AMX_ASSET_PATH).Owner"],
+                               capture_output=True, text=True, timeout=20, env=env)
+            owner = (r.stdout or "").strip()
+        except (OSError, subprocess.SubprocessError):
+            owner = ""
+        ok = owner.lower() in [o.lower() for o in _ADMIN_OWNERS]
+        result = (ok, "" if ok else f"owned by {owner or 'an unknown owner'}, not an administrator")
+    else:
+        ok = st.st_uid == 0 and not (st.st_mode & 0o022)
+        result = (ok, "" if ok else "must be owned by root and not group/world writable")
+    _TRUST_CACHE[key] = result
+    return result
+
+
 def user_assets_path(paths: Optional[Paths] = None) -> Path:
     return (paths or Paths()).config / "assets.user.json"
 
@@ -67,6 +103,8 @@ def _kind(v: Any) -> str:
 
 
 def _value_problems(v: Any, depth: int = 0) -> List[str]:
+    if isinstance(v, float) and (v != v or v in (float("inf"), float("-inf"))):
+        return ["NaN / Infinity is not a valid asset value"]
     if v is None or isinstance(v, (bool, int, float)):
         return []
     if isinstance(v, str):
@@ -121,6 +159,10 @@ def validate_assets(values: Any, base: Optional[dict] = None) -> Tuple[Dict[str,
     return clean, problems
 
 
+def _reject_constant(name: str) -> Any:
+    raise ValueError(f"{name} is not valid JSON")
+
+
 def _read_layer(path: Optional[Path], label: str, base: dict, problems: List[str]) -> Dict[str, Any]:
     if path is None:
         return {}
@@ -130,7 +172,7 @@ def _read_layer(path: Optional[Path], label: str, base: dict, problems: List[str
         if path.stat().st_size > MAX_FILE_BYTES:
             problems.append(f"{label}: file larger than {MAX_FILE_BYTES} bytes ignored")
             return {}
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"), parse_constant=_reject_constant)
     except (OSError, ValueError):
         problems.append(f"{label}: unreadable or not valid JSON (ignored)")
         return {}
@@ -176,6 +218,11 @@ def effective_assets(paths: Optional[Paths] = None, params: Optional[Dict[str, s
     values: Dict[str, Any] = dict(base)
     sources: Dict[str, str] = {k: "ring" for k in base}
     for label, path in (("machine", machine_assets_path()), ("user", user_assets_path(paths))):
+        if label == "machine" and path is not None and not os.environ.get("AUTOMAGIX_MACHINE_ASSETS") and path.is_file():
+            trusted, why = machine_file_trusted(path)
+            if not trusted:
+                problems.append(f"machine assets: {path} ignored ({why})")
+                continue
         layer = _read_layer(path, f"{label} assets", base, problems)
         values.update(layer)
         sources.update({k: label for k in layer})

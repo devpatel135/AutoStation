@@ -9,13 +9,16 @@ from __future__ import annotations
 
 import hashlib
 import re
+from datetime import datetime, timedelta, timezone
 
-from .common import parse_iso
+from .common import iso, parse_iso
 
 RINGS = ("dev", "pilot", "broad")
 KINDS = ("run", "heartbeat", "lifecycle", "evidence")
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+REMEDIATION_OUTCOMES = ("fixed", "not_fixed", "skipped", "escalated", "recommended")
+MAX_PLAYBOOKS = 20
 RUN_STATUSES = {"success", "partial", "failed", "halted_paused", "skipped_maintenance", "self_heal_failed", "hung"}
 MAX_BYTES = {"run": 1_000_000, "heartbeat": 100_000, "lifecycle": 100_000, "evidence": 3_000_000}
 MAX_EVENTS = 5000
@@ -30,14 +33,37 @@ def _is_num(v) -> bool:
     return isinstance(v, (int, float)) and not isinstance(v, bool) and v == v and abs(v) < 1e15
 
 
+MAX_FUTURE = timedelta(minutes=5)       # a client clock may be a little fast; anything beyond this is forged or broken
+MIN_YEAR = 2020
+TS_FIELDS = ("started_at", "ended_at", "ts", "expected_finish_at")
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
 def _ts_ok(v) -> bool:
+    """A timestamp the rest of the platform can safely do arithmetic on: parseable, representable in UTC, not absurdly old
+    and not in the future (a forged 2099 heartbeat would otherwise mask SILENT / FAILED signals)."""
     if not isinstance(v, str) or len(v) > 40:
         return False
     try:
-        parse_iso(v)
-        return True
-    except (ValueError, TypeError):
+        utc = parse_iso(v).astimezone(timezone.utc)
+        return utc.year >= MIN_YEAR and utc <= _now() + MAX_FUTURE
+    except (ValueError, TypeError, OverflowError, OSError):
         return False
+
+
+def normalize_timestamps(rec: dict) -> dict:
+    """Rewrite the known timestamp fields (record and events) as canonical UTC strings so that string ordering == time ordering.
+    Call only on records that passed validate_record."""
+    for k in TS_FIELDS:
+        if isinstance(rec.get(k), str):
+            rec[k] = iso(parse_iso(rec[k]))
+    for e in rec.get("events") or []:
+        if isinstance(e, dict) and isinstance(e.get("ts"), str):
+            e["ts"] = iso(parse_iso(e["ts"]))
+    return rec
 
 
 def check_path_parts(ring: str, kind: str, name: str, art_id: str) -> str | None:
@@ -56,6 +82,33 @@ def _str(v, limit=500) -> bool:
     return isinstance(v, str) and len(v) <= limit
 
 
+def _check_remediation_attempt(d: dict) -> str | None:
+    """Event ``remediation_attempt``: {playbook, category, action, outcome, detail<=300, duration_ms, attempt}. Strict: it feeds fix-rate maths."""
+    if d.get("outcome") not in REMEDIATION_OUTCOMES:
+        return "run: remediation_attempt outcome is not a known value"
+    for k, lim in (("playbook", 100), ("category", 60), ("action", 200), ("detail", 300)):
+        if d.get(k) is not None and not _str(d[k], lim):
+            return f"run: remediation_attempt {k} is not a bounded string"
+    for k in ("duration_ms", "attempt"):
+        if d.get(k) is not None and (not _is_num(d[k]) or d[k] < 0):
+            return f"run: remediation_attempt {k} is not a non-negative number"
+    return None
+
+
+def _check_remediation_summary(v) -> str | None:
+    """Run key ``remediation``: {category, fixed: bool, playbooks: [names]}."""
+    if not isinstance(v, dict):
+        return "run: remediation is not an object"
+    if v.get("category") is not None and not _str(v["category"], 60):
+        return "run: remediation.category is not a string"
+    if v.get("fixed") is not None and not isinstance(v["fixed"], bool):
+        return "run: remediation.fixed is not a boolean"
+    pbs = v.get("playbooks")
+    if pbs is not None and (not isinstance(pbs, list) or len(pbs) > MAX_PLAYBOOKS or not all(_str(x, 100) for x in pbs)):
+        return "run: remediation.playbooks is not a bounded list of names"
+    return None
+
+
 def _validate_run(rec: dict) -> str | None:
     if not isinstance(rec.get("automation"), str) or not NAME_RE.match(rec["automation"]):
         return "run: bad automation"
@@ -72,7 +125,9 @@ def _validate_run(rec: dict) -> str | None:
             return f"run: {key} is not a number"
     if rec.get("exit_code") is not None and (not isinstance(rec["exit_code"], int) or isinstance(rec["exit_code"], bool)):
         return "run: exit_code is not an integer"
-    for key in ("host", "ring", "automation_version", "wrapper_version", "framework_version", "slot", "synopsis",
+    if rec.get("host") is not None and not (isinstance(rec["host"], str) and NAME_RE.match(rec["host"])):
+        return "run: host is not a plain host name"
+    for key in ("ring", "automation_version", "wrapper_version", "framework_version", "slot", "synopsis",
                 "synopsis_source", "trigger_id", "halt_reason", "expected_finish_at"):
         if rec.get(key) is not None and not _str(rec[key], 2000):
             return f"run: {key} is not a string"
@@ -89,11 +144,19 @@ def _validate_run(rec: dict) -> str | None:
         if e.get("ts") is not None and not _ts_ok(e["ts"]):
             return "run: event ts is not a timestamp"
         d = e.get("data") or {}
+        if e["event"] == "remediation_attempt":
+            bad = _check_remediation_attempt(d)
+            if bad:
+                return bad
         if e["event"] == "item_processed":
             if d.get("outcome") is not None and d["outcome"] not in ("success", "skipped", "failed"):
                 return "run: item outcome is not a known value"
             if d.get("duration_ms") is not None and not _is_num(d["duration_ms"]):
                 return "run: item duration_ms is not a number"
+    if rec.get("remediation") is not None:
+        bad = _check_remediation_summary(rec["remediation"])
+        if bad:
+            return bad
     items = rec.get("items")
     if items is not None:
         if not isinstance(items, dict) or any(not isinstance(v, int) or isinstance(v, bool) or v < 0 or v > 10**9 for v in items.values()):

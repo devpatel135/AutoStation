@@ -1,7 +1,7 @@
 version: 2
 # Monthly and grouped so it stays a single low-noise PR per ecosystem.
-# The npm ecosystem is intentionally absent until components/execution-framework/package-lock.json is committed
-# (generate it once with `npm install --package-lock-only` against your mirror, then add the npm block back).
+# npm: the framework pins playwright-core exactly (Edge/CDP compatibility), so only minor/patch updates are proposed; a lockfile is not
+# committed (the bundle is built with `npm install --omit=dev --ignore-scripts` in CI and the security workflow audits a generated one).
 updates:
   - package-ecosystem: github-actions
     directory: "/"
@@ -33,3 +33,16 @@ updates:
         patterns: ["*"]
     commit-message:
       prefix: "deps(builder)"
+  - package-ecosystem: npm
+    directory: "/components/execution-framework"
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 1
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+    groups:
+      npm:
+        patterns: ["*"]
+    commit-message:
+      prefix: "deps(framework)"

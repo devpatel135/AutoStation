@@ -113,6 +113,16 @@ def parse_cron(expr: str) -> CronSpec:
     doms, dom_star = _field(fields[2], 1, 31, None, "day-of-month")
     months, _ = _field(fields[3], 1, 12, _MON_NAMES, "month")
     dows, dow_star = _field(fields[4], 0, 7, _DOW_NAMES, "day-of-week")
+    for mine, other in ((fields[2], fields[4]), (fields[4], fields[2])):
+        if mine.startswith("*") and mine != "*" and other != "*":
+            # classic cron treats "*/n" as "unrestricted" for the day-of-month OR day-of-week rule (AND semantics), other implementations
+            # treat it as restricted (OR): refuse the ambiguity instead of firing on the wrong days
+            raise ValueError("cron: a stepped */n day-of-month/day-of-week combined with a restricted other day field is ambiguous; "
+                             "list the days explicitly or use '*' for one of the two fields")
+    if dom_star is False and dow_star:  # only the day-of-month restricts: some listed month must actually have such a day
+        longest = {1: 31, 2: 29, 3: 31, 4: 30, 5: 31, 6: 30, 7: 31, 8: 31, 9: 30, 10: 31, 11: 30, 12: 31}
+        if not any(d <= longest[m] for m in months for d in doms):
+            raise ValueError("cron: the day-of-month / month combination matches no calendar day (e.g. February 30th)")
     return CronSpec(minutes, hours, doms, months, dows, dom_star, dow_star)
 
 
@@ -210,17 +220,29 @@ def validate_blackouts(blackouts: Any, label: str = "schedule") -> List[str]:
     return errs
 
 
-def in_blackout(blackouts: Any, day: date) -> Optional[dict]:
-    """The blackout entry covering ``day`` (dict with from/to/reason), else None. Malformed entries are ignored (never raise)."""
+def compile_blackouts(blackouts: Any) -> List[Tuple[date, date, dict]]:
+    """Parse the blackout list once (malformed entries are dropped): (from, to, entry) rows for :func:`in_compiled`."""
+    out: List[Tuple[date, date, dict]] = []
     if not isinstance(blackouts, list):
-        return None
+        return out
     for b in _blackout_entries(blackouts[:MAX_BLACKOUTS]):
         try:
-            if date.fromisoformat(b["from"]) <= day <= date.fromisoformat(b["to"]):
-                return {"blackout": f"{b['from']}..{b['to']}", "reason": str(b.get("reason") or "blackout date")[:120]}
+            out.append((date.fromisoformat(b["from"]), date.fromisoformat(b["to"]), b))
         except (ValueError, TypeError):
             continue
+    return out
+
+
+def in_compiled(rows: List[Tuple[date, date, dict]], day: date) -> Optional[dict]:
+    for lo, hi, b in rows:
+        if lo <= day <= hi:
+            return {"blackout": f"{b['from']}..{b['to']}", "reason": str(b.get("reason") or "blackout date")[:120]}
     return None
+
+
+def in_blackout(blackouts: Any, day: date) -> Optional[dict]:
+    """The blackout entry covering ``day`` (dict with from/to/reason), else None. Malformed entries are ignored (never raise)."""
+    return in_compiled(compile_blackouts(blackouts), day)
 
 
 # --- next run times (pure) -------------------------------------------------------------------------------
@@ -301,10 +323,15 @@ def next_runs(slot: dict, after: datetime, n: int = 5, tz: Any = None, blackouts
     start_day = (after_utc.astimezone(tzinfo) if tzinfo else after_utc.astimezone()).date()
     found: List[datetime] = []
     reached = False
+    rows = compile_blackouts(blackouts)          # parsed once, not once per occurrence (an every-minute slot x 500 entries x 800 days)
+    blocked: Dict[date, bool] = {}
     for i in range(-1, max(1, int(horizon_days))):
         day = start_day + timedelta(days=i)
         for naive in occurrences(slot, day):
-            if in_blackout(blackouts, naive.date()):
+            nd = naive.date()
+            if nd not in blocked:
+                blocked[nd] = in_compiled(rows, nd) is not None
+            if blocked[nd]:
                 continue
             utc = (naive.replace(tzinfo=tzinfo) if tzinfo else naive.astimezone()).astimezone(timezone.utc)
             if utc > after_utc:
@@ -320,7 +347,7 @@ def _resolve_tz(tz: Any):
     if tz is None or hasattr(tz, "utcoffset"):
         return tz
     from .manifest import _tz
-    return _tz(str(tz))
+    return _tz(str(tz), strict=True)
 
 
 # --- Task Scheduler XML ---------------------------------------------------------------------------------
@@ -328,7 +355,7 @@ def _localize(hhmm: str, tz_name: Optional[str]) -> Tuple[str, int]:
     """Wall time in the schedule's zone -> (machine-local HH:MM, calendar-day shift of that conversion today)."""
     from .manifest import _tz
     h, m = (int(x) for x in hhmm.split(":"))
-    tz = _tz(tz_name)
+    tz = _tz(tz_name, strict=True)  # an unresolvable zone raises: a fixed-time task at the wrong wall-clock time is worse than none
     if tz is None:
         return f"{h:02d}:{m:02d}", 0
     there = datetime.now(tz).replace(hour=h, minute=m, second=0, microsecond=0)
@@ -360,6 +387,9 @@ def _iso_dur(minutes: int) -> str:
 def trigger_xml(slot: dict, tz_name: Optional[str], start_day: str) -> str:
     """Task Scheduler ``<Triggers>`` content for a NEW-type slot. Raises ValueError for slots that cannot be expressed safely."""
     t = slot["type"]
+    if not (isinstance(start_day, str) and _ISO_DATE.match(start_day)):
+        raise ValueError(f"start_day must be YYYY-MM-DD, got {start_day!r}")
+    date.fromisoformat(start_day)
     errs = validate_slot(slot)
     if errs:
         raise ValueError("; ".join(errs))

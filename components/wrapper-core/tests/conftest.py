@@ -25,6 +25,8 @@ def _isolate(tmp_path, monkeypatch):
     monkeypatch.setenv("AUTOMAGIX_LOG_REMOTE", str(tmp_path / "logs"))
     monkeypatch.setenv("AUTOMAGIX_RING", "pilot")
     monkeypatch.setenv("AUTOMAGIX_NO_TOAST", "1")
+    if not __import__("os").environ.get("AMX_TEST_REMEDIATION"):   # AMX_TEST_REMEDIATION=1 runs the whole suite with remediation ON (compat check)
+        monkeypatch.setenv("AUTOMAGIX_NO_REMEDIATION", "1")       # remediation has its own tests (test_remediation.py) and opts back in
     monkeypatch.setenv("AUTOMAGIX_ALLOW_INSECURE_SECRETS", "1")
     monkeypatch.setenv("AUTOMAGIX_STARTUP_DIR", str(tmp_path / "startup"))
     monkeypatch.setenv("AUTOSTATION_LLM_ENDPOINT", "mock://")

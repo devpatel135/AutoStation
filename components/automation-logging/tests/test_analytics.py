@@ -14,12 +14,13 @@ def daily_runs(days, hh=9, **kw):
 
 
 # ---------------------------------------------------------------------------------------------- MISSED
-def test_missed_flags_each_overdue_expectation_and_escalates():
+def test_missed_is_one_stable_signal_per_slot_and_escalates():
     runs = daily_runs([4, 3, 2])                       # ran through 10-12; nothing on 10-13 or this morning
     d = data_of(*runs, lifecycle_record("installed", "auto-a", "VDI-1", T(5)))
     sigs, _, _ = signals_of(d, manifest())
     missed = by_type(sigs, "MISSED")
-    assert {s["expected_at"] for s in missed} == {"2026-10-13T09:00:00.000Z", "2026-10-14T09:00:00.000Z"}
+    assert len(missed) == 1 and missed[0]["missed_count"] == 2           # one open problem, not one per expected run
+    assert missed[0]["first_seen"] == "2026-10-13T09:00:00.000Z" and missed[0]["expected_at"] == "2026-10-14T09:00:00.000Z"
     assert all(s["severity"] == "critical" and s["owner"] == "owner@example.com" and s["host"] is None for s in missed)
 
 
@@ -53,7 +54,9 @@ def test_missed_weekly_and_hourly_slots():
     hourly = [{"id": "h", "type": "hourly", "every": 6}]
     d = data_of(*[run_record("auto-a", T(1, h, 2), slot="h") for h in (0, 6, 12)], lifecycle_record("installed", "auto-a", "VDI-1", T(2)))
     sigs, _, _ = signals_of(d, manifest(slots=hourly), now=T(0, 7), lookback_h=24)
-    assert {s["expected_at"] for s in by_type(sigs, "MISSED")} == {"2026-10-13T18:00:00.000Z", "2026-10-14T00:00:00.000Z", "2026-10-14T06:00:00.000Z"}
+    missed = by_type(sigs, "MISSED")
+    assert len(missed) == 1 and missed[0]["missed_count"] == 3                       # three overdue 6-hourly runs = one signal
+    assert missed[0]["first_seen"] == "2026-10-13T18:00:00.000Z" and missed[0]["expected_at"] == "2026-10-14T06:00:00.000Z"
 
 
 def test_missed_respects_schedule_timezone():
@@ -242,3 +245,10 @@ def test_load_archive_respects_window_and_attaches_path(tmp_path):
     write_archive(tmp_path, [run_record("auto-a", T(1, 9)), run_record("auto-a", T(60, 9))])
     d = analytics.load_archive(tmp_path, NOW, window_days=30)
     assert len(d.runs) == 1 and d.runs[0]["_path"].startswith("run/auto-a/2026/10/13/")
+
+
+def test_missed_id_is_stable_as_more_runs_are_missed():
+    d = data_of(*daily_runs([4, 3, 2]), lifecycle_record("installed", "auto-a", "VDI-1", T(5)))
+    first = by_type(signals_of(d, manifest(), now=T(0, 10))[0], "MISSED")
+    later = by_type(signals_of(d, manifest(), now=T(-1, 10))[0], "MISSED")
+    assert len(first) == len(later) == 1 and first[0]["id"] == later[0]["id"]

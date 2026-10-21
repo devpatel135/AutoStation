@@ -8,7 +8,12 @@ into memory only: never printed, logged or written. What it sets:
 
   * Dependabot alerts + security updates, secret scanning (+ non-provider patterns, push protection), private vulnerability reporting
   * Actions: only GitHub-owned actions may run; workflows default to READ-only; fork PRs from outsiders need approval
-  * Rulesets: `main` (no deletion, no force-push), `registry-artifacts` and `triggers` (no deletion, no force-push)
+  * Rulesets: `main` (no deletion, no force-push), `registry-artifacts` and `triggers` (no deletion, no force-push), and on the private
+    logs repo the `ingest` + default branches (the installer-embedded credential must not be able to delete or rewrite history)
+  * Workflow tokens may NOT approve pull requests (can_approve_pull_request_reviews = false)
+  * NOT set, on purpose: required pull-request reviews / status checks on `main`. The release workflow commits the regenerated manifest
+    straight to `main` with the Actions token, so a required-PR rule would stop releases. If you want a hard review gate, create a
+    GitHub App (or a deploy key) for the release bot, add it as the ruleset's only bypass actor and require PRs for everyone else.
   * Pages source = GitHub Actions
 """
 from __future__ import annotations
@@ -76,6 +81,7 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--owner", default="devpatel135")
     ap.add_argument("--repo", default="AutoStation")
+    ap.add_argument("--logs-repo", default="AutoStation-logs", help="private run-log repository (its `ingest` branch gets a no-delete / no-force-push ruleset)")
     ap.add_argument("--dry-run", action="store_true")
     a = ap.parse_args()
     api = Api(credential(), a.dry_run)
@@ -95,12 +101,20 @@ def main() -> int:
     report("actions: allow-list", *api.call("PUT", f"{base}/actions/permissions/selected-actions",
                                               {"github_owned_allowed": True, "verified_allowed": False, "patterns_allowed": []}))
     report("actions: default token permissions = read", *api.call("PUT", f"{base}/actions/permissions/workflow",
-                                                                  {"default_workflow_permissions": "read", "can_approve_pull_request_reviews": True}))
+                                                                  {"default_workflow_permissions": "read", "can_approve_pull_request_reviews": False}))
     report("actions: outside contributors' fork PRs need approval", *api.call(
         "PUT", f"{base}/actions/permissions/fork-pr-contributor-approval", {"approval_policy": "all_external_contributors"}))
     ruleset(api, base, "main: no deletion / force-push", "~DEFAULT_BRANCH")
     ruleset(api, base, "registry-artifacts: append-only", "refs/heads/registry-artifacts")
     ruleset(api, base, "triggers: no deletion / force-push", "refs/heads/triggers")
+    # the logs repo is written with a credential that ships inside every installer: whoever extracts it must not be able to delete or rewrite history
+    logs_base = f"/repos/{a.owner}/{a.logs_repo}"
+    lcode, _ = api.call("GET", logs_base)
+    if lcode == 200:
+        ruleset(api, logs_base, "ingest: no deletion / force-push", "refs/heads/ingest")
+        ruleset(api, logs_base, "default branch: no deletion / force-push", "~DEFAULT_BRANCH")
+    else:
+        print(f"[skip] logs repo {a.logs_repo} not found (HTTP {lcode}): create it with tools/setup_live.py")
     code, pages = api.call("GET", f"{base}/pages")
     if code == 200 and pages.get("build_type") != "workflow":
         report("pages: source = GitHub Actions", *api.call("PUT", f"{base}/pages", {"build_type": "workflow"}))

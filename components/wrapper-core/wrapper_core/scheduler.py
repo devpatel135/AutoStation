@@ -42,7 +42,7 @@ def task_name(automation: str, slot_id: str) -> str:
 def _local_time(hhmm: str, tz_name: str | None) -> str:
     """Convert a manifest wall-clock time in the schedule's timezone to this machine's local HH:MM."""
     h, m = (int(x) for x in hhmm.split(":"))
-    tz = mf._tz(tz_name)
+    tz = mf._tz(tz_name, strict=True)
     if tz is None:
         return f"{h:02d}:{m:02d}"
     today = datetime.now(tz).replace(hour=h, minute=m, second=0, microsecond=0)

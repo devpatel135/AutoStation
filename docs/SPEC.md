@@ -300,7 +300,7 @@ Every attempt emits exactly one `retry_event`.
 
 ## 11. Compliance signals (analytics output `signals.json`)
 
-`MISSED`, `SILENT`, `SLOW`, `VERSION_DRIFT`, `UNEXPECTED`, `HUNG`, plus `FAILED` (run failed) and `ITEM_FAILURES` (partial).
+`MISSED`, `SILENT`, `SLOW`, `VERSION_DRIFT`, `UNEXPECTED`, `HUNG`, plus `FAILED` (run failed) and `ITEM_FAILURES` (partial). Observability signals (`automation_logging/reliability.py`): `ERROR_BUDGET_BURN`, `FLAKY`, `DURATION_ANOMALY`, `REGRESSION_AFTER_RELEASE`, `REMEDIATION_FAILING`, `PERSISTENT_MANUAL_STEP`, `MACHINE_UNHEALTHY`; each is recomputed every build with a stable fingerprint, so it deduplicates while true and resolves when it clears. Run records may carry `events[remediation_attempt]` and a `remediation` summary (validated strictly).
 Each: `{id, type, severity: critical|high|medium|low, automation, host|null, ring, detail, first_seen, evidence: [run_ids], diagnosis: {...}|null, owner}`.
 `id` = stable fingerprint (`sha1(type|automation|host|window)`), used by alerting for de-duplication.
 
@@ -315,3 +315,14 @@ Sources: manifest `triggers:` rules matched against newly-ingested run logs, or 
 
 SemVer for components. `registry validate` + CI smoke test (`tools/compat_smoke.py`) enforce the compatibility matrix.
 `schema_version` bumps are breaking; readers must reject unknown major schema versions.
+
+### Tray indicator
+While a run is active the runner shows a train icon in the Windows notification area (tooltip `AUTOSTATION - <name> running - mm:ss`) from a detached helper process; it is removed when the run ends. Disable with `AUTOMAGIX_NO_TRAY=1`, `tray: false` in `platform.json` or `automation.yaml`. See WRAPPER_CORE_API.md.
+
+### Remediation events and record fields
+Event (in the run record's `events`, and one line per attempt in `logs/remediation.jsonl`): `remediation_attempt` with data
+`{playbook, category, action, outcome, detail, duration_ms, attempt}`; `outcome` is one of `fixed | not_fixed | skipped | escalated | recommended`;
+`detail` is at most 300 characters and scrubbed of credentials.
+
+Run record, present only when a failure was diagnosed: `remediation: {category, fixed, playbooks[], retried, retry_succeeded?, playbook_fixed?, original_error{category,type,message}, needs_person?, debug_bundle?}`
+(`fixed` = this run recovered; `playbooks` = playbooks that acted), `remediated: true` when the single re-run succeeded, and `runtime_overrides: {mode: "native"}` when a remediation override applied.

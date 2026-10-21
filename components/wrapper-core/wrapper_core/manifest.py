@@ -98,7 +98,17 @@ def compatible(m: dict, wrapper_version: str, framework_version: str) -> bool:
 
 
 # --- schedule / maintenance windows -------------------------------------------------------------
-def _tz(name: str | None):
+class TimezoneUnresolvable(ValueError):
+    """The schedule names a time zone this machine cannot resolve (stock Windows Python ships no tz database)."""
+
+
+_TZ_WARNED: set = set()
+_TZ_NAME = re.compile(r"^(?:UTC|Z|GMT|Etc/UTC|[A-Za-z_]+(?:/[A-Za-z0-9_+-]+){1,2})$")
+
+
+def _tz(name: str | None, strict: bool = False):
+    """tzinfo for a schedule's zone. Unknown zone: ``strict`` raises TimezoneUnresolvable (task registration refuses to guess); otherwise
+    None (= the machine's local zone) AND a one-time WARNING in wrapper.log, never a silent fallback."""
     if not name:
         return None
     if name in ("UTC", "Etc/UTC", "GMT", "Z"):
@@ -106,8 +116,24 @@ def _tz(name: str | None):
     try:
         from zoneinfo import ZoneInfo
         return ZoneInfo(name)
-    except Exception:  # noqa: BLE001 - no tzdata on stock Windows Python: fall back to local time
+    except Exception as exc:  # noqa: BLE001 - no tzdata on stock Windows Python
+        msg = (f"timezone {name!r} cannot be resolved on this machine ({type(exc).__name__}): install the tz database "
+               "(pip install tzdata into the embedded Python) or use UTC; refusing to guess the machine's local zone")
+        if strict:
+            raise TimezoneUnresolvable(msg) from exc
+        if name not in _TZ_WARNED:
+            _TZ_WARNED.add(name)
+            import logging
+            logging.getLogger("wrapper_core").warning("%s - falling back to local time for window/blackout checks", msg)
         return None
+
+
+def tz_resolves(name: str | None) -> bool:
+    try:
+        _tz(name, strict=True)
+        return True
+    except TimezoneUnresolvable:
+        return False
 
 
 def in_maintenance(schedule: dict | None, now: datetime | None = None) -> dict | None:
@@ -204,6 +230,9 @@ def validate(m: dict) -> list[str]:
             if not entry.get(field):
                 errs.append(f"{label}: missing {field}")
         sch = entry.get("schedule") or {}
+        tzname = sch.get("timezone")
+        if tzname is not None and not _TZ_NAME.match(str(tzname)):
+            errs.append(f"{label}: schedule.timezone {tzname!r} is not an IANA zone name (e.g. Europe/London) or UTC")
         for slot in sch.get("slots") or []:
             if slot.get("type") not in _SLOT_TYPES:
                 errs.append(f"{label}: slot {slot.get('id')!r} has invalid type {slot.get('type')!r}")

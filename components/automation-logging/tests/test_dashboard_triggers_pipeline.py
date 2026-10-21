@@ -163,7 +163,10 @@ def test_sample_data_exercises_every_signal_type(tmp_path, hour):
     s, out = run_sample(tmp_path, now)
     assert out["errors"] == []
     types = {x["type"] for x in json.loads((s / "public" / "signals.json").read_text())["signals"]}
-    assert types == {"MISSED", "SILENT", "SLOW", "VERSION_DRIFT", "UNEXPECTED", "HUNG", "FAILED", "ITEM_FAILURES"}
+    core = {"MISSED", "SILENT", "SLOW", "VERSION_DRIFT", "UNEXPECTED", "HUNG", "FAILED", "ITEM_FAILURES"}
+    observability = {"REGRESSION_AFTER_RELEASE", "ERROR_BUDGET_BURN", "FLAKY", "DURATION_ANOMALY", "REMEDIATION_FAILING",
+                     "PERSISTENT_MANUAL_STEP", "MACHINE_UNHEALTHY"}
+    assert core <= types and types <= core | observability
     assert (s / "public" / "index.html").exists() and (s / "public" / "triggers.json").exists()
     alerts = [json.loads(l) for l in (s / "state" / "alerts-outbox.jsonl").read_text().splitlines()]
     assert {a["signal_type"] for a in alerts} <= types and any(a["diagnosis"] for a in alerts if a["signal_type"] == "FAILED")

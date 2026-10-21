@@ -27,7 +27,9 @@ from wrapper_core import miniyaml  # noqa: E402
 
 CONTEXTS = {"github", "inputs", "secrets", "vars", "env", "steps", "needs", "matrix", "runner", "job", "strategy", "jobs"}
 FUNCS = {"hashFiles", "format", "contains", "startsWith", "endsWith", "success", "failure", "always", "cancelled", "fromJSON", "toJSON", "join"}
-UNTRUSTED = re.compile(r"(?<![\w.])(inputs\.|github\.event\.(?!repository\.default_branch|workflow_run\.conclusion)|github\.head_ref)")
+UNTRUSTED = re.compile(r"(?<![\w.])(inputs\.|github\.event\.(?!repository\.default_branch|workflow_run\.conclusion)|github\.(?:head_ref|base_ref|ref_name|actor|triggering_actor)\b)")
+GITHUB_OWNED = ("actions", "github")           # the repo's Actions allow-list (tools/harden_repo.py) permits nothing else
+PUSHES = re.compile(r"\bgit\s+(?:push|commit)\b|--git\b")
 EXPR = re.compile(r"\$\{\{(.*?)\}\}", re.S)
 PATH_RE = re.compile(r"(?<![\w$./{-])((?:tools|components|docs|\.github)/[A-Za-z0-9_./-]+\.(?:py|ps1|sh|yml|yaml|json|mjs|js|md|txt|in))")
 
@@ -63,6 +65,11 @@ def check_text(text: str, name: str = "workflow.yml", repo: Path = ROOT) -> list
         jobs = {}
     if "permissions" not in doc and not all("permissions" in (j or {}) for j in jobs.values()):
         errs.append(f"{name}: declare 'permissions' (top level or on every job) - default token scope is too broad")
+    trig_names = set(triggers) if isinstance(triggers, dict) else ({triggers} if isinstance(triggers, str) else set(triggers or []))
+    if "pull_request_target" in trig_names:
+        errs.append(f"{name}: pull_request_target runs with secrets against untrusted code - use pull_request")
+    if "pull_request" in trig_names and collect_usage(text)["secrets"]:
+        errs.append(f"{name}: a pull_request workflow must not use secrets ({', '.join(collect_usage(text)['secrets'])})")
     dispatch_inputs: set = set()
     if isinstance(triggers, dict) and isinstance(triggers.get("workflow_dispatch"), dict):
         dispatch_inputs = set((triggers["workflow_dispatch"].get("inputs") or {}).keys())
@@ -83,12 +90,18 @@ def check_text(text: str, name: str = "workflow.yml", repo: Path = ROOT) -> list
                     u = str(st["uses"])
                     if not u.startswith("./") and not re.search(r"@[0-9a-f]{40}$", u):
                         errs.append(f"{label}: action '{u}' must be pinned to a full commit SHA (tools/pin_actions.py)")
+                    if not u.startswith("./") and u.split("/")[0].lower() not in GITHUB_OWNED:
+                        errs.append(f"{label}: action '{u.split('@')[0]}' is not GitHub-owned (the repo's Actions allow-list only permits actions/* and github/*)")
+                    if u.lower().startswith("actions/checkout@") and not any(PUSHES.search(str((x or {}).get("run", ""))) for x in steps)                             and str(((st.get("with") or {}) if isinstance(st.get("with"), dict) else {}).get("persist-credentials", "")).lower() != "false":
+                        errs.append(f"{label}: checkout must set 'persist-credentials: false' (nothing in this job pushes)")
                 if "if" in st and "secrets." in str(st["if"]):
                     errs.append(f"{label}: 'secrets.*' is not available in 'if:' (copy it to env first)")
                 if st.get("shell") not in (None, "bash", "pwsh", "powershell", "python", "sh", "cmd"):
                     errs.append(f"{label}: unknown shell {st.get('shell')!r}")
                 if "run" in st:
                     for em in EXPR.finditer(str(st["run"])):
+                        if re.search(r"(?<![\w.])secrets\.", em.group(1)):
+                            errs.append(f"{label}: secret interpolated into a shell script (pass it via env:)")
                         if UNTRUSTED.search(em.group(1)):
                             errs.append(f"{label}: untrusted '${{{{ {em.group(1).strip()[:40]} }}}}' interpolated into a shell script (pass it via env:)")
                     for m in PATH_RE.finditer(str(st["run"])):

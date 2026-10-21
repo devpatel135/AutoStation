@@ -31,7 +31,7 @@ sys.path.insert(0, str(HERE / "site"))
 
 import site_common as sc  # noqa: E402
 from site_common import ROOT, SiteConfig, esc, now_iso, write  # noqa: E402
-import site_docs, site_install, site_landing, site_ops  # noqa: E402
+import site_docs, site_install, site_landing, site_obs, site_ops  # noqa: E402
 
 from registry import store as reg_store  # noqa: E402
 from registry.portal import build as portal_build  # noqa: E402
@@ -221,6 +221,7 @@ def build(out: Path, repo: Path = ROOT, *, registry: Path | None = None, manifes
         from automation_logging import analytics
         ops_data = analytics.load_archive(archive, now or datetime.now(timezone.utc))
     pages += site_ops.build_ops(out, cfg, m, ops_data, repo, (out / "registry") if registry else None, now)
+    pages += site_obs.build_obs(out, cfg, m, ops_data, now)
 
     # ---- landing + 404 + status -------------------------------------------------------------------------------
     have = {}
@@ -229,7 +230,7 @@ def build(out: Path, repo: Path = ROOT, *, registry: Path | None = None, manifes
     site_landing.build_landing(out, m, cfg, set(docs_info["docs"]), have)
     nf = ('<h1>Page not found</h1><p>That page does not exist (or has not been built yet). Try the <a href="/">home page</a>, the install center, or search the docs.</p>')
     write(out, "404.html", sc.layout("Not found", nf.replace('href="/"', f'href="{esc(cfg.pages_url)}"'), cfg=cfg, depth=0))
-    status = {"schema_version": 1, "built_at": cfg.built_at, "commit": cfg.commit, "repo": cfg.repo, "pages_url": cfg.pages_url,
+    status = {"schema_version": 1, "built_at": cfg.built_at, "build_warnings": list(sc.BUILD_WARNINGS), "commit": cfg.commit, "repo": cfg.repo, "pages_url": cfg.pages_url,
               "mode": "demo" if cfg.demo else ("live" if archive else "no-fleet-data"),
               "registry": {"manifest_sha256": sha256_of(manifest_path), "automations": len(m.get("automations") or {}),
                            "components": sorted((m.get("components") or {}))},

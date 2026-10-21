@@ -66,26 +66,31 @@ def compute(report: dict, data: analytics.Data, manifest: dict | None, config: d
     manifest = manifest or {}
     autos = manifest.get("automations") or {}
     window_days = report.get("window_days", 30)
+    omitted: list = []        # rows skipped because their data could not be processed (reported, never silent)
     runs = [r for r in data.runs if _ts(r) >= now - timedelta(days=window_days)]
     since30 = now - timedelta(days=30)
 
     # --- per automation: runs, success, items and hours saved ---
     per: dict[str, dict] = {}
     for name in sorted(set(autos) | {r["automation"] for r in runs}):
-        mine = [r for r in runs if r["automation"] == name]
-        counted = [r for r in mine if r["status"] not in ("halted_paused", "skipped_maintenance")]
-        ok = sum(1 for r in counted if r["status"] in ("success", "partial"))
-        entry = autos.get(name) or {}
-        mpi = ((entry.get("catalog") or {}).get("minutes_per_item"))
-        items_ok_30 = sum((r.get("items") or {}).get("success", 0) for r in mine if _ts(r) >= since30)
-        items_all = sum((r.get("items") or {}).get("total", 0) for r in mine)
-        per[name] = {
-            "runs": len(counted), "success_rate": round(ok / len(counted), 4) if counted else None,
-            "items": items_all, "items_success_30d": items_ok_30, "minutes_per_item": mpi,
-            "hours_saved_30d": round(items_ok_30 * _num(mpi) / 60.0, 1) if mpi else None,
-            "ring_versions": entry.get("rings"), "classification": entry.get("data_classification"),
-            "status": entry.get("status", "unregistered" if not entry else "active"), "owner": entry.get("owner"),
-        }
+        try:
+            mine = [r for r in runs if r["automation"] == name]
+            counted = [r for r in mine if r["status"] not in ("halted_paused", "skipped_maintenance")]
+            ok = sum(1 for r in counted if r["status"] in ("success", "partial"))
+            entry = autos.get(name) or {}
+            mpi = ((entry.get("catalog") or {}).get("minutes_per_item"))
+            items_ok_30 = sum((r.get("items") or {}).get("success", 0) for r in mine if _ts(r) >= since30)
+            items_all = sum((r.get("items") or {}).get("total", 0) for r in mine)
+            per[name] = {
+                "runs": len(counted), "success_rate": round(ok / len(counted), 4) if counted else None,
+                "items": items_all, "items_success_30d": items_ok_30, "minutes_per_item": mpi,
+                "hours_saved_30d": round(items_ok_30 * _num(mpi) / 60.0, 1) if mpi else None,
+                "ring_versions": entry.get("rings"), "classification": entry.get("data_classification"),
+                "status": entry.get("status", "unregistered" if not entry else "active"), "owner": entry.get("owner"),
+            }
+        except Exception:  # noqa: BLE001 - one forged/odd record must not take the whole report down: count it
+            omitted.append(1)
+            continue
     hours_30 = round(sum(p["hours_saved_30d"] or 0 for p in per.values()), 1)
     estimated = [n for n, p in per.items() if p["hours_saved_30d"] is None and p["items_success_30d"]]
 
@@ -99,7 +104,9 @@ def compute(report: dict, data: analytics.Data, manifest: dict | None, config: d
         for e in r.get("events", []):
             if e.get("event") == "llm_call":
                 llm_calls += 1
-                prompt_chars += int((e.get("data") or {}).get("prompt_chars") or 0)
+                pc = (e.get("data") or {}).get("prompt_chars")
+                if isinstance(pc, (int, float)) and not isinstance(pc, bool) and 0 <= pc < 1e9:   # attacker-authored: never int("abc")
+                    prompt_chars += int(pc)
     money = {"currency": cfg.get("currency", "USD"), "licence_avoided_per_year": round(licence_year, 2),
              "labour_value_per_year": round(labour_year, 2), "llm_cost_30d": round(llm_calls / 1000.0 * _num(cfg.get("llm_cost_per_1k_calls")), 2),
              "net_value_per_year": round(licence_year + labour_year, 2), "configured": bool(licence_year or labour_year)}
@@ -119,10 +126,14 @@ def compute(report: dict, data: analytics.Data, manifest: dict | None, config: d
     hosts = (report.get("versions") or {}).get("hosts") or []
     drift = []
     for h in hosts:
-        bad = [f"{k} {v['version']} (target {v['target']})" for k, v in h["components"].items() if not v["ok"]]
-        bad += [f"{k} {v['version']} (target {v['target']})" for k, v in h["automations"].items() if not v["ok"]]
-        if bad:
-            drift.append({"host": h["host"], "ring": h["ring"], "issues": bad})
+        try:
+            bad = [f"{k} {v['version']} (target {v['target']})" for k, v in h["components"].items() if not v["ok"]]
+            bad += [f"{k} {v['version']} (target {v['target']})" for k, v in h["automations"].items() if not v["ok"]]
+            if bad:
+                drift.append({"host": h["host"], "ring": h["ring"], "issues": bad})
+        except Exception:  # noqa: BLE001 - one forged/odd record must not take the whole report down: count it
+            omitted.append(1)
+            continue
 
     # --- failure causes (run level + item level) ---
     causes: dict[tuple, dict] = {}
@@ -148,6 +159,7 @@ def compute(report: dict, data: analytics.Data, manifest: dict | None, config: d
     fleet = report.get("fleet") or {}
     program = {
         "schema_version": 1, "generated_at": iso(now), "window_days": window_days,
+        "data_quality": {"rows_omitted": len(omitted)},
         "headline": {"automations": len(autos), "active": len(autos) - len(paused), "runs": fleet.get("total", len(runs)),
                      "success_rate": fleet.get("success_rate"), "items_processed": items.get("total", 0),
                      "items_30d": (report.get("impact") or {}).get("items_30d"), "hours_saved_30d": hours_30,

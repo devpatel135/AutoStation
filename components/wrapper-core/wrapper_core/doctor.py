@@ -57,11 +57,28 @@ def run_checks(paths: Paths | None = None, online: bool = True) -> list[dict]:
         add("platform.json", FAIL, str(exc), "re-run the installer")
         return res
     add("ring", PASS, cfg["ring"])
+    from . import tray as tray_mod
+    why_off = tray_mod.disabled_reason(cfg, env={k: v for k, v in os.environ.items() if k != "PYTEST_CURRENT_TEST"})
+    add("tray indicator (train icon while a run is active)", PASS if not why_off else WARN, "on" if not why_off else f"off: {why_off}",
+        "remove tray: false from config/platform.json (or AUTOMAGIX_NO_TRAY) to show the icon; Windows may park it behind the up-caret "
+        "until you drag it out (Settings > Personalization > Taskbar > Other system tray icons)" if why_off and "Windows" not in why_off else "")
 
     inst = selfheal.read_installed(paths) if paths.root.exists() else {"automations": {}, "components": {}}
     autos = inst.get("automations") or {}
     add("installed automations", PASS if autos else WARN, ", ".join(f"{n} {v}" for n, v in sorted(autos.items())) or "none",
         "download an installer from the install page" if not autos else "")
+
+    try:  # schedule time zones must resolve here, or fixed-time tasks would be registered at the wrong wall-clock time (or refused)
+        from . import manifest as _mf
+        from . import miniyaml as _my
+        cached = _my.loads(paths.manifest_cache.read_text(encoding="utf-8")) if paths.manifest_cache.exists() else {}
+        for name in sorted(autos):
+            tzname = (((cached.get("automations") or {}).get(name) or {}).get("schedule") or {}).get("timezone")
+            if tzname and not _mf.tz_resolves(str(tzname)):
+                add(f"schedule time zone: {name}", FAIL, f"{tzname} cannot be resolved on this machine; its fixed-time tasks are NOT registered",
+                    "install the tz database into the embedded Python (pip install tzdata), or ask the owner to use UTC")
+    except Exception:  # noqa: BLE001 - a diagnostic must never raise
+        pass
 
     # schedule: tasks present for every installed automation (Windows only)
     if sys.platform == "win32" and autos:
@@ -126,10 +143,18 @@ def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(prog="wrapper_core doctor")
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--offline", action="store_true", help="skip network checks")
+    ap.add_argument("--fix", action="store_true", help="apply the SAFE remediation playbooks for FAIL/WARN checks that have one")
+    ap.add_argument("--dry-run", action="store_true", help="with --fix: only report what would be done")
     a = ap.parse_args(argv)
     results = run_checks(online=not a.offline)
+    reports = []
+    if a.fix:
+        from . import remediation
+        reports = [r.to_dict() for r in remediation.fix_from_doctor(results, dry_run=a.dry_run)]
+        if not a.dry_run and reports:
+            results = run_checks(online=not a.offline)  # show the state after the fixes
     if a.json:
-        print(json.dumps(results, indent=2))
+        print(json.dumps({"checks": results, "remediation": reports} if a.fix else results, indent=2))
     else:
         width = max(len(r["check"]) for r in results)
         for r in results:
@@ -139,4 +164,7 @@ def main(argv: list[str]) -> int:
         bad = sum(1 for r in results if r["status"] == FAIL)
         warn = sum(1 for r in results if r["status"] == WARN)
         print(f"\n{len(results) - bad - warn} ok, {warn} warning(s), {bad} failure(s)")
+        for rep in reports:
+            for at in rep["attempts"]:
+                print(f"remediation [{at['outcome']}] {at['playbook']}: {at['detail']}")
     return 1 if any(r["status"] == FAIL for r in results) else 0

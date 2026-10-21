@@ -22,7 +22,7 @@ from .runner import RunOutcome, run_automation
 
 _ENV_KEYS = ("AUTOMAGIX_HOME", "AUTOMAGIX_LOG_TRANSPORT", "AUTOMAGIX_LOG_REMOTE", "AUTOMAGIX_REGISTRY_URL", "AUTOMAGIX_RING",
              "AUTOMAGIX_NO_TOAST", "AUTOMAGIX_ALLOW_INSECURE_SECRETS", "AUTOSTATION_LLM_ENDPOINT", "AUTOSTATION_LLM_KEY",
-             "AUTOMAGIX_LLM_ALLOWED_CLASSIFICATION", "AUTOMAGIX_DATA_CLASSIFICATION")
+             "AUTOMAGIX_LLM_ALLOWED_CLASSIFICATION", "AUTOMAGIX_DATA_CLASSIFICATION", "AUTOMAGIX_NO_REMEDIATION")
 
 
 @dataclass
@@ -63,7 +63,8 @@ def run_payload(payload_dir: str | Path, params: dict | None = None, *, env: dic
         os.environ.update({
             "AUTOMAGIX_HOME": str(root / "home"), "AUTOMAGIX_LOG_TRANSPORT": "dir", "AUTOMAGIX_LOG_REMOTE": str(root / "logs"),
             "AUTOMAGIX_RING": ring, "AUTOMAGIX_NO_TOAST": "1", "AUTOMAGIX_REGISTRY_URL": str(root / "registry"),
-            "AUTOMAGIX_ALLOW_INSECURE_SECRETS": "1"})
+            "AUTOMAGIX_ALLOW_INSECURE_SECRETS": "1",
+            "AUTOMAGIX_NO_REMEDIATION": "1"})  # a failing fixture must stay a failing fixture: no auto-fix, no second payload run (opt in via env=)
         if llm:
             os.environ["AUTOSTATION_LLM_ENDPOINT"] = llm
         else:

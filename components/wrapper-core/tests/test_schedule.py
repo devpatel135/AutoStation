@@ -92,8 +92,30 @@ def test_time_zones_are_honoured():
 def test_next_runs_is_bounded_and_safe():
     assert sc.next_runs({"id": "x", "type": "daily", "time": "09:00"}, AFTER, 0) == []
     assert len(sc.next_runs({"id": "p", "type": "poll", "every_minutes": 1}, AFTER, 5000, tz="UTC")) == 1000
-    never = {"id": "n", "type": "cron", "expr": "0 0 31 2 *"}            # 31 February
-    assert sc.next_runs(never, AFTER, 3, tz="UTC", horizon_days=200) == []
+    never = {"id": "n", "type": "cron", "expr": "0 0 31 2 *"}            # 31 February can never fire: refused at validation, empty when asked anyway
+    assert any("no calendar day" in e for e in sc.validate_slot(never))
+    with pytest.raises(ValueError):
+        sc.next_runs(never, AFTER, 3, tz="UTC", horizon_days=200)
+    assert not sc.validate_slot({"id": "n", "type": "cron", "expr": "0 0 29 2 *"})   # leap day is a real day
+
+
+def test_stepped_day_fields_combined_with_a_restricted_other_field_are_refused():
+    amb = {"id": "a", "type": "cron", "expr": "0 6 */2 * 1"}
+    assert any("ambiguous" in e for e in sc.validate_slot(amb))
+    assert not sc.validate_slot({"id": "a", "type": "cron", "expr": "0 6 */2 * *"})   # a stepped field next to a bare * is unambiguous
+
+
+def test_trigger_xml_validates_start_day_and_blackouts_are_parsed_once():
+    slot = {"id": "w", "type": "weekdays", "time": "09:00"}
+    for bad in ("2026-13-45", "tomorrow", "2026-01-01</StartBoundary><x/>"):
+        with pytest.raises(ValueError):
+            sc.trigger_xml(slot, "UTC", bad)
+    assert "<StartBoundary>2026-01-05T" in sc.trigger_xml(slot, "UTC", "2026-01-05")
+    many = [{"from": f"2027-{(i % 12) + 1:02d}-{(i % 27) + 1:02d}", "to": f"2027-{(i % 12) + 1:02d}-{(i % 27) + 1:02d}"} for i in range(500)]
+    import time as _t
+    t0 = _t.monotonic()
+    runs = sc.next_runs({"id": "m", "type": "interval", "every_minutes": 1}, AFTER, 5, tz="UTC", blackouts=many)
+    assert len(runs) == 5 and _t.monotonic() - t0 < 5
 
 
 # --- validation -------------------------------------------------------------------------------------------

@@ -23,7 +23,7 @@ import tempfile
 from pathlib import Path
 
 from .common import KINDS, iso, parse_iso, utcnow
-from .validate import MAX_BYTES, check_name_matches_record, check_path_parts, ref_digest, validate_record
+from .validate import MAX_BYTES, check_name_matches_record, check_path_parts, normalize_timestamps, ref_digest, validate_record
 
 
 class IngestError(RuntimeError):
@@ -88,6 +88,11 @@ def archive_path(archive: Path, kind: str, name: str, art_id: str, rec: dict) ->
     return Path(archive) / kind / name / d.strftime("%Y") / d.strftime("%m") / d.strftime("%d") / f"{art_id}.json"
 
 
+MAX_REJECTED_FILES = 1000          # quarantine copies kept per archive
+MAX_REJECT_BYTES = 20_000          # bytes of a rejected artefact kept for forensics
+MAX_INGEST_FILES = 20_000          # artefacts processed per ingest_dir run (the rest wait for the next run)
+
+
 def _validate(rec, kind: str, name: str, art_id: str) -> str | None:
     """Return a rejection reason or None. Everything in ``rec`` is attacker-authored (see validate.py)."""
     bad = validate_record(rec, kind)
@@ -108,10 +113,13 @@ def _reject(archive: Path, ref: str, raw: bytes, reason: str, stats: dict) -> No
     stem = ref_digest(ref)
     rej = Path(archive) / "_rejected" / f"{stem}.txt"
     rej.parent.mkdir(parents=True, exist_ok=True)
-    rej.write_bytes(raw[:50_000])
+    stats["rejected"] += 1
+    if not rej.exists() and sum(1 for _ in rej.parent.glob("*.txt")) >= MAX_REJECTED_FILES:
+        stats["rejected_unstored"] = stats.get("rejected_unstored", 0) + 1   # a flood of poison must not fill the disk: count it, keep no copy
+        return
+    rej.write_bytes(raw[:MAX_REJECT_BYTES])
     (Path(archive) / "_rejected" / f"{stem}.reason").write_text(
         "".join(c if c.isprintable() else "?" for c in f"{ref[:200]}: {reason}") + chr(10), encoding="utf-8")
-    stats["rejected"] += 1
 
 
 def _store(archive: Path, ring: str, kind: str, name: str, art_id: str, raw: bytes, stats: dict, source_label: str) -> None:
@@ -133,6 +141,7 @@ def _store(archive: Path, ring: str, kind: str, name: str, art_id: str, raw: byt
     if reason:
         _reject(archive, source_label if source_label else ref, raw, reason, stats)
         return
+    normalize_timestamps(rec)
     rec.setdefault("ring", ring)
     target = archive_path(archive, kind, name, art_id, rec)
     if target.exists():
@@ -156,7 +165,17 @@ def ingest_dir(src: str | Path, archive: str | Path, keep_source: bool = False) 
     root = src / "ingest"
     if not root.exists():
         return stats
-    for f in sorted(root.glob("*/*/*/*.json")):
+    for n_files, f in enumerate(sorted(root.glob("*/*/*/*.json"))):
+        if n_files >= MAX_INGEST_FILES:
+            stats["deferred_files"] = stats.get("deferred_files", 0) + 1
+            continue
+        if f.is_symlink():                      # a pushed symlink could point at any file on the runner: never follow it
+            stats["rejected"] += 1
+            try:
+                f.unlink()
+            except OSError:
+                pass
+            continue
         ring, kind, name = f.relative_to(root).parts[:3]
         art_id = f.stem
         try:

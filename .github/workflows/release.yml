@@ -25,7 +25,7 @@ on:
         default: false
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: release
@@ -36,13 +36,15 @@ jobs:
     if: ${{ github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: write
     env:
-      GH_TOKEN: ${{ github.token }}
-      BOOTSTRAP_INPUT: ${{ inputs.bootstrap }}
+      BOOTSTRAP_INPUT: ${{ inputs.bootstrap }}   # the write token is given only to the steps that push, never to the test run
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
+          persist-credentials: false
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
@@ -56,6 +58,8 @@ jobs:
         run: python tools/build_framework_bundle.py
       - name: Fetch the published artifacts branch (empty on the first run)
         id: artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           URL="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
           if git ls-remote --exit-code --heads "$URL" registry-artifacts >/dev/null 2>&1; then
@@ -75,6 +79,8 @@ jobs:
             --write-manifest components/automation-registry/manifest.yaml --auto-promote $BOOT
       - name: Publish new packages to registry-artifacts (append-only)
         if: ${{ steps.build.outputs.new != '0' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           URL="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
           cd ../ra
@@ -96,13 +102,17 @@ jobs:
           git push origin HEAD:registry-artifacts
       - name: Commit the regenerated manifest to main (all rings follow main)
         if: ${{ steps.build.outputs.changed == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
+          AUTH="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          echo "::add-mask::$AUTH"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add components/automation-registry/manifest.yaml components/automation-registry/history 2>/dev/null || git add components/automation-registry/manifest.yaml
           git commit -q -m "registry: release ${GITHUB_SHA::7} to all rings [skip ci]" || { echo "nothing to commit"; exit 0; }
           git pull --rebase --quiet origin main
-          git push origin HEAD:main
+          git -c "http.extraheader=Authorization: Basic $AUTH" push origin HEAD:main
       - name: Summary
         if: ${{ always() }}
         run: |

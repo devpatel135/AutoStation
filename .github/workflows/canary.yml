@@ -1,0 +1,102 @@
+name: canary
+
+# Proves the thing users actually download still works. Daily, and after every installer build: download the PUBLISHED installer from the
+# rolling release the Download buttons point at, verify its SHA-256 and its build-provenance attestation, install it silently on a clean
+# Windows runner exactly as a user would, run the bundled automation against its local demo page with the real browser path, then uninstall.
+# A failure opens (or refreshes) one `ops-signal` issue; the next green run closes it. Nothing is written to the live logs: every run here
+# is forced to a local log folder (AUTOMAGIX_LOG_TRANSPORT=dir).
+on:
+  schedule:
+    - cron: "23 5 * * *"
+  workflow_run:
+    workflows: [installers]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: canary
+  cancel-in-progress: false
+
+env:
+  AUTOMATION: automation-certification-site
+  AUTOMAGIX_LOG_TRANSPORT: dir
+  AUTOMAGIX_LOG_REMOTE: ${{ github.workspace }}\canary-logs
+  AUTOMAGIX_NO_TOAST: "1"
+
+jobs:
+  install-and-run:
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: windows-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      issues: write
+      attestations: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GITHUB_TOKEN: ${{ github.token }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      - name: Download the published installer and its checksum
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force dl | Out-Null
+          gh release download installers-latest --repo $env:GITHUB_REPOSITORY --dir dl --pattern "$env:AUTOMATION-setup.exe" --pattern "$env:AUTOMATION-setup.exe.sha256" --clobber
+          if ($LASTEXITCODE -ne 0) { throw 'could not download the installer from the installers-latest release' }
+          Get-ChildItem dl | Select-Object Name, Length | Format-Table -AutoSize | Out-Host
+          exit 0
+      - name: Verify the SHA-256 published next to the installer (with retries, because the exe and its digest are uploaded one after the other)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exe = "dl/$env:AUTOMATION-setup.exe"
+          $ok = $false
+          foreach ($attempt in 1..4) {
+            $want = ((Get-Content "$exe.sha256" -Raw).Trim() -split '\s+')[0].ToLower()
+            $got = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLower()
+            if ($want -eq $got) { $ok = $true; Write-Host "sha256 OK $got"; break }
+            Write-Host "attempt ${attempt}: published $want, downloaded $got - re-downloading in 20 s (a publish may be in progress)"
+            Start-Sleep -Seconds 20
+            gh release download installers-latest --repo $env:GITHUB_REPOSITORY --dir dl --pattern "$env:AUTOMATION-setup.exe" --pattern "$env:AUTOMATION-setup.exe.sha256" --clobber
+          }
+          if (-not $ok) { throw 'SHA-256 mismatch between the published digest and the downloaded installer' }
+          exit 0
+      - name: Verify the build-provenance attestation (pinned to the installers workflow on main)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          gh attestation verify "dl/$env:AUTOMATION-setup.exe" --repo $env:GITHUB_REPOSITORY --signer-workflow "$env:GITHUB_REPOSITORY/.github/workflows/installer-dev.yml"
+          if ($LASTEXITCODE -ne 0) { throw 'build-provenance attestation did not verify (wrong signer workflow, or not attested)' }
+          exit 0
+      - name: Install silently (per user, nothing pre-installed)
+        shell: pwsh
+        run: ./tools/ci/smoke-installer.ps1 -Phase install -Automation $env:AUTOMATION -Installer "dl/$env:AUTOMATION-setup.exe"
+      - name: Run the installed automation against the local demo portal
+        shell: pwsh
+        run: ./tools/ci/smoke-installer.ps1 -Phase run -Automation $env:AUTOMATION
+      - name: Uninstall
+        shell: pwsh
+        run: ./tools/ci/smoke-installer.ps1 -Phase uninstall -Automation $env:AUTOMATION
+      - name: Close the canary issue (green)
+        if: ${{ success() }}
+        shell: bash
+        run: python tools/ops_issues.py resolve --id canary-install --note "The canary passed again (installer download, checksum, attestation, install, run, uninstall)."
+      - name: Open or refresh the canary issue (red)
+        if: ${{ failure() }}
+        shell: bash
+        run: |
+          python tools/ops_issues.py raise --id canary-install --type CANARY --severity high \
+            --title "Canary failed - the published installer does not install and run" \
+            --detail "The scheduled canary could not download, verify, install or run the published installer. See the failing run linked below." \
+            --run-url "${RUN_URL}" --automation "${AUTOMATION}"

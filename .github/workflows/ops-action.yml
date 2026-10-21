@@ -41,9 +41,7 @@ on:
         default: false
 
 permissions:
-  contents: write
-  pull-requests: write
-  actions: write
+  contents: read
 
 concurrency:
   group: ops-action
@@ -54,6 +52,10 @@ jobs:
     if: ${{ github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write
     env:
       ACTION: ${{ inputs.action }}
       TARGET: ${{ inputs.target }}
@@ -68,6 +70,8 @@ jobs:
       DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false   # writes go through the REST API with OPS_BOT_TOKEN, not git
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
@@ -79,10 +83,12 @@ jobs:
       - name: Summary
         if: ${{ always() }}
         run: |
+          # TARGET / REASON are operator input: allow-list the characters shown, and never let result text close the code fence
+          SAFE_TARGET="$(printf '%s' "$TARGET" | tr -cd 'A-Za-z0-9._ -' | cut -c1-80)"
           {
-            echo "### ops-action: ${ACTION} ${TARGET}"
+            echo "### ops-action: ${ACTION} ${SAFE_TARGET}"
             echo
             echo '```json'
-            cat ops_result.json 2>/dev/null || echo '{}'
+            python3 -c "import json,sys; print(json.dumps(json.load(open('ops_result.json')), indent=2, ensure_ascii=True).replace(chr(96), chr(39)))" 2>/dev/null || echo '{}'
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"

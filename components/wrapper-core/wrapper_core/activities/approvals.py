@@ -41,10 +41,12 @@ import secrets as _secrets
 import sys
 import threading
 import time
+import unicodedata
 import urllib.parse
 from datetime import timedelta
 from dataclasses import dataclass, field
-from http.server import BaseHTTPRequestHandler, HTTPServer
+import socket
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -101,7 +103,9 @@ def _dir(paths: Optional[Paths] = None) -> Path:
 
 def _clean(text: Any, limit: int, what: str, multiline: bool = False) -> str:
     s = str(text if text is not None else "")
-    s = "".join(ch for ch in s if ch == "\t" or (multiline and ch == "\n") or ord(ch) >= 32 and ord(ch) != 127)
+    # drop control AND format characters: bidi overrides (U+202E ...) could make "1250.00" display reordered to the approver
+    s = "".join(ch for ch in s if ch == "\t" or (multiline and ch == "\n")
+                or (ord(ch) >= 32 and ord(ch) != 127 and unicodedata.category(ch) not in ("Cc", "Cf", "Zl", "Zp")))
     if len(s) > limit:
         raise ValueError(f"{what} is longer than {limit} characters")
     return s
@@ -203,6 +207,7 @@ def create(title: str, description: str = "", fields: Optional[Dict[str, Any]] =
         raise ValueError(f"expires_in_s must be between 1 and {MAX_TTL_S} (30 days)")
     auto = check_name(automation or os.environ.get("AUTOMAGIX_AUTOMATION") or "adhoc")
     expire_due(paths)
+    _maybe_prune(paths)
     if sum(1 for t in list_tasks("pending", paths)) >= MAX_PENDING:
         raise ApprovalError(f"too many pending approvals ({MAX_PENDING})")
     now = utcnow()
@@ -322,6 +327,18 @@ def prune(older_than_days: float = 30, paths: Optional[Paths] = None) -> int:
     return n
 
 
+def _maybe_prune(paths: Optional[Paths], every_s: float = 86400.0, older_than_days: float = 30) -> None:
+    """Housekeeping at most once a day (marker file): decided/expired tasks older than 30 days go, so listing stays fast. Never raises."""
+    try:
+        marker = _dir(paths) / ".pruned"
+        if marker.exists() and time.time() - marker.stat().st_mtime < every_s:
+            return
+        marker.write_text(iso(), encoding="ascii")
+        prune(older_than_days, paths)
+    except OSError:
+        pass
+
+
 def __getattr__(name: str) -> Any:  # ``approvals.list(...)`` without shadowing the builtin inside this module
     if name == "list":
         return list_tasks
@@ -345,6 +362,7 @@ def _page(title: str, body: str) -> bytes:
 def _make_handler(state: "_UiState") -> type:
     class Handler(BaseHTTPRequestHandler):
         server_version = "amx-approvals"
+        timeout = 5  # per-connection socket timeout: an idle or half-open client cannot hold a handler thread
         sys_version = ""
         protocol_version = "HTTP/1.0"
 
@@ -377,20 +395,25 @@ def _make_handler(state: "_UiState") -> type:
             return host in (f"127.0.0.1:{state.port}", f"localhost:{state.port}") and self.client_address[0] in ("127.0.0.1", "::1")
 
         def _token_ok(self, token: Optional[str]) -> bool:
-            return bool(token) and hmac.compare_digest(str(token), state.token)
+            if not token:
+                return False
+            try:  # bytes: compare_digest raises TypeError on a non-ASCII str, which used to drop the connection without counting it
+                return hmac.compare_digest(str(token).encode("utf-8"), state.token.encode("utf-8"))
+            except (TypeError, ValueError):
+                return False
 
         def _url(self, path: str, **q: str) -> str:
             return path + "?" + urllib.parse.urlencode({"t": state.token, **q})
 
         # -- routes
         def do_GET(self) -> None:  # noqa: N802
-            state.touch()
             if not self._host_ok():
                 return self._deny(403, "Wrong host")
             u = urllib.parse.urlsplit(self.path)
             q = urllib.parse.parse_qs(u.query)
             if not self._token_ok((q.get("t") or [None])[0]):
                 return self._deny(403, "Missing or wrong token")
+            state.touch()  # only an authenticated request keeps the page alive: a probe must not
             if u.path == "/":
                 return self._list(done=(q.get("done") or [""])[0])
             m = re.match(r"^/task/([A-Za-z0-9_-]{16,40})$", u.path)
@@ -399,7 +422,6 @@ def _make_handler(state: "_UiState") -> type:
             self._send(404, _page("Not found", "<h1>Not found</h1>"))
 
         def do_POST(self) -> None:  # noqa: N802
-            state.touch()
             try:
                 length = int(self.headers.get("Content-Length") or "0")
             except ValueError:
@@ -422,6 +444,7 @@ def _make_handler(state: "_UiState") -> type:
             one = lambda k: (form.get(k) or [""])[0]  # noqa: E731
             if not self._token_ok(one("t")):
                 return self._deny(403, "Missing or wrong token")
+            state.touch()
             try:
                 task = decide(one("id"), one("decision"), by=None, note=one("note"), paths=state.paths)
                 state.decided += 1
@@ -463,6 +486,24 @@ def _make_handler(state: "_UiState") -> type:
     return Handler
 
 
+class _LoopbackServer(ThreadingHTTPServer):
+    """One idle/half-open connection must not block the page (threaded + per-connection timeout), and on Windows nobody else may bind
+    the same port: SO_REUSEADDR there lets another local process or user share it and receive the one-time token."""
+    allow_reuse_address = False
+    daemon_threads = True
+
+    def handle_error(self, request, client_address) -> None:  # noqa: D401 - a dropped/timed-out client is routine: no traceback on the user's console
+        return None
+
+    def server_bind(self) -> None:
+        if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            try:
+                self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+            except OSError:
+                pass
+        super().server_bind()
+
+
 class _UiState:
     def __init__(self, paths: Optional[Paths], port: int, token: str):
         self.paths, self.port, self.token = paths, port, token
@@ -482,7 +523,7 @@ def serve(paths: Optional[Paths] = None, port: int = 0, open_browser: bool = Tru
     Binds 127.0.0.1 only. ``ready(url, token, port)`` is called once listening (tests / embedding)."""
     token = _secrets.token_urlsafe(24)
     state = _UiState(paths, 0, token)
-    server = HTTPServer(("127.0.0.1", port), _make_handler(state))
+    server = _LoopbackServer(("127.0.0.1", port), _make_handler(state))
     state.port = server.server_address[1]
     if stop is not None:
         state.stop = stop

@@ -238,10 +238,14 @@ class Queue:
 
     def _finish(self, item: QueueItem, new_status: str, reason: Optional[str] = None, output: Optional[dict] = None) -> sqlite3.Row:
         with self._tx() as c:
-            cur = c.execute("UPDATE items SET status=?, ended_at=?, reason=?, output=? WHERE id=? AND status='in_progress'",
-                            (new_status, _clock(), reason, json.dumps(output, default=str) if output is not None else None, item.id))
+            # fencing: the claim (started_at) and retry_no this worker was given must still be current. If requeue_stale handed the item to
+            # another worker meanwhile, a slow first worker can no longer finish THEIR claim (the item would be processed twice).
+            cur = c.execute("UPDATE items SET status=?, ended_at=?, reason=?, output=? WHERE id=? AND status='in_progress' "
+                            "AND started_at IS ? AND retry_no=?",
+                            (new_status, _clock(), reason, json.dumps(output, default=str) if output is not None else None, item.id,
+                             item.started_at, item.retry_no))
             if cur.rowcount != 1:
-                raise LogicError(f"queue item {item.reference!r} is not in progress (already finished or re-queued)")
+                raise LogicError(f"queue item {item.reference!r} is not in progress under this claim (already finished, re-queued or claimed by another worker)")
             return c.execute("SELECT * FROM items WHERE id=?", (item.id,)).fetchone()
 
     def _duration_ms(self, row: sqlite3.Row) -> Optional[int]:
@@ -266,9 +270,10 @@ class Queue:
         if item.retry_no < max_retries:
             with self._tx() as c:
                 cur = c.execute("UPDATE items SET status='new', retry_no=retry_no+1, queued_at=?, started_at=NULL, worker=NULL, reason=? "
-                                "WHERE id=? AND status='in_progress'", (_clock(), reason, item.id))
+                                "WHERE id=? AND status='in_progress' AND started_at IS ? AND retry_no=?",
+                                (_clock(), reason, item.id, item.started_at, item.retry_no))
                 if cur.rowcount != 1:
-                    raise LogicError(f"queue item {item.reference!r} is not in progress")
+                    raise LogicError(f"queue item {item.reference!r} is not in progress under this claim")
             item.retry_no += 1
             item.status, item.reason = "new", reason
             log_event("queue_retry", {"queue": self.name, "reference": item.reference, "retry_no": item.retry_no, "reason": reason[:200]})

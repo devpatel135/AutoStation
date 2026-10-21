@@ -52,3 +52,18 @@ discovery, developer experience and a support model. This document is rendered i
 | Log retention | Raw run logs 13 months; dashboards regenerate from the archive |
 | Registry visibility | Internal GitLab users (pilot); revisit gating via the usercredentials endpoint before broad |
 | Attended automation | Not offered; trigger-based unattended runs only |
+
+## Pipelines as controls (what enforces the rules above)
+
+| Rule | Enforced by |
+|---|---|
+| Nothing unreviewed changes what runs on endpoints, how it is released or who can release it | `.github/CODEOWNERS` (installer, secrets, selfheal, transport, registry, workflows, release tooling) + a ruleset requiring Code Owner review once more than one person works here |
+| Released versions never change | `tools/build_registry.py` fails on same-version/different-content; `registry-artifacts` is append-only (workflow check + ruleset) |
+| Workflows cannot be turned against the repo | `tools/check_workflows.py` in CI: SHA-pinned GitHub-owned actions, timeouts, least privilege, no injection into shells, no `pull_request_target`, secrets never in scripts |
+| No credentials in the repo | `tools/check_secrets.py` (CI) + GitHub secret scanning with push protection |
+| Dependencies are known | Dependabot, `security.yml` (pip/npm audit, dependency-review), SBOM attached to every installer release |
+| Downloads are verifiable | SHA-256 beside every installer, build-provenance attestation (`gh attestation verify`), signed registry manifest once a key is pinned |
+| The fleet is watched | `health.yml` opens `ops-signal` issues, `canary.yml` proves the published installer still works; both close themselves when the problem clears |
+| Every pull request is triaged | `pr.yml` labels by area and size and posts the promotion checklist when `manifest.yaml` changes |
+
+**Ownership of an `ops-signal` issue.** The automation's `owner` (manifest) is named in the issue. Critical: acknowledge the same day and pause or roll back first (RUNBOOKS section 1 and 2); high: within one business day; the platform owner triages anything without an owner. An issue that is closed by the pipeline but was never acknowledged is still a finding: note it in the weekly review.

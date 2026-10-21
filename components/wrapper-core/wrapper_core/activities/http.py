@@ -170,7 +170,10 @@ class _SafeRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         _check_scheme(newurl)
         old, new_p = urllib.parse.urlsplit(req.full_url), urllib.parse.urlsplit(newurl)
-        if old.scheme.lower() == "https" and new_p.scheme.lower() != "https" and not _is_loopback(new_p.hostname):
+        # an https -> http hop is never followed; the loopback exemption exists for local test servers only (otherwise a remote server could
+        # make a connector issue a GET to http://127.0.0.1:<port>/ on this machine)
+        if old.scheme.lower() == "https" and new_p.scheme.lower() != "https" and not (
+                os.environ.get("AMX_ALLOW_TEST_HOSTS") == "1" and _is_loopback(new_p.hostname)):
             raise DataError("refusing a redirect from https to http")
         new = super().redirect_request(req, fp, code, msg, headers, newurl)
         if new is not None and _origin(newurl) != _origin(req.full_url):
@@ -291,9 +294,12 @@ class Client:
     def _retry_after(exc: "urllib.error.HTTPError") -> Optional[float]:
         v = exc.headers.get("Retry-After") if exc.headers else None
         try:
-            return min(float(v), 60.0) if v else None
+            secs = float(v) if v else None
         except ValueError:
             return None
+        if secs is None or secs != secs or secs < 0 or secs == float("inf"):  # NaN / negative / infinite would crash time.sleep: use the backoff instead
+            return None
+        return min(secs, 60.0)
 
     def get(self, path, **kw) -> Response:
         return self.request("GET", path, **kw)
@@ -397,18 +403,21 @@ def _download(url: str, dest, sha256: Optional[str], headers: Dict[str, str], ti
     d = os.path.dirname(os.path.abspath(dest_s))
     os.makedirs(d, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=d, suffix=".part")
+    fd_owned = False  # becomes True once os.fdopen owns the descriptor; until then a failure must close it (Windows cannot unlink an open file)
     h = hashlib.sha256()
     total = 0
     try:
         req = urllib.request.Request(url, headers=headers)
         try:
-            with _urlopen(req, timeout, ctx) as r, os.fdopen(fd, "wb") as f:  # noqa: S310 - scheme checked above
-                for chunk in iter(lambda: r.read(1 << 20), b""):
-                    total += len(chunk)
-                    if total > max_bytes:
-                        raise DataError(f"download exceeds {max_bytes} bytes")
-                    h.update(chunk)
-                    f.write(chunk)
+            with _urlopen(req, timeout, ctx) as r:  # noqa: S310 - scheme checked above
+                with os.fdopen(fd, "wb") as f:
+                    fd_owned = True
+                    for chunk in iter(lambda: r.read(1 << 20), b""):
+                        total += len(chunk)
+                        if total > max_bytes:
+                            raise DataError(f"download exceeds {max_bytes} bytes")
+                        h.update(chunk)
+                        f.write(chunk)
         except urllib.error.HTTPError as exc:
             raise classify_status(exc.code) from exc
         except (urllib.error.URLError, socket.timeout, ConnectionError, ssl.SSLError, TimeoutError) as exc:
@@ -417,6 +426,11 @@ def _download(url: str, dest, sha256: Optional[str], headers: Dict[str, str], ti
             raise DataError("download sha256 mismatch")
         os.replace(tmp, dest_s)
     except BaseException:
+        if not fd_owned:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
         try:
             os.unlink(tmp)
         except OSError:

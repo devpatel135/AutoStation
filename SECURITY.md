@@ -12,7 +12,7 @@ Use GitHub's **private vulnerability reporting** (Security tab -> Report a vulne
 | Unverifiable installers | Installers are published with SHA-256 files and GitHub build-provenance attestations (`gh attestation verify <file> --repo devpatel135/AutoStation`). They are not Authenticode-signed unless a certificate is configured, so SmartScreen warns. |
 
 ## Honest limits
-* Installed automations push run logs with a credential that ships inside the installer. Treat log data as **advisory telemetry**, never as a control signal; the credential can only append to the private logs repo.
+* Installed automations push run logs with a credential that ships inside the public installer. A GitHub token cannot be write-only, so **anyone who extracts it can read the private logs repo and write to it** (a ruleset stops history rewrites on `ingest`; see docs/LIVE_LOGGING.md for the full exposure, the optional read-only token and rotation). Treat all log data as **advisory telemetry**, never as a control signal: it can be forged.
 * GitHub Pages is public: dashboards and the registry are world-readable.
 * Public repository: anything committed is public. Never commit customer data or secrets.
 

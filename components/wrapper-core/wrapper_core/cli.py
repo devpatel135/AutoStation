@@ -28,9 +28,18 @@ def main(argv: list[str] | None = None) -> int:
     if argv and argv[0] == "assets":
         from . import assetconf
         return assetconf.main(argv[1:])
+    if argv and argv[0] == "tray":
+        from . import tray
+        return tray.main(argv[1:])
     if argv and argv[0] == "test":
         from . import testing
         return testing.main(argv[1:])
+    if argv and argv[0] == "remediate":
+        from . import remediation
+        return remediation.main(argv[1:])
+    if argv and argv[0] == "debug-bundle":
+        from . import debugbundle
+        return debugbundle.main(argv[1:])
 
     p = argparse.ArgumentParser(prog="wrapper_core", description="AUTOSTATION wrapper-core")
     p.add_argument("--version", action="version", version=f"wrapper-core {__version__}")
@@ -50,7 +59,9 @@ def main(argv: list[str] | None = None) -> int:
     u.add_argument("automation")
     u.add_argument("--keep-shared", action="store_true")
 
-    sub.add_parser("doctor", help="diagnose this machine/install (read-only, PASS/WARN/FAIL with fixes)")
+    sub.add_parser("doctor", help="diagnose this machine/install (read-only, PASS/WARN/FAIL with fixes; --fix applies the safe ones)")
+    sub.add_parser("remediate", help="diagnose the latest failure + the install and apply SAFE fixes (--dry-run to preview)")
+    sub.add_parser("debug-bundle", help="write a redacted zip of diagnostics for a support ticket")
     sub.add_parser("status", help="show installed components and last runs")
     sub.add_parser("heartbeat", help="send a heartbeat now")
     sub.add_parser("apply-pending", help="swap in a staged wrapper-core")

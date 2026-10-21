@@ -33,6 +33,13 @@ Alert → open the dashboard card → read *synopsis*, *LLM diagnosis*, *retry h
 | HUNG | Watchdog fired (and possibly killed at `timeout_s`) | Check stderr.log in the run folder; hung browser/subprocess |
 | VERSION_DRIFT | Ran a version ≠ ring target | Self-heal failing (token? share?) — read `self_heal.errors` in the run log |
 | UNEXPECTED | Ran inside a maintenance window | Window not propagating; check manifest + `maintenance_windows` |
+| ERROR_BUDGET_BURN | Failing faster than the SLO allows (>=10x over 24 h, >=2x over 7 d, or the window budget is gone) | Open Reliability; fix the top signature on the Errors page before the budget is spent; if the SLO is wrong, set `catalog.slo` |
+| FLAKY | Flips between ok and failed (>=4 flips in the last 20 runs) | Retries are hiding a root cause: open Errors, find the signature that alternates, fix it |
+| DURATION_ANOMALY | Latest run is a statistical outlier against its own history | Compare with the target system and data volume; a fast outlier usually means skipped work |
+| REGRESSION_AFTER_RELEASE | A new error signature appeared within 48 h of a new version and never on the older one | Roll back (`ops-action rollback`) or hot-fix; the signal names both versions |
+| REMEDIATION_FAILING | A remediation playbook failed >=3 times in 7 days and mostly does not fix | The playbook is not helping: fix the cause, adjust or retire it (Errors page, Proactive remediation) |
+| PERSISTENT_MANUAL_STEP | A run has needed a person (sign-in, MFA, untrusted redirect) for >24 h | Do the manual step on that machine (see `manual_step_required` in the run events) |
+| MACHINE_UNHEALTHY | One machine fails across automations while others are healthy | Machine problem: profile, VPN, disk, session, Edge policy; run `python -m wrapper_core doctor` there |
 
 ## 4. Secret rotation
 
@@ -75,3 +82,56 @@ The Playwright path only clicks the Microsoft account tile when the sign-in's `r
 
 ## Signing the registry manifest
 `python tools/setup_live.py` (answer `y` to the signing key) stores `REGISTRY_SIGNING_SEED` and the repo variable `AUTOSTATION_REGISTRY_PUBKEY`. The next `site` run signs `registry/manifest.yaml`; the next installer build pins the public key in `platform.json` (`registry_pubkeys`). Machines installed before that hold no key and keep accepting the registry until reinstalled. To rotate: generate a new key, list both public keys in the variable (comma-separated), release, then drop the old one. Verify any machine with `python -m wrapper_core.trust --show`.
+
+
+## "I don't see the train icon while an automation runs"
+1. Windows 11 parks new notification-area icons behind the **up-caret** (^) at the bottom right. Click the caret: the train is in that flyout. To keep it visible drag it onto the taskbar, or turn it on under *Settings -> Personalization -> Taskbar -> Other system tray icons*.
+2. `python -m wrapper_core doctor` shows `tray indicator ... off: <reason>` when it is disabled (`AUTOMAGIX_NO_TRAY`, `AUTOMAGIX_NO_TOAST`, `tray: false` in `platform.json` or the automation's `automation.yaml`).
+3. `python -m wrapper_core tray --demo 8 --verify` adds the icon for 8 seconds and prints `{"added": true, "registered": true, ...}` when Windows accepted it. `added: false` means the shell refused it (no desktop session, or explorer not running yet).
+4. A **ghost icon** (train left behind after a crash or a force-kill) disappears as soon as the mouse passes over it, or after restarting Explorer. Normal runs remove their icon themselves.
+5. Runs started as a service or in a session without a desktop show no icon by design.
+
+## Canary failed
+The daily `canary` workflow downloads the **published** installer and runs it on a clean Windows runner. A red canary means new users would hit the same problem, so treat it as high severity.
+1. Open the `ops-signal` issue (title starts `[CANARY]`) and the linked run. The failing step tells you where: **download** (release assets missing: re-run `installers`), **sha256** (the file or its `.sha256` is wrong: do not tell anyone to install, rebuild), **attestation** (built before attestations existed or uploaded by hand: re-run `installers` on `main`), **install** or **run** (a real regression).
+2. If it is a real regression and users are affected, pause the automation (section 1) or roll back (section 2), then fix forward.
+3. The issue closes itself on the next green canary. Re-run it from the Actions tab (`canary`, *Run workflow*) once the fix is published.
+
+## Reading an ops-signal issue
+`health` opens one issue per fleet signal at severity high or critical, labelled `ops-signal`, `severity:<x>` and `signal:<type>`; the body names the automation, host, ring and first/last seen. Everything in it came from machine telemetry, which is **advisory** (the credential that pushes it ships inside the installer): confirm on the machine or the Jobs/Machines pages before acting.
+| Signal | Usual cause | First move |
+|---|---|---|
+| `SILENT` | machine off, asleep, offline, or the task was removed | `python -m wrapper_core doctor` on the machine; if the machine is gone, decommission it from the fleet view |
+| `MISSED` | a scheduled run did not happen (machine off at the scheduled time, task disabled) | check the schedule and the machine; a single miss on a laptop is normal |
+| `HUNG` | a run exceeded its timeout and was killed | open the run on the Jobs page, read the evidence; consider raising `timeout_s` or fixing the wait |
+| `VERSION_DRIFT` | a machine is still on an old version long after the target changed | is the registry reachable from the machine; is the machine signing in; roll back if the new version is the problem |
+| `FAILED` | the run failed after retries | section 3 (failure triage) |
+Close nothing by hand: the issue closes when the signal clears. To stop a signal permanently, fix the cause or pause the automation.
+
+
+## Automatic remediation (what the platform fixes by itself)
+When a run fails, a pre-flight check fails, or a login/idle heartbeat finds trouble, wrapper-core classifies the problem (`remediation.diagnose`, no network, no LLM) and runs a **safe, bounded, reversible** playbook. At most **one** re-run of the payload per run, and only when the playbook says it can help.
+
+| Diagnosis | What it does automatically | Re-runs? |
+|---|---|---|
+| `DEVTOOLS_BLOCKED` (Edge policy `RemoteDebuggingAllowed=0`) | writes `state/overrides/<automation>.json` = native mode (30 days). The policy is never touched. | yes |
+| `STALE_BROWSER_PROFILE_LOCK` | stops Edge processes whose command line names **this automation's** profile folder (exact match, not look-alikes), removes `SingletonLock`/`lockfile` | yes |
+| `CORRUPT_BROWSER_PROFILE` | moves the profile to `profiles.bad/` (never deleted, newest 3 kept), creates a fresh one, asks a person to sign in | no |
+| `STALE_LOCK` | removes a run lock whose owner process is gone | no |
+| `MISSING_FILE` / `COMPONENT_CORRUPT` / `NODE_MISSING` | re-fetches the component from the signature-verified registry (hash-checked) and re-asserts tasks | yes |
+| `SCHEDULED_TASK_MISSING` / `_DISABLED` | re-registers / re-enables the Task Scheduler tasks and the login script | no |
+| `DISK_LOW` | deletes this tool's own old run folders, rotated logs, debug bundles, quarantined profiles, leftover `.old`/`.staging` dirs (bounded, inside the install folder only) | yes |
+| `SIGNIN_REQUIRED` / `AUTH_EXPIRED` | one deduplicated "needs a person" notice (toast + `state/toast/<name>.needs-attention.txt` + one approval task) | **never** |
+| `DEPENDENCY_VERSION_MISMATCH` | runs the self-heal pass to pick up a compatible component | yes |
+| `NETWORK_UNREACHABLE` / `DNS_FAILURE` / `PROXY_FAILURE` / `TLS_FAILURE` / `CLOCK_SKEW` | read-only diagnosis incl. clock skew vs the registry's `Date` header; recommendation only | no |
+| `PYTHON_RUNTIME_BROKEN` / `EDGE_MISSING` / `GIT_MISSING` | recommendation only | no |
+| `UNKNOWN` | writes a redacted debug bundle (once per failure signature per day) | no |
+
+**Never:** change a machine policy, touch `secrets/`, delete outside the install folder, run elevated, kill a process it cannot tie to the automation's own profile, retry in a loop (each playbook has a per-24 h budget and a cool-down in `state/remediation.json`), hide the original error (`record.remediation.original_error`; the run's status is whatever the last attempt produced, plus `remediated: true` if the re-run succeeded).
+
+**Switch off:** `AUTOMAGIX_NO_REMEDIATION=1`, or `"remediation": false` in `config/platform.json`; `"remediation": {"disable": ["prune_local_data"]}` disables single playbooks. Paused automations are never touched.
+
+**See what it did:** each attempt is a `remediation_attempt` event in the run record and a line in `logs/remediation.jsonl`. On the machine:
+* `python -m wrapper_core remediate --dry-run` - diagnose the last failed run and the install, show what it *would* do; without `--dry-run` it applies the safe fixes (`--category X`, `--automation N`, `--include-tasks`, `--json`; `--clear-overrides` removes the native-mode override).
+* `python -m wrapper_core doctor --fix` - apply the safe playbooks for FAIL/WARN checks.
+* `python -m wrapper_core debug-bundle [--run RUN_ID] [--out FILE]` - one redacted zip for a support ticket (doctor output, versions, `platform.json` minus secret-like keys, log and run tails, scheduled-task state, registry cache, remediation history; never `secrets/`, profiles, screenshots).

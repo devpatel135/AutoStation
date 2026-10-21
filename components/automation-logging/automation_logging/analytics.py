@@ -12,7 +12,8 @@ from pathlib import Path
 
 from .common import (SEVERITY_ORDER, error_fingerprint, fingerprint, iso, parse_iso, percentile, read_json, utcnow,
                      wc_manifest)
-from .validate import MAX_BYTES, check_name_matches_record, validate_record
+from . import reliability
+from .validate import MAX_BYTES, check_name_matches_record, normalize_timestamps, validate_record
 
 DEFAULTS = {
     "window_days": 30,        # how much archive history is loaded/aggregated
@@ -66,6 +67,7 @@ def load_archive(archive, now: datetime | None = None, window_days: int = DEFAUL
                     raise ValueError("not a record")
                 if validate_record(rec, kind) or check_name_matches_record(kind, rel[0], rec):
                     raise ValueError("invalid")
+                normalize_timestamps(rec)
                 rec["_path"] = f.relative_to(archive).as_posix()
                 if kind == "evidence":  # keep the index light: payloads are read on demand
                     files = rec.get("files") if isinstance(rec.get("files"), list) else []
@@ -287,12 +289,14 @@ def compute_signals(data: Data, manifest: dict, now: datetime, cfg: dict, state:
             continue
         latest[(r["automation"], r.get("host"))].append(r)
 
-    for (name, host), runs in latest.items():
+    errors: list[str] = []
+
+    def _latest_signals(name, host, runs):
         entry = autos.get(name) or {}
         owner = entry.get("owner")
         last = runs[-1]
         if _ts(last) < lookback:
-            continue
+            return
         ring = last.get("ring")
         base = ((entry.get("schedule") or {}).get("expected_duration_ms") or {})
         if last["status"] in _FAILED:
@@ -358,77 +362,126 @@ def compute_signals(data: Data, manifest: dict, now: datetime, cfg: dict, state:
                                 _ts(last), _ts(last), [last["run_id"]], owner,
                                 error_message="; ".join((last.get("self_heal") or {}).get("errors") or [])[:300] or None))
 
+    for (name, host), runs in latest.items():
+        try:
+            _latest_signals(name, host, runs)
+        except Exception as exc:  # noqa: BLE001 - one forged/odd record must not take every other signal down
+            errors.append(f"latest-run signals for {str(name)[:40]}: {type(exc).__name__}")
+
     # --- UNEXPECTED: ran inside a declared maintenance window
     seen_unexp: dict[tuple, dict] = {}
     for r in data.runs:
-        if r["status"] in _UNCOUNTED or r.get("slot") in ("adhoc", "dev") or _ts(r) < lookback:
-            continue
-        entry = autos.get(r["automation"]) or {}
-        w = wc_manifest.in_maintenance(entry.get("schedule"), _ts(r))
-        if w:
-            seen_unexp[(r["automation"], r.get("host"))] = {"run": r, "window": w}
+        try:
+            if r["status"] in _UNCOUNTED or r.get("slot") in ("adhoc", "dev") or _ts(r) < lookback:
+                continue
+            entry = autos.get(r["automation"]) or {}
+            w = wc_manifest.in_maintenance(entry.get("schedule"), _ts(r))
+            if w:
+                seen_unexp[(r["automation"], r.get("host"))] = {"run": r, "window": w}
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"maintenance check: {type(exc).__name__}")
     for (name, host), v in seen_unexp.items():
         r = v["run"]
         signals.append(_sig("UNEXPECTED", "medium", name, host, r.get("ring"), str(v["window"]),
                             f"Run started {r['started_at']} inside maintenance window {v['window']}; the window is not propagating to the endpoint.",
                             _ts(r), _ts(r), [r["run_id"]], (autos.get(name) or {}).get("owner")))
 
-    # --- MISSED
+    # --- MISSED (one signal per automation + slot: a stable id, so a dead automation is ONE open problem, not one per expected run)
+    runs_by_auto: dict[str, list] = defaultdict(list)
     first_seen: dict[str, datetime] = {}
     for r in data.runs:
+        runs_by_auto[r["automation"]].append(r)
         first_seen[r["automation"]] = min(first_seen.get(r["automation"], _ts(r)), _ts(r))
     for ev in data.lifecycle:
         if ev.get("event") == "installed" and ev.get("automation"):
             first_seen[ev["automation"]] = min(first_seen.get(ev["automation"], _ts(ev)), _ts(ev))
     missed_by_auto: dict[str, list] = defaultdict(list)
     for name, entry in autos.items():
-        entry = entry or {}
-        if fleet_paused or entry.get("status", "active") == "paused" or name not in first_seen:
-            continue
-        start = max(lookback, first_seen[name])
-        grace = _grace(entry, cfg["min_grace_min"])
-        exp = expected_runs(entry, start, now + timedelta(days=2))
-        runs = [r for r in data.runs if r["automation"] == name]
-        slot_ids = {s for s, _ in exp}
-        for i, (slot_id, e) in enumerate(exp):
-            if e < start or e > now or now < e + grace:
+        try:
+            entry = entry or {}
+            if fleet_paused or entry.get("status", "active") == "paused" or name not in first_seen:
                 continue
-            if wc_manifest.in_maintenance(entry.get("schedule"), e):
-                continue
-            nxt = next((t for s, t in exp[i + 1:] if s == slot_id), e + timedelta(days=366))
-            end = min(nxt, e + max(grace * 4, timedelta(hours=6)))  # a very late run is not 'this' expected run
-            ran = any((e - timedelta(minutes=10)) <= _ts(r) < end and (r.get("slot") == slot_id or r.get("slot") not in slot_ids)
-                      for r in runs)
-            if not ran:
-                missed_by_auto[name].append((slot_id, e))
+            start = max(lookback, first_seen[name])
+            grace = _grace(entry, cfg["min_grace_min"])
+            exp = expected_runs(entry, start, now + timedelta(days=2))
+            runs = runs_by_auto.get(name, [])
+            run_times = [(_ts(r), r.get("slot")) for r in runs]
+            slot_ids = {s for s, _ in exp}
+            for i, (slot_id, e) in enumerate(exp):
+                if e < start or e > now or now < e + grace:
+                    continue
+                if wc_manifest.in_maintenance(entry.get("schedule"), e):
+                    continue
+                nxt = next((t for s, t in exp[i + 1:] if s == slot_id), e + timedelta(days=366))
+                end = min(nxt, e + max(grace * 4, timedelta(hours=6)))  # a very late run is not 'this' expected run
+                lo = e - timedelta(minutes=10)
+                ran = any(lo <= t < end and (slot == slot_id or slot not in slot_ids) for t, slot in run_times)
+                if not ran:
+                    missed_by_auto[name].append((slot_id, e))
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"missed-run check for {str(name)[:40]}: {type(exc).__name__}")
     for name, items in missed_by_auto.items():
         entry = autos[name]
         sev = "critical" if len(items) >= 2 else "high"
+        by_slot: dict[str, list] = defaultdict(list)
         for slot_id, e in items:
-            signals.append(_sig("MISSED", sev, name, None, None, iso(e) + "|" + slot_id,
-                                f"Expected run of slot '{slot_id}' at {iso(e)} was not seen (grace elapsed).", e, now, [],
-                                entry.get("owner"), slot=slot_id, expected_at=iso(e)))
+            by_slot[slot_id].append(e)
+        for slot_id, times in by_slot.items():
+            times.sort()
+            signals.append(_sig("MISSED", sev, name, None, None, slot_id,
+                                f"{len(times)} expected run(s) of slot '{slot_id}' not seen since {iso(times[0])} (latest expected {iso(times[-1])}).",
+                                times[0], now, [], entry.get("owner"), slot=slot_id, expected_at=iso(times[-1]), missed_count=len(times)))
 
     # --- SILENT: hosts that stopped checking in
     hb_latest: dict[str, dict] = {}
     for hb in data.heartbeats:
         hb_latest[hb["host"]] = hb
+    last_run_by_host: dict[str, datetime] = {}
+    for r in data.runs:
+        if r.get("host"):
+            t = _ts(r)
+            if t > last_run_by_host.get(r["host"], t - timedelta(seconds=1)):
+                last_run_by_host[r["host"]] = t
+    gone_by_host: dict[str, list] = defaultdict(list)
+    for ev in data.lifecycle:
+        # a (forged) uninstall can only hide an automation that this manifest actually knows about
+        if ev.get("host") and ev.get("event") in ("decommissioned", "uninstalled") and ev.get("automation") in autos:
+            gone_by_host[ev["host"]].append(ev)
     silent_after = timedelta(hours=cfg["silent_after_h"])
     for host, hb in hb_latest.items():
-        installed = dict(((hb.get("versions") or {}).get("automations")) or {})
-        for ev in data.lifecycle:
-            if ev.get("host") == host and ev.get("event") in ("decommissioned", "uninstalled") and _ts(ev) >= _ts(hb):
-                installed.pop(ev.get("automation"), None)
-        # latest run activity counts as life too (heartbeat may lag behind a spooled run)
-        last_seen = max([_ts(hb)] + [_ts(r) for r in data.runs if r.get("host") == host][-1:])
-        if installed and now - last_seen > silent_after:
-            names = sorted(installed)
-            owners = sorted({(autos.get(n) or {}).get("owner") for n in names if (autos.get(n) or {}).get("owner")})
-            signals.append(_sig("SILENT", "high", names[0] if len(names) == 1 else None, host, hb.get("ring"), "silent",
-                                f"No heartbeat from {host} for {int((now - last_seen).total_seconds() // 3600)}h "
-                                f"(threshold {cfg['silent_after_h']}h); hosts {', '.join(names)}.",
-                                last_seen, now, [], owners[0] if owners else None, automations=names))
+        try:
+            hb_t = _ts(hb)
+            installed = dict(((hb.get("versions") or {}).get("automations")) or {})
+            for ev in gone_by_host.get(host, []):
+                if _ts(ev) >= hb_t:
+                    installed.pop(ev.get("automation"), None)
+            # latest run activity counts as life too (heartbeat may lag behind a spooled run)
+            last_seen = max(hb_t, last_run_by_host.get(host, hb_t))
+            if installed and now - last_seen > silent_after:
+                names = sorted(installed)
+                owners = sorted({(autos.get(n) or {}).get("owner") for n in names if (autos.get(n) or {}).get("owner")})
+                signals.append(_sig("SILENT", "high", names[0] if len(names) == 1 else None, host, hb.get("ring"), "silent",
+                                    f"No heartbeat from {host} for {int((now - last_seen).total_seconds() // 3600)}h "
+                                    f"(threshold {cfg['silent_after_h']}h); hosts {', '.join(names)}.",
+                                    last_seen, now, [], owners[0] if owners else None, automations=names))
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"silent-host check: {type(exc).__name__}")
 
+    # --- observability signals (error budget, flakiness, regressions, remediation, manual steps, machines)
+    try:
+        signals += reliability.extra_signals(data, manifest, now, cfg, _sig)
+    except Exception as exc:  # noqa: BLE001 - a bug or a forged record here must never take the compliance signals down with it
+        state["extra_signals_error"] = str(exc)[:200]
+    else:
+        state.pop("extra_signals_error", None)
+
+    for sg in signals:
+        # telemetry can name automations that do not exist: dashboards still show them, ops issues are only raised for registered ones
+        sg["registered"] = sg.get("automation") in autos or bool(sg.get("automations") and any(a in autos for a in sg["automations"]))
+    if errors:
+        state["signal_errors"] = errors[:20]
+    else:
+        state.pop("signal_errors", None)
     signals.sort(key=lambda s: (SEVERITY_ORDER[s["severity"]], s["first_seen"]))
     return signals, state
 
@@ -511,7 +564,7 @@ def compute(data: Data, manifest: dict | None, now: datetime | None = None, conf
     report = {
         "schema_version": 1, "generated_at": iso(now), "window_days": cfg["window_days"], "config": cfg, "fleet": fleet,
         "fleet_paused": bool((manifest.get("fleet") or {}).get("paused")),
-        "data_quality": {"skipped_malformed": int(getattr(data, "skipped_malformed", 0))},
+        "data_quality": _data_quality(data, now, state),
         "automations": automations, "signals": signals, "by_ring": by_ring, "by_host": by_host,
         "items": item_metrics(runs), "retries": retry_stats(runs), "llm": llm_stats(runs),
         "trend": _daily(runs, now, cfg["trend_days"]), "versions": versions,
@@ -519,6 +572,18 @@ def compute(data: Data, manifest: dict | None, now: datetime | None = None, conf
                    "hours_saved_30d": round(saved, 1) if saved_known else None},
     }
     return report, state
+
+
+def _data_quality(data: Data, now: datetime, state: dict) -> dict:
+    """What the 'all clear' of this report is worth. Consumers (tools/ops_issues.py) refuse to close issues on a report that
+    loaded little or nothing, is stale, skipped many records, or had a signal builder fail."""
+    stamps = [_ts(r) for r in data.runs[-50:]] + [_ts(h) for h in data.heartbeats[-50:]] + [_ts(e) for e in data.lifecycle[-50:]]
+    newest = max(stamps) if stamps else None
+    return {"skipped_malformed": int(getattr(data, "skipped_malformed", 0)),
+            "records_loaded": len(data.runs) + len(data.heartbeats) + len(data.lifecycle),
+            "newest_record_age_h": round((now - newest).total_seconds() / 3600.0, 2) if newest else None,
+            "signal_errors": list(state.get("signal_errors") or []),
+            "extra_signals_error": state.get("extra_signals_error")}
 
 
 def _daily(runs: list[dict], now: datetime, days: int) -> list[dict]:

@@ -83,10 +83,12 @@ def test_one_call_serves_the_same_error_on_many_hosts_and_cap_is_enforced(tmp_pa
     mockllm.register(cap, "cap")
     runs = [failing_run(host=f"VDI-{i}") for i in range(4)]
     (sigs, stats), _ = diagnosed(runs, manifest(), tmp_path)
+    sigs = [s for s in sigs if s["type"] == "FAILED"]   # observability signals (error budget...) are not diagnosed
     assert stats["eligible"] == 4 and stats["calls"] == 1 and all(s["diagnosis"] for s in sigs)
     mf = manifest_dict({"a1": automation_entry(), "a2": automation_entry(), "a3": automation_entry()})
     runs = [failing_run(automation=a) for a in ("a1", "a2", "a3")]
     (sigs, stats), _ = diagnosed(runs, mf, tmp_path / "cap", max_calls=2)
+    sigs = [s for s in sigs if s["type"] == "FAILED"]
     assert stats["calls"] == 2 and stats["skipped_cap"] == 1
     assert sorted(s["diagnosis_reason"] for s in sigs) == ["cap", "llm", "llm"]
 

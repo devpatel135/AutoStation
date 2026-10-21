@@ -16,7 +16,8 @@ from pathlib import Path
 
 from . import evidence as evidence_mod
 from . import manifest as mf
-from . import miniyaml, notify, runctx, selfheal, transport, versions
+from . import miniyaml, notify, remediation, runctx, selfheal, transport, versions
+from . import tray as tray_mod
 from ._version import __version__ as WRAPPER_VERSION
 from .broker import Broker
 from .heartbeat import send_heartbeat, send_lifecycle
@@ -320,6 +321,7 @@ def run_automation(name: str, slot_id: str | None = None, dry_run: bool = False,
     if not lock.acquire():
         log.info("%s already running - exiting", name)
         return RunOutcome(None, EXIT_OK)
+    tray_handle = tray_mod.start_for_run(paths, name, cfg, dry_run=dry_run)   # train icon in the notification area; never fails a run
     try:
         if not dry_run:
             transport.flush_spool(paths)
@@ -395,6 +397,7 @@ def run_automation(name: str, slot_id: str | None = None, dry_run: bool = False,
                              finish, dry_run, ignore_maintenance, t0)
         return last or RunOutcome(None, EXIT_OK)
     finally:
+        tray_mod.stop(tray_handle)
         lock.release()
 
 
@@ -435,6 +438,10 @@ def _run_once(paths, cfg, name, slot_id, params, trigger_id, heal, entry, schedu
         log_event("phase", {"name": "maintenance_window", "status": "skipped", "window": window})
         return finish(record, ctx, "skipped_maintenance", EXIT_OK, use_llm=False)
 
+    # proactive remediation: fix what is about to fail this run (leftover browser-profile lock, missing/damaged files, low disk)
+    if not dry_run:
+        remediation.preflight(paths, name, cfg, run_id=ctx.run_id)
+
     # payload + compatibility
     try:
         if not adir.exists():
@@ -444,6 +451,7 @@ def _run_once(paths, cfg, name, slot_id, params, trigger_id, heal, entry, schedu
         record["error"] = {"category": "LOGIC_ERROR", "type": type(exc).__name__, "message": str(exc)[:300], "attempts": 0}
         if heal.errors:
             record["error"]["message"] += " | self-heal: " + "; ".join(heal.errors)[:300]
+        _remediate_early(paths, cfg, name, ctx, record, dry_run)
         return finish(record, ctx, "self_heal_failed", EXIT_FAILED)
 
     snap = heal.versions
@@ -458,6 +466,7 @@ def _run_once(paths, cfg, name, slot_id, params, trigger_id, heal, entry, schedu
         problems.append(f"wrapper-core {wv} + execution-framework {fv} is not in the compatibility matrix")
     if problems:
         record["error"] = {"category": "LOGIC_ERROR", "type": "IncompatibleVersions", "message": "; ".join(problems), "attempts": 0}
+        _remediate_early(paths, cfg, name, ctx, record, dry_run)
         return finish(record, ctx, "self_heal_failed", EXIT_FAILED)
 
     try:
@@ -491,11 +500,17 @@ def _run_once(paths, cfg, name, slot_id, params, trigger_id, heal, entry, schedu
         }
         if entry.get("data_classification"):
             env["AUTOMAGIX_DATA_CLASSIFICATION"] = str(entry["data_classification"])
-        for k, v in params.items():
+        # parameter overrides written by remediation (e.g. {"mode": "native"} when managed Edge blocks DevTools); whitelisted keys only
+        overrides = {} if dry_run else remediation.load_overrides(paths, name)
+        if overrides:
+            record["runtime_overrides"] = overrides
+        for k, v in {**params, **overrides}.items():
             env[f"AUTOMATION_PARAM_{str(k).upper()}"] = str(v)
         log_event("phase", {"name": "execute", "status": "start", "slot": slot_id, "params": sorted(params)})
         ex = _Execution(paths, ctx, name, desc, adir, env, policy, entry, t0, base_ms, hung_ms, cfg)
         failure = ex.execute()
+        if failure is not None and not dry_run and not ex.timed_out:
+            failure, ex = _remediate_and_retry(paths, cfg, name, ctx, record, ex, failure, desc, adir, env, policy, entry, t0, base_ms, hung_ms)
     finally:
         broker.stop()
 
@@ -527,6 +542,77 @@ def _run_once(paths, cfg, name, slot_id, params, trigger_id, heal, entry, schedu
     if not dry_run and entry.get("notify_on_complete"):
         notify.run_complete_notice(name, status, record.get("synopsis", ""))
     return out
+
+
+def _original_error(error: dict) -> dict:
+    return {"category": str(error.get("category") or "")[:40], "type": str(error.get("type") or "")[:80],
+            "message": remediation.scrub_text(error.get("message") or "", 300)}
+
+
+def _remediate_early(paths: Paths, cfg: dict, name: str, ctx, record: dict, dry_run: bool) -> None:
+    """A run that cannot even start (payload missing, incompatible versions): diagnose + safe playbooks, no re-run (the next run benefits)."""
+    if dry_run:
+        return
+    rep = remediation.handle_failure(paths, cfg, name, dict(record.get("error") or {}), ctx.run_id, ctx.run_dir, allow_retry=False)
+    if rep is not None:
+        record["remediation"] = {**rep.summary(), "retried": False, "original_error": _original_error(record.get("error") or {})}
+
+
+# failures that happen before a payload does any work: re-running after the fix cannot repeat a side effect
+_STARTUP_CATEGORIES = frozenset({"DEVTOOLS_BLOCKED", "STALE_BROWSER_PROFILE_LOCK", "MISSING_FILE", "COMPONENT_CORRUPT", "NODE_MISSING",
+                                 "DEPENDENCY_VERSION_MISMATCH"})
+
+
+def _retry_allowed(category: str, ctx, desc: dict) -> tuple:
+    """Re-run the payload after a remediation only when it is safe: the automation opted in (``remediation_retry: true`` in
+    automation.yaml - it promises to be idempotent), or nothing had been processed yet and the failure is a startup problem."""
+    if str((desc or {}).get("remediation_retry")).lower() in ("true", "1", "yes"):
+        return True, ""
+    try:
+        done = _aggregate_items(ctx.read_events())["total"]
+    except Exception:  # noqa: BLE001 - unknown progress: do not repeat
+        return False, "could not tell how far the run got"
+    if done:
+        return False, f"{done} item(s) were already processed; set remediation_retry: true in automation.yaml if the automation is idempotent"
+    if category not in _STARTUP_CATEGORIES:
+        return False, "the failure may have happened mid-run; set remediation_retry: true in automation.yaml to allow a re-run"
+    return True, ""
+
+
+def _remediate_and_retry(paths: Paths, cfg: dict, name: str, ctx, record: dict, ex, failure, desc, adir, env, policy, entry, t0, base_ms, hung_ms):
+    """The payload failed: diagnose, apply the SAFE playbook(s) and, if the playbook says a re-run can help, run the payload ONCE more.
+    The original error is kept in ``record["remediation"]["original_error"]``; the run's final status stays whatever the last attempt produced."""
+    err = ctx.read_error() or {}
+    error = {"category": err.get("category"), "type": err.get("type") or type(failure).__name__,
+             "message": err.get("message") or str(failure), "traceback_tail": err.get("traceback_tail"),
+             "stderr_tail": ex.stderr_tail, "exit_code": ex.exit_code}
+    rep = remediation.handle_failure(paths, cfg, name, error, ctx.run_id, ctx.run_dir, allow_retry=True, runtime=desc.get("runtime"))
+    if rep is None:
+        return failure, ex
+    summary = {**rep.summary(), "retried": False, "original_error": _original_error(error)}
+    record["remediation"] = summary
+    if not rep.retry:
+        return failure, ex
+    allowed, why = _retry_allowed(rep.category, ctx, desc)
+    if not allowed:
+        summary["retry_skipped"] = why  # the fix stays applied for the next scheduled run, but a half-finished run is never repeated blindly
+        return failure, ex
+    env2 = dict(env)
+    overrides = remediation.load_overrides(paths, name)
+    for k, v in overrides.items():
+        env2[f"AUTOMATION_PARAM_{str(k).upper()}"] = str(v)
+    if overrides:
+        record["runtime_overrides"] = overrides
+    log_event("phase", {"name": "remediation_retry", "status": "start", "category": rep.category})
+    ex2 = _Execution(paths, ctx, name, desc, adir, env2, policy, entry, t0, base_ms, hung_ms, cfg)
+    failure2 = ex2.execute()
+    summary["retried"] = True
+    summary["retry_succeeded"] = failure2 is None
+    summary["playbook_fixed"] = summary["fixed"]
+    summary["fixed"] = failure2 is None          # "fixed" = this run recovered
+    if failure2 is None:
+        record["remediated"] = True
+    return failure2, ex2
 
 
 def _prune_runs(paths: Paths, keep_days: int = 14) -> None:

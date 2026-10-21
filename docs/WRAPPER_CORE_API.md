@@ -112,3 +112,39 @@ through the real lifecycle (offline, mock LLM) and checks its `expect` block. Ca
 `dry_run`, `llm`, `ring`, `error_handling`, `expect`. `expect` keys: `status` (string or list), `exit_code`, `result` (subset match), `result_keys`,
 `items` (`success`/`skipped`/`failed`/`total` counts), `events` (`{event, min, max, data}`), `error_contains`, `max_duration_ms`. In pytest use
 `testing.run_payload(...)` with `testing.assert_run(run, status="success", items={"failed": 0})`. Exit code 1 if any case fails.
+
+
+## Tray indicator ("a train is running")
+
+While any automation runs, a train icon sits in the Windows notification area with the tooltip `AUTOSTATION - <automation> running - mm:ss`; it disappears when the run ends. Every automation gets it, each run gets its own icon, and a manual `python -m wrapper_core run <name>` shows it too.
+
+* **How it works:** `runner.run_automation` calls `tray.start_for_run` right after taking the run lock and `tray.stop` in its `finally`. The icon lives in a separate hidden helper process (`python -m wrapper_core tray --name N --pid P ...`, started with `pythonw` when present, so no console window), so a missing or crashed icon can never fail or delay a run. `stop` writes a stop file so the helper removes its own icon (killing it would leave a ghost icon until the mouse passes over it); the helper also exits when the runner PID is gone, after a lifetime cap (4 h 15 min), on logoff/shutdown, and quietly when there is no desktop (service session).
+* **Menu:** right-click for the automation name, *Open run log folder* and *Open AUTOSTATION dashboard* (https only, derived from `registry_url`); double-click opens the run folder.
+* **Switches (any one turns it off):** `AUTOMAGIX_NO_TRAY=1`; `AUTOMAGIX_NO_TOAST=1` (CI/tests); `"tray": false` in `config/platform.json` (whole machine); `tray: false` in an automation's `automation.yaml` (one automation); non-Windows; dry runs; pytest.
+* **Preview:** `python -m wrapper_core tray --demo 8` shows the icon for 8 seconds (`--verify` prints whether Windows registered it). `python -m wrapper_core doctor` has a line for it.
+* **Icon:** drawn from pixel art in `wrapper_core/_trayicon.py` (16/32/48 px); `wrapper_core/assets/train.ico` is generated from it (`python -m wrapper_core._trayicon --write wrapper_core/assets/train.ico`) and a test keeps the two identical.
+* **Public helpers (`wrapper_core.tray`):** `sanitize_name`, `tooltip`, `format_elapsed`, `pid_alive`, `site_url`, `disabled_reason`, `start_for_run(paths, name, cfg, dry_run=False) -> TrayHandle | None`, `stop(handle)`.
+
+
+## Remediation (`wrapper_core.remediation`, `playbooks`, `debugbundle`)
+Operator view: [RUNBOOKS.md, Automatic remediation](RUNBOOKS.md). Public surface:
+
+* `diagnose(error: dict, env: dict | None) -> Diagnosis(category, confidence, evidence, signature, automation)` - deterministic; `error` keys: `message, type, category, traceback_tail, stderr_tail, exit_code, status, result_state`; `env` keys: `root, automation, runtime`. Never raises.
+* `Remediator(paths, automation, cfg, dry_run=False, force=False, lister=, killer=, scheduler_runner=, http_head=, now=).handle(diagnosis, run_id=None, allow_retry=True) -> Report(category, attempts, retry, fixed, escalated, recommendations, debug_bundle)`.
+* `handle_failure(...)`, `preflight(...)`, `proactive_pass(...)`, `fix_from_doctor(...)`, `diagnose_environment(...)`, `load_overrides(paths, name)` / `write_override` / `clear_override` (whitelist: `mode=native`), `needs_person(...)`, `scrub_text(text)`.
+* Add a playbook by subclassing `remediation.Playbook` (`name, categories, risk, max_attempts, cooldown_s, retry_after_fix; check, fix, verify, rollback`) and listing it in `playbooks.all_playbooks()`. Only `risk = "safe"` playbooks run unattended.
+* `debugbundle.create_bundle(paths, run_id=None, reason="", out=None, max_total=5 MB) -> Path`.
+* Runner contract: the payload sees `AUTOMATION_PARAM_MODE=native` when the override is active (`record.runtime_overrides`).
+
+## Hardening notes (review follow-ups)
+
+* **Remediation retries:** after a fix the payload is re-run only when nothing had been processed yet and the failure is a startup problem (DevTools blocked, stale profile lock, missing/corrupt component, Node missing, version mismatch). Any other category - and any run that already processed items - needs the automation to opt in with `remediation_retry: true` in `automation.yaml` (a promise that a re-run is idempotent). The fix itself stays applied; the run record carries `remediation.retry_skipped` with the reason.
+* **Repairs are transactional:** a component repair writes `state/repair-pending/<name>.json` before it touches anything and reports `fixed` only with positive evidence (something was reinstalled, the VERSION marker and install record are back). A repair that dies half way is undone at the next run start.
+* **Live runs are never disturbed:** `release_browser_profile_lock` does nothing while another live process holds the automation's run lock (the runner's own lock does not count), and re-lists processes immediately before every kill.
+* **Time zones:** a schedule whose `timezone` cannot be resolved on this machine (stock Windows Python has no tz database; `pip install tzdata` into the embedded Python fixes it) is NOT registered as a fixed-time task, `doctor` reports it as FAIL, and window/blackout checks log a warning once. Task Scheduler needs local time, so the generator converts with today's UTC offset: when the schedule zone and the machine zone switch DST on different dates, the task drifts by an hour for those weeks - use the machine's zone, or UTC, for time-critical slots.
+* **Cron:** `0 0 31 2 *` (a day that never exists) is refused; a stepped `*/n` day field next to a restricted other day field is refused as ambiguous (classic cron and other schedulers disagree on AND/OR).
+* **Machine-wide assets** (`%ProgramData%\AUTOMAGIX\assets.json`) are honoured only when an administrator owns the file; a file created by a standard user in that shared folder is ignored (reported in `wrapper.log`). NaN/Infinity values are rejected.
+* **Approvals:** the local page is threaded with a 5 s per-connection timeout, refuses a shared port (`SO_EXCLUSIVEADDRUSE` on Windows), strips control/format/bidi characters from everything it displays, and only authenticated requests keep it alive. It is not an identity system: the audit trail records the OS user that ran the page or CLI, and any local process holding the one-time token can decide, so requester and approver are separated by process and token, not by account. Decided tasks older than 30 days are pruned automatically once a day.
+* **Debug bundles** carry the run of the automation that failed (never another automation's newest run); automations classified `confidential` or `restricted` contribute metadata only (no run output files, no synopsis). Bundles are written to a temp file and renamed, so a failure never leaves a partial zip.
+* **Queue:** completing or failing an item is fenced on the claim (`started_at` + `retry_no`): a worker whose claim was re-queued to someone else gets a LogicError instead of finishing the other worker's claim.
+* **Test harness:** `testing.run_payload` sets `AUTOMAGIX_NO_REMEDIATION=1` so a failing fixture stays a failing fixture (pass `env={"AUTOMAGIX_NO_REMEDIATION": "0"}` to test remediation itself).

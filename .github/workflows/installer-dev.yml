@@ -42,6 +42,7 @@ env:
 jobs:
   build:
     runs-on: windows-latest
+    environment: production
     timeout-minutes: 40
     env:
       INPUT_RING: ${{ inputs.ring }}
@@ -171,7 +172,7 @@ jobs:
           $env:AUTOMAGIX_HOME = $home_
           $env:PYTHONPATH = Join-Path $home_ 'wrapper-core'
           $env:AUTOMAGIX_LOG_TRANSPORT = 'dir'; $env:AUTOMAGIX_LOG_REMOTE = $logs
-          $env:AUTOMAGIX_NO_TOAST = '1'
+          $env:AUTOMAGIX_NO_TOAST = '1'; $env:AUTOMAGIX_NO_REMEDIATION = '1'
           $env:AUTOMATION_PARAM_PORTAL_URL = 'http://127.0.0.1:8099/portal.html'
           $env:AUTOMATION_PARAM_PICKER_HOST = 'localhost:8099'
           $env:AUTOMATION_PARAM_HEADLESS = 'true'
@@ -223,20 +224,41 @@ jobs:
         with:
           name: installer
           path: dist
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Software bill of materials (CycloneDX) and release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          python3 tools/make_sbom.py --out dist/autostation-sbom.cdx.json --version "$GITHUB_SHA"
+          gh release view installers-latest --json body --jq .body > prev-body.md 2>/dev/null || : > prev-body.md
+          SHA256="$(cut -d' ' -f1 "dist/${AUTOMATION}-setup.exe.sha256")"
+          python3 tools/release_notes.py --out notes.md --prev-body-file prev-body.md --head "$GITHUB_SHA" --repo "$GITHUB_REPOSITORY" \
+            --installer-name "${AUTOMATION}-setup.exe" --installer-sha256 "$SHA256"
+          cat notes.md >> "$GITHUB_STEP_SUMMARY"
       - name: Attest build provenance (verify with gh attestation verify, see docs/SECURITY.md)
         uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
         with:
-          subject-path: dist/*.exe
+          subject-path: |
+            dist/*.exe
+            dist/autostation-sbom.cdx.json
       - name: Publish to the rolling release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
           ls -la dist
-          NOTES="Rolling release rebuilt on every change under components/. Stable name: <automation>-setup.exe (always the latest), plus a versioned copy; SHA-256 files sit next to each installer. UNSIGNED unless signing is configured: Windows SmartScreen shows 'Windows protected your PC' -> More info -> Run anyway (verify the SHA-256 first). Per-user install, no admin rights, nothing to install first."
-          gh release view installers-latest >/dev/null 2>&1 || gh release create installers-latest --target "${{ github.sha }}" --prerelease --title "AutoStation installers (latest)" --notes "$NOTES"
-          gh release edit installers-latest --notes "$NOTES" --prerelease
-          gh release upload installers-latest dist/* --clobber
+          gh release view installers-latest >/dev/null 2>&1 || gh release create installers-latest --target "${{ github.sha }}" --prerelease --title "AutoStation installers (latest)" --notes-file notes.md
+          gh release edit installers-latest --notes-file notes.md --prerelease
+          # Upload order matters because exe and .sha256 cannot be replaced atomically: versioned (immutable) files first, then the stable
+          # exe, then its .sha256 - the window in which a download and its digest disagree is a few seconds, and the canary retries it.
+          for f in $(ls dist | grep -E -- '-[0-9]+[.][0-9]+[.][0-9]+'); do gh release upload installers-latest "dist/$f" --clobber; done
+          gh release upload installers-latest "dist/${AUTOMATION}-setup.exe" --clobber
+          gh release upload installers-latest "dist/${AUTOMATION}-setup.exe.sha256" --clobber
+          for f in $(ls dist | grep -v -E -- "-[0-9]+[.][0-9]+[.][0-9]+|^${AUTOMATION}-setup[.]exe"); do gh release upload installers-latest "dist/$f" --clobber; done
           KEEP=$(ls dist | tr '\n' ' ')
           for a in $(gh release view installers-latest --json assets --jq '.assets[].name'); do
             case " $KEEP " in *" $a "*) ;; *) echo "deleting stale asset $a"; gh release delete-asset installers-latest "$a" -y ;; esac

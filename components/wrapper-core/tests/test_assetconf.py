@@ -61,7 +61,7 @@ def test_type_mismatch_in_a_file_override_is_dropped(layers):
 
 @pytest.mark.parametrize("name,value", [
     ("db_password", "x"), ("api_token", "x"), ("client_secret", "x"), ("my.api-key", "x"), ("credential_name", "x"), ("auth", "x"),
-    ("webhook", "https://user:pw@example.com/x"), ("note", "-----BEGIN OPENSSH PRIVATE KEY-----"), ("gh", "ghp_" + "a" * 30),
+    ("webhook", "https://user:pw@example.com/x"), ("note", "-----BEGIN OPENSSH PRIVATE KEY-----"), ("gh", "ghp_" + "a" * 30),  # secret-scan: allow (fake fixture)
     ("jwt", "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U"),
     ("nested", {"password": "x"}), ("1bad", 1), ("has space", 1), ("a" * 65, 1), ("../x", 1),
 ])

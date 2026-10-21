@@ -24,6 +24,7 @@ jobs:
       - run: python tools/check_workflows.py
       - run: python tools/pin_actions.py --check
       - run: python tools/check_secrets.py
+      - run: python tools/check_py39_syntax.py
   python:
     strategy:
       fail-fast: false

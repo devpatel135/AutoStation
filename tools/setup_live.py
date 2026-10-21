@@ -7,7 +7,15 @@
   2. creates the `production` environment restricted to the default branch (secrets reach only code merged to main)
   3. stores the LOGGING_TOKEN secret (a fine-grained PAT you create at https://github.com/settings/personal-access-tokens/new :
      only repository <owner>/AutoStation-logs, permission Contents: read and write, nothing else) - prompted with no echo
-  4. runs tools/harden_repo.py (secret scanning, push protection, Actions allow-list, read-only default token, rulesets)
+  4. optionally stores LOGS_READ_TOKEN (a SECOND fine-grained PAT, Contents: read only, that the dashboards/health workflows prefer, so
+     the read side no longer depends on the write token that ships inside installers) and generates the registry signing key
+  5. runs tools/harden_repo.py (secret scanning, push protection, Actions allow-list, read-only default token, rulesets on this repo AND
+     on the logs repo's `ingest` branch)
+
+  --env-secrets   store the secrets in the `production` environment (only jobs that declare it - they run from main - can read them)
+  --only-secrets  rotate: re-enter the logging token / read token / signing key without touching anything else. Rotate the logging token
+                  by creating a new PAT, running this, then rebuilding the installers (the `installers` workflow) and revoking the old PAT;
+                  machines installed with the old token stop reporting until they are reinstalled.
 
 Token for the API calls: $GITHUB_TOKEN, else the one in your Git Credential Manager (needs repo + workflow, admin on the repo).
 Nothing is printed or written to disk. Secrets are encrypted client-side with the repository's public key (libsodium sealed box;
@@ -60,6 +68,9 @@ def main() -> int:
     ap.add_argument("--repo", default="AutoStation")
     ap.add_argument("--logs-repo", default="AutoStation-logs")
     ap.add_argument("--skip-secret", action="store_true")
+    ap.add_argument("--env-secrets", action="store_true",
+                    help="store the secrets in the `production` ENVIRONMENT (readable only by jobs that declare it, which run from main) instead of repo-wide")
+    ap.add_argument("--only-secrets", action="store_true", help="rotate / re-enter secrets only: skip repo creation and hardening (use this to rotate the logging token)")
     a = ap.parse_args()
     api = hr.Api(hr.credential())
     base = f"/repos/{a.owner}/{a.repo}"
@@ -68,14 +79,19 @@ def main() -> int:
         raise SystemExit(f"need admin on {a.owner}/{a.repo} (HTTP {code})")
     branch = repo.get("default_branch", "main")
 
+    env = "production" if a.env_secrets else None
     code, _ = api.call("GET", f"/repos/{a.owner}/{a.logs_repo}")
-    if code == 404:
+    if a.only_secrets:
+        pass
+    elif code == 404:
         hr.report(f"create private repo {a.logs_repo}", *api.call("POST", "/user/repos", {
             "name": a.logs_repo, "private": True, "auto_init": False,
             "description": "Run logs pushed by installed AutoStation automations (private)"}))
     else:
         print(f"[ok] {a.logs_repo} exists")
 
+    if a.only_secrets:
+        pass
     hr.report("environment production (deploy branches: default branch only)", *api.call("PUT", f"{base}/environments/production", {
         "deployment_branch_policy": {"protected_branches": False, "custom_branch_policies": True}}))
     api.call("POST", f"{base}/environments/production/deployment-branch-policies", {"name": branch, "type": "branch"})
@@ -83,18 +99,23 @@ def main() -> int:
     if not a.skip_secret:
         tok = getpass.getpass(f"Paste the fine-grained PAT for {a.owner}/{a.logs_repo} (Contents read+write; Enter to skip): ").strip()
         if tok:
-            if not put_secret(api, base, "LOGGING_TOKEN", tok):
+            if not put_secret(api, base, "LOGGING_TOKEN", tok, env):
                 manual_secret_help("LOGGING_TOKEN")
                 print("     (paste the same PAT there; this script does not keep it)")
         else:
             print("[skip] LOGGING_TOKEN not set - dashboards keep the waiting state, installers stay standalone")
 
-    if not a.skip_secret and input("Generate + store the registry signing key (REGISTRY_SIGNING_SEED)? [y/N] ").strip().lower() == "y":
+    if not a.skip_secret:
+        rt = getpass.getpass("OPTIONAL read-only PAT for the dashboards/health workflows (Contents: read on the logs repo only; Enter to skip): ").strip()
+        if rt and not put_secret(api, base, "LOGS_READ_TOKEN", rt, env):
+            manual_secret_help("LOGS_READ_TOKEN")
+
+    if not a.skip_secret and input("Generate + store the registry signing key (this ROTATES it if one exists) (REGISTRY_SIGNING_SEED)? [y/N] ").strip().lower() == "y":
         import secrets as _s
         sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "components" / "wrapper-core"))
         from wrapper_core import ed25519
         seed, pub = ed25519.keypair_from_seed(_s.token_bytes(32))
-        if put_secret(api, base, "REGISTRY_SIGNING_SEED", seed.hex()):
+        if put_secret(api, base, "REGISTRY_SIGNING_SEED", seed.hex(), env):
             # publish the PUBLIC key only after the private seed is safely stored: a pinned key nothing can sign for would lock
             # every newly installed machine out of the registry
             code, _ = api.call("POST", f"{base}/actions/variables", {"name": "AUTOSTATION_REGISTRY_PUBKEY", "value": pub.hex()})
@@ -109,7 +130,9 @@ def main() -> int:
             print(f"     then ALSO add the repository VARIABLE AUTOSTATION_REGISTRY_PUBKEY = {pub.hex()} "
                   "(Settings > Secrets and variables > Actions > Variables) - only after the secret exists")
 
-    sys.argv = [sys.argv[0], "--owner", a.owner, "--repo", a.repo]
+    if a.only_secrets:
+        return 0
+    sys.argv = [sys.argv[0], "--owner", a.owner, "--repo", a.repo, "--logs-repo", a.logs_repo]
     return hr.main()
 
 

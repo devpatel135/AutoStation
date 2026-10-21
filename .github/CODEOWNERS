@@ -23,3 +23,41 @@
 /docs/GOVERNANCE.md                                  @devpatel135
 /docs/AUTOMATION_STANDARD.md                         @devpatel135
 /docs/SECURITY.md                                    @devpatel135
+
+# pipeline helpers and supply-chain policy
+/tools/check_workflows.py                            @devpatel135
+/tools/pin_actions.py                                @devpatel135
+/tools/check_posture.py                              @devpatel135
+/tools/check_secrets.py                              @devpatel135
+/tools/ops_issues.py                                 @devpatel135
+/tools/pr_tools.py                                   @devpatel135
+/tools/make_sbom.py                                  @devpatel135
+/tools/release_notes.py                              @devpatel135
+/tools/ci/                                           @devpatel135
+/SECURITY.md                                         @devpatel135
+/SUPPORT.md                                          @devpatel135
+/docs/PIPELINES.md                                   @devpatel135
+
+# what runs on every endpoint and what ships to every ring (anything merged to main under automations is auto-promoted by `release`)
+/components/automations/                             @devpatel135
+/components/automation-registry/registry/            @devpatel135
+/components/wrapper-core/wrapper_core/trust.py       @devpatel135
+/components/wrapper-core/wrapper_core/ed25519.py     @devpatel135
+/components/wrapper-core/wrapper_core/remediation.py @devpatel135
+/components/wrapper-core/wrapper_core/playbooks.py   @devpatel135
+/components/wrapper-core/wrapper_core/debugbundle.py @devpatel135
+/components/wrapper-core/wrapper_core/tray.py        @devpatel135
+/components/wrapper-core/wrapper_core/runner.py      @devpatel135
+/components/wrapper-core/wrapper_core/activities/approvals.py   @devpatel135
+/components/wrapper-core/wrapper_core/activities/connectors.py  @devpatel135
+/components/execution-framework/lib/                 @devpatel135
+
+# the generated site, the repo-hardening and live-setup tools, and the telemetry validators (a bug here is a public-page or signing bug)
+/tools/site/                                         @devpatel135
+/tools/readiness.py                                  @devpatel135
+/tools/harden_repo.py                                @devpatel135
+/tools/setup_live.py                                 @devpatel135
+/tools/sign_registry.py                              @devpatel135
+/tools/fetch_mingit.py                               @devpatel135
+/components/automation-logging/automation_logging/validate.py   @devpatel135
+/components/automation-logging/automation_logging/ingest.py     @devpatel135

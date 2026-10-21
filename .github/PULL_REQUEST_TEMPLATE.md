@@ -35,4 +35,11 @@ Standard: [docs/AUTOMATION_STANDARD.md](../docs/AUTOMATION_STANDARD.md) · Gover
 - [ ] Reason is accurate and visible to users; incident or ticket linked
 - [ ] For decommission: paused first, no runs since, uninstall plan communicated
 
+## Risk and rollback (every change)
+
+- **Blast radius** (who/what runs this: one automation, one ring, every endpoint, the pipelines): ____
+- **How it fails** (what an operator sees first: dashboard signal, issue, failed workflow): ____
+- **Rollback** (revert this PR, `ops-action` rollback to version `____`, or pause the automation): ____
+- [ ] Anything that runs on endpoints, handles keys, or changes a workflow was read line by line, not skimmed
+
 ## Notes for reviewers

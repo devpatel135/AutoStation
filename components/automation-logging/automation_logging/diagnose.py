@@ -20,7 +20,7 @@ from pathlib import Path
 from .common import iso, parse_iso, read_json, utcnow, write_json
 from . import analytics
 
-ELIGIBLE = ("FAILED", "HUNG", "ITEM_FAILURES")
+ELIGIBLE = ("FAILED", "HUNG", "ITEM_FAILURES", "REGRESSION_AFTER_RELEASE")
 CALLER = "automation-logging/diagnose"
 TEMPLATE = "diagnose@1"
 PROMPT = ("Diagnose this automation failure for an operations engineer. Identify the most likely root cause, pick the "

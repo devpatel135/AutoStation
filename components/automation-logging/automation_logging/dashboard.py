@@ -119,6 +119,7 @@ def render(report: dict, runs_latest: list[dict], evidence_html: str = "") -> st
     sigs = report["signals"]
     parts: list[str] = []
     A = parts.append
+    omitted: list = []
     A("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">" + CSP_META + "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
       "<title>AUTOSTATION Fleet Dashboard</title>"
       "<link rel=\"stylesheet\" href=\"https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&family=IBM+Plex+Mono:wght@400;700&display=swap\">"
@@ -150,46 +151,58 @@ def render(report: dict, runs_latest: list[dict], evidence_html: str = "") -> st
     else:
         A("<div class=\"tw\"><table><tr><th>Severity</th><th>Signal</th><th>Automation</th><th>Host</th><th>Detail</th><th>Diagnosis</th><th>First seen</th><th>Owner</th></tr>")
         for s in sigs:
-            d = s.get("diagnosis")
-            diag = (f"<div class=\"diag\"><b>{esc(d.get('root_cause'))}</b><br>Next: {esc(d.get('suggested_action'))} "
-                    f"({esc(d.get('confidence'))} confidence)<br><i>unverified: model output over unauthenticated telemetry</i></div>") if d else f"<span class=\"diag\">{esc(s.get('diagnosis_reason') or '-')}</span>"
-            who = s.get("automation") or ", ".join(s.get("automations") or []) or "-"
-            A(f"<tr><td>{pill(s['severity'], s['severity'])}</td><td><code>{esc(s['type'])}</code></td><td>{esc(who)}</td><td>{esc(s.get('host') or '-')}</td>"
-              f"<td>{esc(s.get('detail'))}</td><td>{diag}</td><td>{esc(s.get('first_seen'))}</td><td>{esc(s.get('owner') or '-')}</td></tr>")
+            try:
+                d = s.get("diagnosis")
+                diag = (f"<div class=\"diag\"><b>{esc(d.get('root_cause'))}</b><br>Next: {esc(d.get('suggested_action'))} "
+                        f"({esc(d.get('confidence'))} confidence)<br><i>unverified: model output over unauthenticated telemetry</i></div>") if d else f"<span class=\"diag\">{esc(s.get('diagnosis_reason') or '-')}</span>"
+                who = s.get("automation") or ", ".join(s.get("automations") or []) or "-"
+                A(f"<tr><td>{pill(s['severity'], s['severity'])}</td><td><code>{esc(s['type'])}</code></td><td>{esc(who)}</td><td>{esc(s.get('host') or '-')}</td>"
+                  f"<td>{esc(s.get('detail'))}</td><td>{diag}</td><td>{esc(s.get('first_seen'))}</td><td>{esc(s.get('owner') or '-')}</td></tr>")
+            except Exception:  # noqa: BLE001 - one forged/odd record must not take the whole page down: show that it was omitted
+                omitted.append(1)
+                A('<tr><td colspan="8"><i>row omitted: its data could not be rendered</i></td></tr>')
         A("</table></div>")
 
     # --- automation cards
     A("<h2>Automations</h2><div class=\"grid\">")
     for name, a in sorted(report["automations"].items()):
-        last = a.get("last_run") or {}
-        strip = "".join(f"<i class=\"{esc(r['status'])}\" title=\"{esc(r['started_at'])} {esc(r['status'])}\"></i>" for r in reversed(a["recent_runs"]))
-        runs_spark = spark([d["runs"] for d in a["daily"]])
-        fail_spark = spark([d["failed"] for d in a["daily"]], cls="bad")
-        it = a["items"]
-        A(f"<div class=\"acard {esc(a['health'])}\"><div style=\"display:flex;justify-content:space-between;gap:.5rem\"><h3>{esc(name)}</h3>{pill(a['health'], a['health'])}</div>"
-          f"<div class=\"desc\">{esc(a.get('description') or 'not in manifest')} &middot; owner {esc(a.get('owner') or '-')}</div>"
-          f"<div class=\"strip\" aria-label=\"last runs\">{strip}</div>"
-          f"<div class=\"syn\">{esc(last.get('synopsis') or 'No runs in window.')}</div>"
-          f"<div class=\"kv\"><b>Last run</b><span>{esc(last.get('started_at') or '-')} ({esc(last.get('status') or '-')})</span>"
-          f"<b>Runs</b><span>{a['runs']['total']} &middot; success {pct(a['runs']['success_rate'])}</span>"
-          f"<b>Duration</b><span>p50 {fmt_ms(a['duration_ms']['p50'])} / p95 {fmt_ms(a['duration_ms']['p95'])}</span>"
-          f"<b>Items</b><span>{it['total']} &middot; {it['failed']} failed &middot; skip {pct(it['skip_rate'])}</span>"
-          f"<b>Runs/day</b><span>{runs_spark}</span><b>Failures/day</b><span>{fail_spark}</span>"
-          f"<b>Versions</b><span>{esc(json.dumps(a.get('ring_versions') or {}))}</span></div>"
-          + (f"<div class=\"diag\" style=\"margin-top:.4rem\">Paused: {esc(a.get('paused_reason'))}</div>" if a["health"] == "paused" else "") + "</div>")
+        try:
+            last = a.get("last_run") or {}
+            strip = "".join(f"<i class=\"{esc(r['status'])}\" title=\"{esc(r['started_at'])} {esc(r['status'])}\"></i>" for r in reversed(a["recent_runs"]))
+            runs_spark = spark([d["runs"] for d in a["daily"]])
+            fail_spark = spark([d["failed"] for d in a["daily"]], cls="bad")
+            it = a["items"]
+            A(f"<div class=\"acard {esc(a['health'])}\"><div style=\"display:flex;justify-content:space-between;gap:.5rem\"><h3>{esc(name)}</h3>{pill(a['health'], a['health'])}</div>"
+              f"<div class=\"desc\">{esc(a.get('description') or 'not in manifest')} &middot; owner {esc(a.get('owner') or '-')}</div>"
+              f"<div class=\"strip\" aria-label=\"last runs\">{strip}</div>"
+              f"<div class=\"syn\">{esc(last.get('synopsis') or 'No runs in window.')}</div>"
+              f"<div class=\"kv\"><b>Last run</b><span>{esc(last.get('started_at') or '-')} ({esc(last.get('status') or '-')})</span>"
+              f"<b>Runs</b><span>{a['runs']['total']} &middot; success {pct(a['runs']['success_rate'])}</span>"
+              f"<b>Duration</b><span>p50 {fmt_ms(a['duration_ms']['p50'])} / p95 {fmt_ms(a['duration_ms']['p95'])}</span>"
+              f"<b>Items</b><span>{it['total']} &middot; {it['failed']} failed &middot; skip {pct(it['skip_rate'])}</span>"
+              f"<b>Runs/day</b><span>{runs_spark}</span><b>Failures/day</b><span>{fail_spark}</span>"
+              f"<b>Versions</b><span>{esc(json.dumps(a.get('ring_versions') or {}))}</span></div>"
+              + (f"<div class=\"diag\" style=\"margin-top:.4rem\">Paused: {esc(a.get('paused_reason'))}</div>" if a["health"] == "paused" else "") + "</div>")
+        except Exception:  # noqa: BLE001 - one forged/odd record must not take the whole page down: show that it was omitted
+            omitted.append(1)
+            A('<div class="card"><i>automation card omitted: its data could not be rendered</i></div>')
     A("</div>")
 
     # --- item-level
     A("<h2>Item-level telemetry</h2><div class=\"tw\"><table><tr><th>Automation</th><th>Items</th><th>Throughput /min</th><th>P50</th><th>P95</th><th>P99</th>"
       "<th>Skip rate</th><th>Skip reasons</th><th>Item failure rate</th><th>Run failure rate</th><th>Runs ok with failed items</th></tr>")
     for name, a in sorted(report["automations"].items()):
-        it = a["items"]
-        if not it["total"]:
-            continue
-        A(f"<tr><td>{esc(name)}</td><td>{it['total']}</td><td>{esc(it['throughput_per_min'])}</td><td>{fmt_ms(it['duration_ms']['p50'])}</td>"
-          f"<td>{fmt_ms(it['duration_ms']['p95'])}</td><td>{fmt_ms(it['duration_ms']['p99'])}</td><td>{pct(it['skip_rate'])}</td>"
-          f"<td>{esc(', '.join(f'{k}: {v}' for k, v in it['skip_reasons'].items()) or '-')}</td><td>{pct(it['item_failure_rate'])}</td>"
-          f"<td>{pct(it['run_failure_rate'])}</td><td>{it['runs_with_item_failures']}</td></tr>")
+        try:
+            it = a["items"]
+            if not it["total"]:
+                continue
+            A(f"<tr><td>{esc(name)}</td><td>{it['total']}</td><td>{esc(it['throughput_per_min'])}</td><td>{fmt_ms(it['duration_ms']['p50'])}</td>"
+              f"<td>{fmt_ms(it['duration_ms']['p95'])}</td><td>{fmt_ms(it['duration_ms']['p99'])}</td><td>{pct(it['skip_rate'])}</td>"
+              f"<td>{esc(', '.join(f'{k}: {v}' for k, v in it['skip_reasons'].items()) or '-')}</td><td>{pct(it['item_failure_rate'])}</td>"
+              f"<td>{pct(it['run_failure_rate'])}</td><td>{it['runs_with_item_failures']}</td></tr>")
+        except Exception:  # noqa: BLE001 - one forged/odd record must not take the whole page down: show that it was omitted
+            omitted.append(1)
+            A('<tr><td colspan="11"><i>row omitted: its data could not be rendered</i></td></tr>')
     A("</table></div>")
 
     # --- retries + LLM
@@ -197,7 +210,11 @@ def render(report: dict, runs_latest: list[dict], evidence_html: str = "") -> st
     A(f"<h2>Intelligent retry</h2><p class=\"sub\">{rt['total_events']} retry event(s) in {rt['runs_with_retries']} run(s) ({pct(rt['retry_run_rate'])} of runs).</p>"
       "<div class=\"tw\"><table><tr><th>Category</th><th>Events</th><th>Recovered</th><th>Escalated</th><th>Skipped</th><th>Recovery rate</th></tr>")
     for cat, c in rt["by_category"].items():
-        A(f"<tr><td><code>{esc(cat)}</code></td><td>{c['events']}</td><td>{c['recovered']}</td><td>{c['escalated']}</td><td>{c['skipped']}</td><td>{pct(c['recovery_rate'])}</td></tr>")
+        try:
+            A(f"<tr><td><code>{esc(cat)}</code></td><td>{c['events']}</td><td>{c['recovered']}</td><td>{c['escalated']}</td><td>{c['skipped']}</td><td>{pct(c['recovery_rate'])}</td></tr>")
+        except Exception:  # noqa: BLE001 - one forged/odd record must not take the whole page down: show that it was omitted
+            omitted.append(1)
+            A('<tr><td colspan="6"><i>row omitted: its data could not be rendered</i></td></tr>')
     A("</table></div>")
     ll = report["llm"]
     A(f"<h2>LLM usage</h2><div class=\"cards\"><div class=\"card\"><div class=\"k\">Calls</div><div class=\"v\">{ll['calls']}</div><div class=\"s\">error rate {pct(ll['error_rate'])}</div></div>"
@@ -208,10 +225,14 @@ def render(report: dict, runs_latest: list[dict], evidence_html: str = "") -> st
     # --- versions
     A("<h2>Fleet versions</h2><div class=\"tw\"><table><tr><th>Host</th><th>Ring</th><th>Last heartbeat</th><th>wrapper-core</th><th>execution-framework</th><th>Automations</th></tr>")
     for h in report["versions"]["hosts"]:
-        comp = lambda c: f"{esc(c['version'])} {pill('ok', 'ok') if c['ok'] else pill('target ' + str(c['target']), 'medium')}"  # noqa: E731
-        autos = "<br>".join(f"{esc(n)} {esc(v['version'])} {pill('ok', 'ok') if v['ok'] else pill('target ' + str(v['target']), 'medium')}" for n, v in h["automations"].items())
-        A(f"<tr><td>{esc(h['host'])}</td><td>{esc(h['ring'])}</td><td>{esc(h['last_seen'])}</td><td>{comp(h['components']['wrapper-core'])}</td>"
-          f"<td>{comp(h['components']['execution-framework'])}</td><td>{autos or '-'}</td></tr>")
+        try:
+            comp = lambda c: f"{esc(c['version'])} {pill('ok', 'ok') if c['ok'] else pill('target ' + str(c['target']), 'medium')}"  # noqa: E731
+            autos = "<br>".join(f"{esc(n)} {esc(v['version'])} {pill('ok', 'ok') if v['ok'] else pill('target ' + str(v['target']), 'medium')}" for n, v in h["automations"].items())
+            A(f"<tr><td>{esc(h['host'])}</td><td>{esc(h['ring'])}</td><td>{esc(h['last_seen'])}</td><td>{comp(h['components']['wrapper-core'])}</td>"
+              f"<td>{comp(h['components']['execution-framework'])}</td><td>{autos or '-'}</td></tr>")
+        except Exception:  # noqa: BLE001 - one forged/odd record must not take the whole page down: show that it was omitted
+            omitted.append(1)
+            A('<tr><td colspan="6"><i>row omitted: its data could not be rendered</i></td></tr>')
     A("</table></div>")
 
     if evidence_html:
@@ -220,9 +241,15 @@ def render(report: dict, runs_latest: list[dict], evidence_html: str = "") -> st
     # --- recent runs
     A("<h2>Latest runs</h2><div class=\"tw\"><table><tr><th>Started</th><th>Automation</th><th>Host</th><th>Status</th><th>Duration</th><th>Synopsis</th></tr>")
     for r in runs_latest[:25]:
-        kind = {"success": "ok", "partial": "medium", "failed": "critical", "hung": "critical", "self_heal_failed": "critical"}.get(r["status"], "paused")
-        A(f"<tr><td>{esc(r['started_at'])}</td><td>{esc(r['automation'])}</td><td>{esc(r.get('host'))}</td><td>{pill(r['status'], kind)}</td>"
-          f"<td>{fmt_ms(r.get('duration_ms'))}</td><td>{esc(r.get('synopsis'))}</td></tr>")
+        try:
+            kind = {"success": "ok", "partial": "medium", "failed": "critical", "hung": "critical", "self_heal_failed": "critical"}.get(r["status"], "paused")
+            A(f"<tr><td>{esc(r['started_at'])}</td><td>{esc(r['automation'])}</td><td>{esc(r.get('host'))}</td><td>{pill(r['status'], kind)}</td>"
+              f"<td>{fmt_ms(r.get('duration_ms'))}</td><td>{esc(r.get('synopsis'))}</td></tr>")
+        except Exception:  # noqa: BLE001 - one forged/odd record must not take the whole page down: show that it was omitted
+            omitted.append(1)
+            A('<tr><td colspan="6"><i>row omitted: its data could not be rendered</i></td></tr>')
+    if omitted:
+        A(f'<div class="ok-note" role="note">{len(omitted)} row(s) could not be rendered and were omitted (a malformed record). The rest of the page is complete.</div>')
     A("</table></div></div></body></html>")
     return "".join(parts)
 

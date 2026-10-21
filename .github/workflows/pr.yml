@@ -1,0 +1,35 @@
+name: pr
+
+# Pull-request triage. The test gates run in ci.yml (it triggers on pull_request too: tests on Windows and Linux, Node, hygiene checks).
+# This workflow only adds path labels, a size label and one sticky comment with the promotion checklist when the registry manifest changes.
+# It reads the changed files through the REST API and never checks out or runs the PR's code. For pull requests from forks the token is
+# read-only, so labelling is skipped with a notice (it is a convenience, never a gate).
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+    env:
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      GITHUB_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - name: Label the pull request and update the triage comment
+        run: python3 tools/pr_tools.py triage --pr "$PR_NUMBER"

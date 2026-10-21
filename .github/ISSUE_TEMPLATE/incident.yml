@@ -1,0 +1,59 @@
+name: Incident
+description: An outage, a bad release, or fleet-wide misbehaviour (operators)
+title: "[incident] "
+labels: ["incident", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this for something affecting more than one machine or automation, or for a release that must be rolled back.
+        For a single failed run use "Automation failure / problem". **Never paste secrets, tokens or personal data.**
+        Security problems go to a private advisory instead (see the link on the issue chooser).
+        First aid is in docs/RUNBOOKS.md: pause the automation or the fleet, then roll back.
+  - type: input
+    id: summary
+    attributes:
+      label: One-line summary
+      placeholder: Every pilot machine is on 1.4.0 and failing at login
+    validations:
+      required: true
+  - type: dropdown
+    id: severity
+    attributes:
+      label: Severity
+      options:
+        - critical (wrong data or action is being taken)
+        - high (a whole automation or ring is down)
+        - medium (degraded, retries are coping)
+        - low (cosmetic or single machine)
+    validations:
+      required: true
+  - type: input
+    id: scope
+    attributes:
+      label: Affected automation(s) / ring(s) / version(s)
+      placeholder: automation-certification-site, broad, 1.1.0
+    validations:
+      required: true
+  - type: textarea
+    id: detection
+    attributes:
+      label: How was it detected
+      description: Link the ops-signal issue, dashboard page or workflow run.
+  - type: textarea
+    id: timeline
+    attributes:
+      label: Timeline (UTC)
+      placeholder: |
+        09:02 first failed run
+        09:10 paused the automation (ops-action run link)
+  - type: textarea
+    id: mitigation
+    attributes:
+      label: Mitigation so far
+      description: Paused, rolled back, workaround. Link the pull requests.
+  - type: textarea
+    id: followups
+    attributes:
+      label: Follow-ups
+      description: What would have caught this earlier or made it smaller?

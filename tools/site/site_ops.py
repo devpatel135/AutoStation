@@ -19,7 +19,7 @@ import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from site_common import SiteConfig, esc, layout, write
+from site_common import SiteConfig, esc, guarded, layout, write
 
 MAX_JOBS = 2000          # newest runs shown on the Jobs page (the page says so)
 MAX_EVENTS = 40          # events kept per run in the detail file
@@ -178,7 +178,9 @@ def build_jobs(out: Path, cfg: SiteConfig, data, now) -> list[str]:
             "result": _flat(r.get("result")), "exit_code": r.get("exit_code") if isinstance(r.get("exit_code"), int) else None,
         }
         syn = _s(r.get("synopsis"), 200)
-        search = " ".join((rid, auto, host, status, syn)).lower()
+        from automation_logging import reliability as _rel  # noqa: PLC0415
+        esig = _rel.error_signature(err.get("category"), err.get("message")) if err else ""
+        search = " ".join((rid, auto, host, status, syn, _s(err.get("category"), 60), esig)).lower()
         epoch = int(started.timestamp()) if started else 0
         rows.append(
             f'<tr data-id="{esc(rid)}" data-status="{esc(status)}" data-auto="{esc(auto)}" data-host="{esc(host)}" data-ring="{esc(ring)}" '
@@ -606,9 +608,9 @@ def build_ops(out: Path, cfg: SiteConfig, manifest: dict, data, repo: Path, regi
     now = now or datetime.now(timezone.utc)
     out = Path(out)
     pages: list[str] = []
-    pages += build_jobs(out, cfg, data, now)
-    pages += build_machines(out, cfg, data, manifest, now)
-    pages += build_queues(out, cfg, data, now)
-    pages += build_schedules(out, cfg, manifest, now)
-    pages += build_audit(out, cfg, manifest, data, repo, registry_dir, now)
+    pages += guarded(out, cfg, "jobs", "Jobs", build_jobs, data, now, active="jobs")
+    pages += guarded(out, cfg, "machines", "Machines", build_machines, data, manifest, now, active="machines")
+    pages += guarded(out, cfg, "queues", "Queues and approvals", build_queues, data, now, active="queues")
+    pages += guarded(out, cfg, "schedules", "Schedules", build_schedules, manifest, now, active="schedules")
+    pages += guarded(out, cfg, "audit", "Audit", build_audit, manifest, data, repo, registry_dir, now, active="audit")
     return pages
