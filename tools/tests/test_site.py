@@ -296,8 +296,9 @@ def run_ps(script: Path, *args, tmp: Path) -> subprocess.CompletedProcess:
     # PowerShell wraps long error lines at the console width (narrow on CI): collapse whitespace so phrase checks are stable
     import re
     ansi = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")  # PowerShell 7 colours error text and re-applies the colour on every wrapped line
-    r.stdout = " ".join(ansi.sub("", r.stdout or "").split())
-    r.stderr = " ".join(ansi.sub("", r.stderr or "").split())
+    # PowerShell 7's concise error view prefixes every wrapped continuation line with "| "
+    r.stdout = " ".join(ansi.sub("", r.stdout or "").replace("|", " ").split())
+    r.stderr = " ".join(ansi.sub("", r.stderr or "").replace("|", " ").split())
     return r
 
 
