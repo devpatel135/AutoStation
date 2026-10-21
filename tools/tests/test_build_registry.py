@@ -213,3 +213,19 @@ def test_cli_exit_codes_and_github_output(repo, tmp_path):
     (repo / "components" / "automation-registry" / "manifest.yaml").write_text((tmp_path / "o" / "manifest.yaml").read_text(encoding="utf-8"), encoding="utf-8")
     (repo / "components" / "automations" / "automation-x" / "main.py").write_text("print('changed')\n")
     assert br.main(["--repo", str(repo), "--out", str(tmp_path / "o2"), "--artifacts-dir", str(tmp_path / "o")]) == 1
+
+
+def test_first_release_activates_a_new_automation_but_never_clears_an_operator_pause(tmp_path):
+    repo = tmp_path / "repo"
+    shutil.copytree(ROOT / "components" / "wrapper-core", repo / "components" / "wrapper-core", ignore=shutil.ignore_patterns("tests", "__pycache__"))
+    shutil.copytree(ROOT / "components" / "execution-framework", repo / "components" / "execution-framework",
+                    ignore=shutil.ignore_patterns("node_modules", "test", "tools", "__pycache__"))
+    shutil.copytree(ROOT / "components" / "automations" / "automation-certification-site", repo / "components" / "automations" / "automation-certification-site",
+                    ignore=shutil.ignore_patterns("node_modules", "test", "demo", "__pycache__"))
+    manifest = tmp_path / "manifest.yaml"
+    manifest.write_text("schema_version: 1\nrings: [dev, pilot, broad]\ncompatibility: []\ncomponents: {}\nautomations: {}\n", encoding="utf-8")
+    res = br.build(repo, manifest, tmp_path / "out", None, False, "all", write_manifest=manifest, auto_promote=True)
+    assert not res["errors"], res["errors"]
+    m = miniyaml.loads(manifest.read_text(encoding="utf-8"))
+    a = m["automations"]["automation-certification-site"]
+    assert a["status"] == "active" and a["rings"] == {"dev": "1.0.0", "pilot": "1.0.0", "broad": "1.0.0"}

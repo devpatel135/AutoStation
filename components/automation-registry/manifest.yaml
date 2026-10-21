@@ -48,8 +48,8 @@ automations:
     systems:
       - none
     data_classification: internal
-    status: paused
-    paused_reason: "awaiting first release (new automation skeleton)"
+    status: active
+    paused_reason: ""
     llm_allowed_classification: internal
     rings:
       dev: "1.0.0"

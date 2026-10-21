@@ -246,6 +246,14 @@ def build(repo: Path, manifest_path: Path, out: Path, artifacts_dir: Path | None
             except OpError as exc:
                 errors.append(f"{s.name} {s.version}: {exc}")
 
+    # a freshly registered automation starts paused ("awaiting first release"); once a build has put a version into the
+    # rings (bootstrap / auto-promote) it is live. Operators' own pauses (any other reason) are never touched.
+    if bootstrap or auto_promote:
+        for aname, a_entry in (m.get("automations") or {}).items():
+            if (a_entry or {}).get("status") == "paused" and str(a_entry.get("paused_reason", "")).startswith("awaiting first release")                     and (a_entry.get("rings") or {}).get("broad"):
+                a_entry["status"], a_entry["paused_reason"] = "active", ""
+                added.append(f"{aname} activated (first release)")
+
     report = checks.validate_all(m, allow_placeholders=False, artifacts_dir=out)
     errors += [f"manifest: {e}" for e in report.errors]
     triggers_src = manifest_path.parent / store.TRIGGERS_FILE
