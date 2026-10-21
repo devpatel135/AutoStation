@@ -18,6 +18,7 @@ import argparse
 import hashlib
 import io
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -65,11 +66,12 @@ def install_node(version: str, dest: Path) -> Path:
     return out / "node.exe"
 
 
-def install_modules(dest: Path) -> None:
+def install_modules(dest: Path, registry: str) -> None:
     npm = shutil.which("npm") or shutil.which("npm.cmd")
     if not npm:
         raise SystemExit("npm not found on PATH (use actions/setup-node, or pass --skip-npm)")
-    subprocess.run([npm, "install", "--omit=dev", "--ignore-scripts", "--no-audit", "--no-fund", "--no-package-lock"], cwd=str(dest), check=True)
+    subprocess.run([npm, "install", "--omit=dev", "--ignore-scripts", "--no-audit", "--no-fund", "--no-package-lock",
+                    f"--registry={registry}"], cwd=str(dest), check=True)  # the checked-in .npmrc points at an internal mirror placeholder
     pkg = json.loads((dest / "package.json").read_text(encoding="utf-8"))
     want = pkg["dependencies"]["playwright-core"]
     got = json.loads((dest / "node_modules" / "playwright-core" / "package.json").read_text(encoding="utf-8"))["version"]
@@ -84,14 +86,20 @@ def main() -> int:
     ap.add_argument("--skip-node", action="store_true")
     ap.add_argument("--skip-npm", action="store_true")
     ap.add_argument("--dest", default=str(FW))
+    ap.add_argument("--registry", default=os.environ.get("AUTOSTATION_NPM_REGISTRY", "https://registry.npmjs.org/"),
+                    help="npm registry (default public npm; set your internal mirror for enterprise builds)")
     a = ap.parse_args()
     dest = Path(a.dest)
     if not a.skip_node:
         install_node(a.node_version, dest)
     if not a.skip_npm:
-        install_modules(dest)
+        install_modules(dest, a.registry)
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except subprocess.CalledProcessError as exc:
+        print(f"::error title=framework bundle failed::{' '.join(map(str, exc.cmd))[:300]} exited {exc.returncode}")
+        raise
