@@ -34,14 +34,24 @@ def seal(public_key_b64: str, value: str) -> str:
     return base64.b64encode(box.encrypt(value.encode())).decode()
 
 
-def put_secret(api: hr.Api, base: str, name: str, value: str, env: str | None = None) -> None:
+def put_secret(api: hr.Api, base: str, name: str, value: str, env: str | None = None) -> bool:
+    """Store an Actions secret through the API. Returns True only if GitHub accepted it."""
     scope = f"{base}/environments/{env}" if env else base
     code, key = api.call("GET", f"{scope}/secrets/public-key")
     if code != 200:
         hr.report(f"secret {name}: public key", code, key)
-        return
-    hr.report(f"secret {name}" + (f" (environment {env})" if env else ""),
-              *api.call("PUT", f"{scope}/secrets/{name}", {"encrypted_value": seal(key["key"], value), "key_id": key["key_id"]}))
+        return False
+    code, detail = api.call("PUT", f"{scope}/secrets/{name}", {"encrypted_value": seal(key["key"], value), "key_id": key["key_id"]})
+    hr.report(f"secret {name}" + (f" (environment {env})" if env else ""), code, detail)
+    return code in (201, 204)
+
+
+def manual_secret_help(name: str, value: str | None = None, keep_file: Path | None = None) -> None:
+    """The API refused (the stored credential lacks the secrets permission): finish by hand in the web UI."""
+    print(f"  -> add {name} by hand: https://github.com/<owner>/<repo>/settings/secrets/actions/new (Name: {name})")
+    if value is not None and keep_file is not None:
+        keep_file.write_text(value + "\n", encoding="ascii")
+        print(f"     the value is saved to {keep_file} - paste it into the secret, then DELETE that file")
 
 
 def main() -> int:
@@ -73,7 +83,9 @@ def main() -> int:
     if not a.skip_secret:
         tok = getpass.getpass(f"Paste the fine-grained PAT for {a.owner}/{a.logs_repo} (Contents read+write; Enter to skip): ").strip()
         if tok:
-            put_secret(api, base, "LOGGING_TOKEN", tok)
+            if not put_secret(api, base, "LOGGING_TOKEN", tok):
+                manual_secret_help("LOGGING_TOKEN")
+                print("     (paste the same PAT there; this script does not keep it)")
         else:
             print("[skip] LOGGING_TOKEN not set - dashboards keep the waiting state, installers stay standalone")
 
@@ -82,13 +94,20 @@ def main() -> int:
         sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "components" / "wrapper-core"))
         from wrapper_core import ed25519
         seed, pub = ed25519.keypair_from_seed(_s.token_bytes(32))
-        put_secret(api, base, "REGISTRY_SIGNING_SEED", seed.hex())
-        code, _ = api.call("POST", f"{base}/actions/variables", {"name": "AUTOSTATION_REGISTRY_PUBKEY", "value": pub.hex()})
-        if code == 409:
-            code, _ = api.call("PATCH", f"{base}/actions/variables/AUTOSTATION_REGISTRY_PUBKEY", {"name": "AUTOSTATION_REGISTRY_PUBKEY", "value": pub.hex()})
-        hr.report("variable AUTOSTATION_REGISTRY_PUBKEY", code, {})
-        print(f"Public key {pub.hex()}: the next site build signs the registry, and the next installer build pins it. "
-              "Machines installed earlier keep accepting the registry until reinstalled (they hold no key).")
+        if put_secret(api, base, "REGISTRY_SIGNING_SEED", seed.hex()):
+            # publish the PUBLIC key only after the private seed is safely stored: a pinned key nothing can sign for would lock
+            # every newly installed machine out of the registry
+            code, _ = api.call("POST", f"{base}/actions/variables", {"name": "AUTOSTATION_REGISTRY_PUBKEY", "value": pub.hex()})
+            if code == 409:
+                code, _ = api.call("PATCH", f"{base}/actions/variables/AUTOSTATION_REGISTRY_PUBKEY", {"name": "AUTOSTATION_REGISTRY_PUBKEY", "value": pub.hex()})
+            hr.report("variable AUTOSTATION_REGISTRY_PUBKEY", code, {})
+            print(f"Public key {pub.hex()}: the next site build signs the registry, and the next installer build pins it. "
+                  "Machines installed earlier keep accepting the registry until reinstalled (they hold no key).")
+        else:
+            keep = Path.home() / "autostation-signing-seed.txt"
+            manual_secret_help("REGISTRY_SIGNING_SEED", seed.hex(), keep)
+            print(f"     then ALSO add the repository VARIABLE AUTOSTATION_REGISTRY_PUBKEY = {pub.hex()} "
+                  "(Settings > Secrets and variables > Actions > Variables) - only after the secret exists")
 
     sys.argv = [sys.argv[0], "--owner", a.owner, "--repo", a.repo]
     return hr.main()
