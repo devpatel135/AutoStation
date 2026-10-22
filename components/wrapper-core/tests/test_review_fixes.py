@@ -495,3 +495,10 @@ def test_owner_repo_remote_with_legacy_dir_transport_is_healed_to_github_api(tmp
     assert platform_config(p)["log_transport"] == "github-api"
     (p.config / "platform.json").write_text(json.dumps({"ring": "broad", "log_remote": str(tmp_path / "logs"), "log_transport": "dir"}), encoding="utf-8")
     assert platform_config(p)["log_transport"] == "dir"            # a real directory stays a directory
+
+
+def test_tests_cannot_reach_the_real_task_scheduler():
+    import subprocess
+    r = subprocess.run(["schtasks", "/Create", "/TN", "AUTOMAGIX\\should-never-exist", "/F"], capture_output=True, text=True)
+    assert r.returncode == 0 and r.stdout == ""          # answered by the conftest fake, nothing was registered
+    assert subprocess.run.calls and subprocess.run.calls[-1][1] == "/Create"

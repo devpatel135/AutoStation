@@ -15,6 +15,28 @@ from wrapper_core.paths import Paths  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
+def _no_real_schtasks(monkeypatch):
+    """Tests must NEVER touch the machine's real Task Scheduler. A leaked /Create of a task whose start time has passed makes Windows
+    run it at once (and it stays registered), which once started the real automation three times and left a stray task behind.
+    Any ``schtasks`` call made through subprocess.run is answered by a harmless fake; tests that check scheduler behaviour pass their
+    own fake ``runner`` to Scheduler instead."""
+    import os
+    import subprocess
+    real_run = subprocess.run
+
+    def guarded(args, *a, **k):
+        first = args[0] if isinstance(args, (list, tuple)) and args else args
+        if isinstance(first, str) and os.path.basename(first).lower() in ("schtasks", "schtasks.exe"):
+            guarded.calls.append(list(args) if isinstance(args, (list, tuple)) else [args])
+            return subprocess.CompletedProcess(args, 0, "", "")
+        return real_run(args, *a, **k)
+
+    guarded.calls = []
+    monkeypatch.setattr(subprocess, "run", guarded)
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _isolate(tmp_path, monkeypatch):
     home = tmp_path / "home"
     for k in list(__import__("os").environ):
