@@ -1,6 +1,7 @@
 """HTML helpers. RULE: every manifest/signal/run-derived string goes through ``esc`` (or ``json_for_script``)."""
 from __future__ import annotations
 
+import base64
 import hashlib
 import html
 import json
@@ -137,9 +138,18 @@ NAV = [("index.html", "Catalog", "catalog"), ("compatibility.html", "Compatibili
        ("governance.html", "Governance", "gov"), ("admin.html", "Admin", "admin")]
 
 
-# The portal page never loads a font or fetches anything: nothing but inline style/script and data: images may run.
-CSP = ("default-src 'none'; img-src data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; form-action 'none'")
-CSP_META = f'<meta http-equiv="Content-Security-Policy" content="{CSP}">'
+# The portal page never loads a font or fetches anything: nothing but inline style, data: images and the generator-authored inline
+# scripts (allowed by SHA-256, never 'unsafe-inline') may run.
+_INLINE_SCRIPT = re.compile(r"<script>(.*?)</script>", re.S)
+
+
+def csp_meta(*inline_scripts: str) -> str:
+    hs = "".join(" 'sha256-" + base64.b64encode(hashlib.sha256(code.encode("utf-8")).digest()).decode("ascii") + "'" for code in inline_scripts)
+    return ('<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; img-src data:; style-src \'unsafe-inline\'; '
+            f'script-src{hs}; base-uri \'none\'; form-action \'none\'">')
+
+
+CSP_META = csp_meta(THEME_HEAD_JS, THEME_TOGGLE_JS)
 TELEMETRY_NOTICE = "Telemetry is submitted by installed clients and is not authenticated; treat numbers as advisory"
 TELEMETRY_BANNER = f'<div class="banner" role="note"><strong>Advisory data.</strong> {TELEMETRY_NOTICE}.</div>'
 
@@ -154,7 +164,7 @@ def layout(title: str, body: str, *, config: dict, active: str = "", depth: int 
     brand = esc(config.get("title", "AUTOSTATION"))
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
-{CSP_META}
+{csp_meta(THEME_HEAD_JS, THEME_TOGGLE_JS, *_INLINE_SCRIPT.findall(extra_js))}
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{esc(title)} - {brand}</title>
 <script>{THEME_HEAD_JS}</script>

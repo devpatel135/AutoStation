@@ -31,7 +31,9 @@ def test_dashboard_escapes_all_log_derived_text(tmp_path):
     report, d = evil_report()
     dashboard.build_site(report, d, tmp_path)
     page = (tmp_path / "index.html").read_text(encoding="utf-8")
-    assert "<script" not in page.lower().replace("</script", "")            # the page ships no <script> element at all
+    # the page's ONLY script is the generator-authored theme toggle (allowed by its SHA-256 in the CSP); nothing log-derived is a script
+    assert page.lower().replace("</script", "").count("<script") == 1 and dashboard.THEME_SCRIPT in page
+    assert "onclick" not in page.lower() and "'unsafe-inline'; base-uri" not in page.split("script-src", 1)[1][:200]
     assert "<img" not in page.lower() and 'onerror=alert(1)>' not in page
     assert "&lt;script&gt;alert(&quot;xss&quot;)&lt;/script&gt;" in page    # visible, but inert
     assert page.count("&gt;&lt;img") >= 1

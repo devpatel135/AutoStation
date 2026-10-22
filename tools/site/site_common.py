@@ -5,6 +5,8 @@ Note: this folder is deliberately NOT a package called ``site`` (that would shad
 """
 from __future__ import annotations
 
+import base64
+import hashlib
 import html
 import json
 import os
@@ -184,8 +186,8 @@ CSP = ("default-src 'none'; img-src 'self' data:; style-src 'self' 'unsafe-inlin
 # Scripts: same-origin files plus EXACTLY the inline blocks this generator authored (allowed by SHA-256), never 'unsafe-inline' - so markup
 # injected through a forged telemetry value cannot execute even if escaping failed somewhere. style-src keeps 'unsafe-inline' (the pages use style
 # attributes; CSS cannot run script). A <meta> CSP cannot carry frame-ancestors (GitHub Pages sets no headers): clickjacking is out of scope here.
-# The standalone single-file pages (fleet dashboard, program, registry portal) still use inline handlers and keep script-src 'unsafe-inline';
-# everything they print is escaped. Moving them to external scripts + hashes is a tracked follow-up (docs/SITE.md).
+# The standalone single-file pages (fleet dashboard, program, registry portal, docs/assessment.html) follow the same rule: their few inline
+# scripts are allowed by SHA-256 and they carry no inline event-handler attributes; tools/check_site.py fails the build otherwise.
 _INLINE_SCRIPT = re.compile(r"<script>(.*?)</script>", re.S)
 
 
@@ -204,14 +206,36 @@ TELEMETRY_BANNER = f'<div class="banner" role="note"><strong>Advisory data.</str
 
 # Hand-authored standalone pages copied into the site (docs/assessment.html): inline style/script and Google Fonts, nothing else.
 CSP_STANDALONE = ("default-src 'none'; img-src data:; style-src 'unsafe-inline'; font-src https://fonts.gstatic.com; "
-                  "style-src-elem 'unsafe-inline' https://fonts.googleapis.com; script-src 'unsafe-inline'; base-uri 'none'; form-action 'none'")
+                  "style-src-elem 'unsafe-inline' https://fonts.googleapis.com; script-src{hashes}; base-uri 'none'; form-action 'none'")
+# The hand-authored page wires its tabs with inline onclick="show('x')" handlers, which a hash-based CSP would block: they become
+# data-show attributes and one extra, hashed script binds them.
+_SHOW_HANDLER = re.compile(r"""\sonclick="show\('([A-Za-z0-9_-]+)'\)\"""")
+_ANY_HANDLER = re.compile(r"""\son[a-z]+\s*=\s*["']""", re.I)
+_ANY_INLINE_SCRIPT = re.compile(r"<script(?:\s[^>]*)?>.*?</script>", re.S | re.I)
+STANDALONE_WIRE_JS = ("document.querySelectorAll('[data-show]').forEach(function(e){e.addEventListener('click',"
+                      "function(){show(e.getAttribute('data-show'))})});")
+
+
+def script_hashes(*scripts: str) -> str:
+    return "".join(" 'sha256-" + base64.b64encode(hashlib.sha256(s.encode("utf-8")).digest()).decode("ascii") + "'" for s in scripts)
 
 
 def harden_html(text: str) -> str:
-    """Add the CSP meta tag and the advisory banner to a standalone HTML page we did not render ourselves (idempotent)."""
+    """Add the CSP meta tag and the advisory banner to a standalone HTML page we did not render ourselves (idempotent).
+
+    Scripts are allowed by SHA-256 of the page's own inline <script> blocks, never 'unsafe-inline'; a page that still carries
+    inline event-handler attributes after the rewrite is refused (it would silently stop working under this CSP)."""
     if "Content-Security-Policy" in text:
         return text
-    meta = f'<meta http-equiv="Content-Security-Policy" content="{CSP_STANDALONE}">'
+    text = _SHOW_HANDLER.sub(lambda m: f' data-show="{m.group(1)}"', text)
+    if _ANY_HANDLER.search(_ANY_INLINE_SCRIPT.sub("", text)):
+        raise ValueError("standalone page has inline event handlers that the hash-based CSP would block; use addEventListener")
+    if "data-show=" in text:
+        close = re.search(r"</body\s*>", text, re.I)
+        wire = f"<script>{STANDALONE_WIRE_JS}</script>"
+        text = text[:close.start()] + wire + text[close.start():] if close else text + wire
+    bodies = [m.group(1) for m in re.finditer(r"<script>(.*?)</script>", text, re.S)]
+    meta = f'<meta http-equiv="Content-Security-Policy" content="{CSP_STANDALONE.replace("{hashes}", script_hashes(*bodies))}">'
     head = re.search(r"<head[^>]*>", text, re.I)
     text = text[:head.end()] + meta + text[head.end():] if head else meta + text
     body = re.search(r"<body[^>]*>", text, re.I)

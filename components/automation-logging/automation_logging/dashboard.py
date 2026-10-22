@@ -102,9 +102,21 @@ code{font:12px var(--mono);background:var(--surface2);padding:1px 5px;border-rad
 """
 
 
+THEME_JS = ("(function(){var b=document.getElementById('theme-toggle');if(b){b.addEventListener('click',function(){"
+            "var r=document.documentElement;r.dataset.theme=(r.dataset.theme==='light'?'dark':'light')})}})();")
+THEME_SCRIPT = f"<script>{THEME_JS}</script>"
+
+
+def _script_hash(code: str) -> str:
+    import base64
+    import hashlib
+    return "'sha256-" + base64.b64encode(hashlib.sha256(code.encode("utf-8")).digest()).decode("ascii") + "'"
+
+
+# Scripts run only if their SHA-256 is listed (the one authored THEME_JS block); no 'unsafe-inline', so injected markup cannot execute.
 CSP_META = ('<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; img-src data:; style-src \'unsafe-inline\'; '
             "font-src https://fonts.gstatic.com; style-src-elem 'unsafe-inline' https://fonts.googleapis.com; "
-            "script-src 'unsafe-inline'; base-uri 'none'; form-action 'none'\">")
+            f"script-src {_script_hash(THEME_JS)}; base-uri 'none'; form-action 'none'\">")
 TELEMETRY_NOTICE = "Telemetry is submitted by installed clients and is not authenticated; treat numbers as advisory"
 TELEMETRY_BANNER = f'<div class="ok-note" role="note" style="margin-bottom:1rem"><b>Advisory data.</b> {TELEMETRY_NOTICE}.</div>'
 
@@ -129,7 +141,7 @@ def render(report: dict, runs_latest: list[dict], evidence_html: str = "") -> st
       f"<div class=\"sub\">Generated {esc(report['generated_at'])} &middot; last {esc(report['window_days'])} days &middot; "
       f"overall {pill(fleet['status'], {'healthy': 'ok', 'paused': 'paused', 'degraded': 'medium', 'attention': 'high', 'critical': 'critical'}.get(fleet['status'], 'unknown'))}"
       f"{' &middot; ' + pill('FLEET PAUSED', 'paused') if report.get('fleet_paused') else ''}</div></div>"
-      "<button class=\"theme\" type=\"button\" onclick=\"var r=document.documentElement;r.dataset.theme=(r.dataset.theme==='light'?'dark':'light')\">toggle theme</button></header>")
+      "<button class=\"theme\" id=\"theme-toggle\" type=\"button\">toggle theme</button></header>")
 
     # --- summary cards
     imp = report["impact"]
@@ -250,7 +262,7 @@ def render(report: dict, runs_latest: list[dict], evidence_html: str = "") -> st
             A('<tr><td colspan="6"><i>row omitted: its data could not be rendered</i></td></tr>')
     if omitted:
         A(f'<div class="ok-note" role="note">{len(omitted)} row(s) could not be rendered and were omitted (a malformed record). The rest of the page is complete.</div>')
-    A("</table></div></div></body></html>")
+    A("</table></div></div>" + THEME_SCRIPT + "</body></html>")
     return "".join(parts)
 
 

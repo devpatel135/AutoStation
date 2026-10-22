@@ -6,7 +6,7 @@ Use GitHub's **private vulnerability reporting** (Security tab -> Report a vulne
 ## What is protected, and how
 | Risk | Control |
 | --- | --- |
-| Tampered updates reaching machines | Registry zips are immutable on an append-only branch (ruleset: no deletion / force-push); every download is sha256-verified; zip extraction is zip-slip safe; the manifest is Ed25519-signed (see docs/SECURITY.md). |
+| Tampered updates reaching machines | Registry zips are immutable on an append-only branch (ruleset: no deletion / force-push); every download is sha256-verified; zip extraction is zip-slip safe; the manifest is Ed25519-signed with a monotonic sequence number (replays of older releases are refused) and the queued-runs file `triggers.json` is covered by the signature (see docs/SECURITY.md). |
 | Malicious workflow changes | Every action pinned to a commit SHA (`tools/pin_actions.py --check` in CI); inputs reach shells only through `env:`; jobs have timeouts; secret-bearing jobs run only from `main`; default token is read-only; only GitHub-owned actions may run. |
 | Leaked credentials | `tools/check_secrets.py` in CI + GitHub secret scanning with push protection; secrets on endpoints are DPAPI/Credential Manager protected and wiped after use. |
 | Unverifiable installers | Installers are published with SHA-256 files and GitHub build-provenance attestations (`gh attestation verify <file> --repo devpatel135/AutoStation`). They are not Authenticode-signed unless a certificate is configured, so SmartScreen warns. |

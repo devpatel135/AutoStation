@@ -27,7 +27,7 @@ import os
 import re
 import sys
 from datetime import datetime, timezone
-from typing import Iterable, List, Optional
+from typing import Iterable, List, NamedTuple, Optional
 
 from . import ed25519
 
@@ -78,19 +78,70 @@ def signing_message(manifest_sha256: str, signed_at: str) -> bytes:
     return f"{DOMAIN}\n{manifest_sha256.lower()}\n{signed_at}".encode("utf-8")
 
 
-def make_sig_doc(manifest_bytes: bytes, seed: bytes, signed_at: str) -> dict:
-    """Operator side (``tools/sign_registry.py``): sign exact manifest bytes with a 32-byte Ed25519 seed."""
+DOMAIN2 = "autostation-manifest-v2"
+_NAME_OK = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+MAX_SEQ = 2 ** 53
+
+
+def signing_message_v2(manifest_sha256: str, signed_at: str, seq: int, extras: dict) -> bytes:
+    """Message covered by ``sig2``: the manifest digest, time, monotonic sequence number and the digests of the extra
+    published files (``triggers.json``). Extras are listed sorted by name, one ``name=sha256`` per line."""
+    lines = "\n".join(f"{n}={extras[n].lower()}" for n in sorted(extras))
+    return f"{DOMAIN2}\n{manifest_sha256.lower()}\n{signed_at}\n{int(seq)}\n{lines}".encode("utf-8")
+
+
+def _check_extras(extras) -> dict:
+    if not isinstance(extras, dict) or len(extras) > 16:
+        raise TrustError("signature extras must be a small mapping of file name to sha256")
+    out = {}
+    for n, h in extras.items():
+        if not (isinstance(n, str) and _NAME_OK.match(n) and isinstance(h, str) and _HEX64.match(h)):
+            raise TrustError("signature extras contain an invalid entry")
+        out[n] = h.lower()
+    return out
+
+
+def make_sig_doc(manifest_bytes: bytes, seed: bytes, signed_at: str, seq: Optional[int] = None,
+                 extras: Optional[dict] = None) -> dict:
+    """Operator side (``tools/sign_registry.py``): sign exact manifest bytes with a 32-byte Ed25519 seed.
+
+    The v1 signature (``sig``) always covers manifest digest + time, so endpoints that predate ``seq``/``extras`` keep working.
+    When ``seq`` and/or ``extras`` are given they are covered by a second signature ``sig2`` (same key)."""
     _, pub = ed25519.keypair_from_seed(seed)
     digest = hashlib.sha256(manifest_bytes).hexdigest()
     sig = ed25519.sign(seed, signing_message(digest, signed_at))
-    return {"v": 1, "key_id": pub.hex()[:8], "signed_at": signed_at, "manifest_sha256": digest,
-            "sig": base64.b64encode(sig).decode("ascii")}
+    doc = {"v": 1, "key_id": pub.hex()[:8], "signed_at": signed_at, "manifest_sha256": digest,
+           "sig": base64.b64encode(sig).decode("ascii")}
+    if seq is not None or extras:
+        seq = 0 if seq is None else int(seq)
+        if not 0 <= seq <= MAX_SEQ:
+            raise TrustError("seq out of range")
+        ex = _check_extras(extras or {})
+        doc["seq"], doc["extras"] = seq, ex
+        doc["sig2"] = base64.b64encode(ed25519.sign(seed, signing_message_v2(digest, signed_at, seq, ex))).decode("ascii")
+    return doc
+
+
+class Verified(NamedTuple):
+    """Result of a successful verification. ``seq``/``extras`` are None/{} unless the document carried a valid ``sig2``."""
+    signed_at: str
+    key_id: str
+    seq: Optional[int]
+    extras: dict
 
 
 def verify_manifest(manifest_bytes: bytes, sig_doc, keys: Iterable[str]) -> str:
     """Verify ``manifest_bytes`` against ``sig_doc`` (dict, or JSON text/bytes) and the trusted ``keys`` (hex).
 
     Returns the ``signed_at`` string on success, raises :class:`TrustError` with a reason otherwise."""
+    return verify_manifest_doc(manifest_bytes, sig_doc, keys).signed_at
+
+
+def verify_manifest_doc(manifest_bytes: bytes, sig_doc, keys: Iterable[str]) -> Verified:
+    """Like :func:`verify_manifest` but also returns the verified key id, ``seq`` and ``extras``.
+
+    A document with ``seq``/``extras`` but no valid ``sig2`` is rejected (tampered); a document without them is a legacy
+    v1 document (seq None, extras {}), which still verifies."""
     trusted = _clean(keys)
     if not trusted:
         raise TrustError("no trusted registry key configured")
@@ -119,8 +170,25 @@ def verify_manifest(manifest_bytes: bytes, sig_doc, keys: Iterable[str]) -> str:
     candidates = [k for k in trusted if isinstance(kid, str) and key_id(k) == kid.lower()] or trusted
     for k in candidates:
         if ed25519.verify(bytes.fromhex(k), msg, sig):
-            return signed_at
+            return _verify_v2(sig_doc, actual, signed_at, k)
     raise TrustError("signature was not made by a trusted registry key")
+
+
+def _verify_v2(doc: dict, digest: str, signed_at: str, key_hex: str) -> Verified:
+    has_extra = any(f in doc for f in ("seq", "extras", "sig2"))
+    if not has_extra:
+        return Verified(signed_at, key_id(key_hex), None, {})
+    seq, extras, sig2 = doc.get("seq"), doc.get("extras"), doc.get("sig2")
+    if isinstance(seq, bool) or not isinstance(seq, int) or not 0 <= seq <= MAX_SEQ or not isinstance(sig2, str):
+        raise TrustError("signature document has an incomplete seq/extras section")
+    ex = _check_extras(extras)
+    try:
+        raw2 = base64.b64decode(sig2, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise TrustError("sig2 is not valid base64") from exc
+    if not ed25519.verify(bytes.fromhex(key_hex), signing_message_v2(digest, signed_at, seq, ex), raw2):
+        raise TrustError("seq/extras were not signed by the registry key (tampered)")
+    return Verified(signed_at, key_id(key_hex), seq, ex)
 
 
 def main(argv: List[str]) -> int:

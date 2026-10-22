@@ -3,7 +3,8 @@
 Credentials live in Windows Credential Manager under the target ``AUTOMAGIX/cred/<name>`` and are stored either as
 ``user:password`` or as JSON ``{"username": ..., "password": ...}``. Never put them in the manifest or the payload.
 
-Development fallback (never use in production): environment variable ``AMX_CRED_<NAME>`` (same two formats), where NAME is the
+Development fallback (only when AUTOMAGIX_ALLOW_INSECURE_SECRETS=1, which is never set on installed machines; the runner also strips
+these variables from payload environments): environment variable ``AMX_CRED_<NAME>`` (same two formats), where NAME is the
 credential name upper-cased with non-alphanumerics turned into ``_``.
 """
 from __future__ import annotations
@@ -59,7 +60,9 @@ def parse_credential(raw: str) -> Credential:
 
 def get_raw(name: str) -> str:
     """The stored value as-is (for secrets that are not user/password pairs, e.g. a webhook URL). Never log it."""
-    raw = secrets.credman_read(PREFIX + name) or os.environ.get(_env_name(name))
+    raw = secrets.credman_read(PREFIX + name)
+    if not raw and secrets._allow_insecure():  # the AMX_CRED_<NAME> environment fallback is a development aid: never in production
+        raw = os.environ.get(_env_name(name))
     if not raw:
         raise CredentialNotFound(f"credential {name!r} not found (Credential Manager target {PREFIX}{name})")
     return raw

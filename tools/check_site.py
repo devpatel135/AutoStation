@@ -25,6 +25,7 @@ class _Page(HTMLParser):
         self.ids: set[str] = set()
         self.csp = ""                                  # content of the CSP <meta>
         self.inline_scripts: list[str] = []            # bodies of executable inline <script> blocks
+        self.handlers: list[str] = []                  # inline event-handler attributes (onclick=...) anywhere in the page
         self._script_buf: list[str] | None = None
 
     def handle_data(self, data):
@@ -38,6 +39,7 @@ class _Page(HTMLParser):
 
     def handle_starttag(self, tag, attrs):
         a = dict(attrs)
+        self.handlers.extend(f"<{tag} {k}=...>" for k in a if k.lower().startswith("on"))
         if tag == "meta" and str(a.get("http-equiv", "")).lower() == "content-security-policy":
             self.csp = a.get("content") or ""
         if tag == "script" and a.get("src") is None and str(a.get("type", "text/javascript")).lower() in ("", "text/javascript", "module"):
@@ -63,8 +65,12 @@ def _check_inline_scripts(rel: str, info: "_Page") -> list[str]:
     import base64
     import hashlib
     m = re.search(r"script-src([^;]*)", info.csp)
-    if not m or "'unsafe-inline'" in m.group(1):
+    if not m:
         return []
+    if "'unsafe-inline'" in m.group(1):
+        return [f"{rel}: script-src allows 'unsafe-inline' (scripts must be allowed by SHA-256 only)"]
+    if info.handlers:
+        return [f"{rel}: inline event handler {info.handlers[0]} would be blocked by the CSP; use addEventListener"]
     allowed = set(re.findall(r"'sha256-([A-Za-z0-9+/=]+)'", m.group(1)))
     out = []
     for body in info.inline_scripts:

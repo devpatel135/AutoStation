@@ -187,6 +187,16 @@ the run continues from the last verified cached manifest (re-verified on every r
 `self_heal.errors`. With no key configured, unsigned manifests are accepted with a logged warning (bootstrap). `python -m wrapper_core trust --show`
 lists the pinned key ids; the operator signs with `tools/sign_registry.py` (private seed never leaves the operator's machine).
 
+**Signed document, second signature (`seq` and `extras`).** The v1 signature above is unchanged, so endpoints that predate the fields keep
+verifying. The document may also carry `seq` (a monotonic non-negative integer, the CI run number), `extras` (a map such as
+`{"triggers.json": "<sha256>"}`) and `sig2`, a second signature by the same key over the UTF-8 message
+`autostation-manifest-v2\n<manifest_sha256>\n<signed_at>\n<seq>\n<name>=<sha256>` (one line per extra, sorted by name). A document that has any of
+`seq`/`extras`/`sig2` but no valid `sig2` is rejected as tampered. Endpoints persist the highest accepted `seq` per key id in
+`state/manifest.seq.json` and refuse a validly signed manifest with a LOWER `seq` (replay of an older release, even with a newer `signed_at`);
+an equal `seq` is fine, a missing or corrupt mark never locks the fleet out, and a legacy document without `seq` is accepted. `triggers.json`
+queues runs on endpoints, so once a key is pinned `selfheal.pending_triggers` accepts it only if its sha256 equals the signed `extras` entry
+(otherwise it is ignored with a warning, never an exception); with no key pinned it is used with a warning, as before.
+
 ## 5. Payload descriptor (`automation.yaml`, inside every automation payload)
 
 ```yaml

@@ -133,7 +133,15 @@ def test_every_portal_page_has_csp_and_advisory_banner(tmp_path, mpath):
     assert pages
     for p in pages:
         html = p.read_text(encoding="utf-8")
-        assert common.CSP_META in html, p.name
+        csp = re.search(r'Content-Security-Policy" content="([^"]*)"', html).group(1)
+        script_src = re.search(r"script-src([^;]*)", csp).group(1)
+        assert "'unsafe-inline'" not in script_src, p.name                                  # scripts run only by SHA-256
+        import base64
+        import hashlib
+        allowed = set(re.findall(r"'sha256-([A-Za-z0-9+/=]+)'", script_src))
+        for body in re.findall(r"<script>(.*?)</script>", html, re.S):                    # every executable inline script is hash-listed
+            assert base64.b64encode(hashlib.sha256(body.encode("utf-8")).digest()).decode() in allowed, p.name
+        assert not re.search(r"\son[a-z]+\s*=\s*[\"']", re.sub(r"<script.*?</script>", "", html, flags=re.S)), p.name   # no inline handlers
         assert "default-src 'none'" in html and "form-action 'none'" in html and "base-uri 'none'" in html
         assert "Telemetry is submitted by installed clients and is not authenticated; treat numbers as advisory" in html, p.name
         assert "https://" not in re.search(r'Content-Security-Policy" content="([^"]*)"', html).group(1)   # nothing remote is allowed to load

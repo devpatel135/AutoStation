@@ -110,9 +110,31 @@ def check_registry(rep: Report, fetch: Fetch, base: str, manifest: dict) -> List
                     rep.add("registry", FAIL, f"{name} {ver} sha256", "does not match the manifest")
                 else:
                     rep.add("registry", OK, f"{name} {ring}={ver}", "artifact present, sha256 verified")
-    code, _ = fetch(base + "registry/manifest.yaml.sig", None)
+    code, sig_body = fetch(base + "registry/manifest.yaml.sig", None)
     if code == 200:
-        rep.add("signing", OK, "manifest signed", "manifest.yaml.sig is published")
+        try:
+            doc = json.loads(sig_body.decode("utf-8"))
+        except ValueError:
+            doc = None
+        if not isinstance(doc, dict):
+            rep.add("signing", FAIL, "manifest signature", "manifest.yaml.sig is not valid JSON")
+        else:
+            rep.add("signing", OK, "manifest signed", f"key {doc.get('key_id', '?')}, signed_at {doc.get('signed_at', '?')}")
+            seq, extras = doc.get("seq"), doc.get("extras")
+            if isinstance(seq, int) and not isinstance(seq, bool) and doc.get("sig2"):
+                rep.add("signing", OK, "anti-rollback sequence", f"seq {seq} (endpoints refuse a lower one)")
+            else:
+                rep.add("signing", WARN, "anti-rollback sequence", "no seq in the signature: set SIGN_SEQ in the site workflow")
+            if isinstance(extras, dict) and "triggers.json" in extras:
+                code_t, trig = fetch(base + "registry/triggers.json", None)
+                same = code_t == 200 and hashlib.sha256(trig).hexdigest() == str(extras["triggers.json"]).lower()
+                rep.add("signing", OK if same else FAIL, "triggers.json is signed", "published bytes match the signed digest" if same
+                        else "published triggers.json does NOT match the signed digest (endpoints will ignore it)")
+            else:
+                code_t, _ = fetch(base + "registry/triggers.json", None)
+                rep.add("signing", WARN if code_t == 200 else OK, "triggers.json is signed",
+                        "published but not covered by the signature (endpoints with a pinned key ignore it)" if code_t == 200
+                        else "no triggers.json published")
     else:
         rep.add("signing", TODO, "manifest unsigned", "run tools/setup_live.py (or add REGISTRY_SIGNING_SEED + AUTOSTATION_REGISTRY_PUBKEY by hand)")
     return active

@@ -22,7 +22,7 @@ from pathlib import Path
 from . import manifest as mf
 from . import miniyaml, secrets, trust, versions
 from ._version import __version__ as WRAPPER_VERSION
-from .paths import Paths, check_name, get_logger
+from .paths import Paths, check_name, get_logger, platform_config
 from .util import atomic_write_text, read_json, sha256_file, write_json
 
 COMPONENTS = ("wrapper-core", "execution-framework")
@@ -426,6 +426,30 @@ def _check_rollback(paths: Paths, signed_at: str, sha: str) -> None:
             pass
 
 
+def _check_seq(paths: Paths, v: "trust.Verified") -> None:
+    """Reject a validly signed manifest whose ``seq`` is LOWER than the highest accepted for the same key (replay of an older
+    release). Equal is fine (re-runs, re-fetches). No stored mark, a corrupt mark, or an unsequenced (legacy) document passes:
+    signed_at still guards those."""
+    if v.seq is None:
+        return
+    marks = read_json(paths.manifest_seq, {})
+    last = marks.get(v.key_id) if isinstance(marks, dict) else None
+    if isinstance(last, int) and not isinstance(last, bool) and v.seq < last:
+        raise _Untrusted(f"rollback refused: seq {v.seq} is lower than the newest accepted {last} for key {v.key_id}")
+
+
+def _remember_seq(paths: Paths, v: "trust.Verified") -> None:
+    if v.seq is None:
+        return
+    marks = read_json(paths.manifest_seq, {})
+    if not isinstance(marks, dict):
+        marks = {}
+    last = marks.get(v.key_id)
+    if not (isinstance(last, int) and not isinstance(last, bool)) or v.seq > last:
+        marks[v.key_id] = v.seq
+        write_json(paths.manifest_seq, marks)
+
+
 def fetch_manifest(paths: Paths, base: str, token: str | None, notes: list | None = None, cfg: dict | None = None) -> tuple[dict, bool]:
     """Return (manifest, offline). Falls back to the cached copy when the registry is unreachable or its manifest is
     rejected (bad YAML, bad/missing signature, rollback). With a pinned key (``trust``) an unverified manifest is NEVER
@@ -441,6 +465,7 @@ def fetch_manifest(paths: Paths, base: str, token: str | None, notes: list | Non
         m = mf.parse(text)
         sig_raw = None
         signed_at = ""
+        verified = None
         if keys:
             try:
                 sig_raw = fetch_bytes(resolve_location("manifest.yaml.sig", base), token, retries=1, trusted_base=base,
@@ -448,10 +473,12 @@ def fetch_manifest(paths: Paths, base: str, token: str | None, notes: list | Non
             except HealError as exc:
                 raise _Untrusted(f"signature file unavailable ({exc})") from exc
             try:
-                signed_at = trust.verify_manifest(raw, sig_raw, keys)
+                verified = trust.verify_manifest_doc(raw, sig_raw, keys)
+                signed_at = verified.signed_at
             except trust.TrustError as exc:
                 raise _Untrusted(str(exc)) from exc
             _check_rollback(paths, signed_at, hashlib.sha256(raw).hexdigest())
+            _check_seq(paths, verified)
         else:
             log.warning("registry manifest is unsigned and no registry key is pinned (set registry_pubkeys in platform.json)")
         try:
@@ -462,6 +489,8 @@ def fetch_manifest(paths: Paths, base: str, token: str | None, notes: list | Non
             atomic_write_text(paths.manifest_cache, text)
             if keys:
                 atomic_write_text(paths.manifest_signed_at, signed_at + "\n")
+                if verified is not None:
+                    _remember_seq(paths, verified)
         except OSError as exc:
             log.warning("cannot cache manifest: %s", exc)
         return m, False
@@ -593,10 +622,36 @@ def _wants_triggers(entry: dict) -> bool:
     return any(s.get("type") == "poll" for s in slots) or bool(entry.get("triggers"))
 
 
-def pending_triggers(paths: Paths, base: str, token: str | None, automation: str) -> list[dict]:
+def _signed_extra_sha(paths: Paths, name: str, keys: list) -> str | None:
+    """The sha256 the registry operator signed for ``name`` (from the cached, re-verified manifest + signature document)."""
     try:
-        doc = json.loads(fetch_bytes(resolve_location("triggers.json", base), token, retries=1, trusted_base=base).decode("utf-8"))
-    except (HealError, ValueError):
+        v = trust.verify_manifest_doc(paths.manifest_cache.read_bytes(), paths.manifest_sig_cache.read_bytes(), keys)
+    except (OSError, trust.TrustError):
+        return None
+    return v.extras.get(name)
+
+
+def pending_triggers(paths: Paths, base: str, token: str | None, automation: str) -> list[dict]:
+    log = get_logger(paths)
+    try:
+        raw = fetch_bytes(resolve_location("triggers.json", base), token, retries=1, trusted_base=base)
+    except HealError:
+        return []
+    keys = trust.configured_keys(platform_config(paths))
+    if keys:
+        # a key is pinned: triggers queue runs on endpoints, so they must be the exact bytes the operator signed (fail closed)
+        want = _signed_extra_sha(paths, "triggers.json", keys)
+        if want is None:
+            log.warning("triggers.json ignored: the signed registry manifest does not vouch for it")
+            return []
+        if hashlib.sha256(raw).hexdigest() != want:
+            log.warning("triggers.json ignored: it does not match the digest the registry operator signed (tampered or stale)")
+            return []
+    else:
+        log.warning("triggers.json is unsigned and no registry key is pinned (set registry_pubkeys in platform.json)")
+    try:
+        doc = json.loads(raw.decode("utf-8"))
+    except ValueError:
         return []
     consumed = set(read_json(paths.consumed_triggers, []) or [])
     items = doc.get("triggers", doc) if isinstance(doc, (dict, list)) else []

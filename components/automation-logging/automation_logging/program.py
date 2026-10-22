@@ -23,7 +23,7 @@ from pathlib import Path
 
 from . import analytics
 from .common import iso, miniyaml, read_json, utcnow, write_json
-from .dashboard import CSP_META, CSS as DASH_CSS, TELEMETRY_BANNER, esc, fmt_ms, pct, pill, spark
+from .dashboard import CSP_META, THEME_SCRIPT, CSS as DASH_CSS, TELEMETRY_BANNER, esc, fmt_ms, pct, pill, spark
 
 DEFAULTS = {
     "currency": "USD", "hourly_cost": 0.0,
@@ -193,7 +193,7 @@ def render(p: dict) -> str:
     ap(TELEMETRY_BANNER)
     ap(f'<header><div><div class="eyebrow">AUTOSTATION &middot; Program</div><h1>Automation programme: value &amp; health</h1>'
        f'<div class="sub">Generated {esc(p["generated_at"])} &middot; last {esc(p["window_days"])} days of run logs</div></div>'
-       '<button class="theme" type="button" onclick="var r=document.documentElement;r.dataset.theme=(r.dataset.theme===\'light\'?\'dark\':\'light\')">toggle theme</button></header>')
+       '<button class="theme" id="theme-toggle" type="button">toggle theme</button></header>')
 
     cards = [("Automations", h["automations"], f"{h['active']} active, {len(p['paused'])} paused"),
              ("Runs", h["runs"], f"success rate {pct(h['success_rate'])}"),
@@ -260,7 +260,7 @@ def render(p: dict) -> str:
     if rt["by_category"]:
         ap('<div class="tw"><table><tr><th>Retry category</th><th>Events</th><th>Recovery rate</th></tr>'
            + "".join(f"<tr><td><code>{esc(k)}</code></td><td>{v['events']}</td><td>{pct(v['recovery_rate'])}</td></tr>" for k, v in rt["by_category"].items()) + "</table></div>")
-    ap("</div></body></html>")
+    ap("</div>" + THEME_SCRIPT + "</body></html>")
     return "".join(A)
 
 

@@ -65,3 +65,11 @@
 * **Secrets:** `tools/check_secrets.py` (CI) + GitHub secret scanning with push protection. `LOGGING_TOKEN` should be a fine-grained PAT scoped to the single private logs repo (Contents read/write), stored via `tools/setup_live.py`.
 * **Branch safety:** rulesets forbid deleting or force-pushing `main`, `registry-artifacts` (append-only) and `triggers`.
 * **One-time admin step:** `python tools/setup_live.py` (needs an admin token, run in your own terminal) applies the repository settings above and creates the logs repo / secret / `production` environment.
+
+* **Signed registry, with replay protection:** `manifest.yaml.sig` binds the manifest, a monotonic `seq` and the digest of `triggers.json` (second
+  signature `sig2`, see docs/SPEC.md). Endpoints with a pinned key refuse a lower `seq`, and ignore a `triggers.json` that was not signed.
+* **Endpoint hardening:** the manifest's `vpn_tool` may only name a script inside the automation's own folder, a `.exe` in System32 or a path the
+  operator listed in `platform.json` `vpn_tools`; the `AMX_CRED_<NAME>` environment fallback for credentials works only in development
+  (`AUTOMAGIX_ALLOW_INSECURE_SECRETS=1`) and is stripped from payload environments.
+* **No inline scripts:** every generated page allows scripts only by SHA-256 (no `'unsafe-inline'`), carries no inline event handlers, and
+  `tools/check_site.py` fails the build otherwise.

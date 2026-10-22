@@ -295,3 +295,11 @@ def test_ui_binds_loopback_only():
         assert u.info["url"].startswith("http://127.0.0.1:")
     finally:
         u.close()
+
+
+def test_task_ids_never_start_with_a_dash_so_the_cli_can_always_take_them(monkeypatch):
+    import secrets as _s
+    monkeypatch.setattr(ap._secrets, "token_urlsafe", lambda n=32: "-" + "A" * (n - 1))   # worst case for the urlsafe alphabet
+    t = make()
+    assert not t.id.startswith("-") and ap.ID_RX.match(t.id)
+    assert ap.main(["show", t.id]) == 0

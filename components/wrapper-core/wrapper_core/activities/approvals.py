@@ -211,7 +211,7 @@ def create(title: str, description: str = "", fields: Optional[Dict[str, Any]] =
     if sum(1 for t in list_tasks("pending", paths)) >= MAX_PENDING:
         raise ApprovalError(f"too many pending approvals ({MAX_PENDING})")
     now = utcnow()
-    task = Task(id=_secrets.token_urlsafe(16), automation=auto, title=title, description=description, fields=clean_fields, status="pending",
+    task = Task(id="t" + _secrets.token_urlsafe(16), automation=auto, title=title, description=description, fields=clean_fields, status="pending",
                 created_at=iso(now), expires_at=iso(now + timedelta(seconds=ttl)),
                 audit=[{"ts": iso(now), "event": "created", "by": _who(None), "note": ""}])
     _save(task, paths)

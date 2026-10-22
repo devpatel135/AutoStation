@@ -82,3 +82,33 @@ def test_a_rejected_token_is_reported_as_unchecked_not_as_disabled_features():
     rows = [r for r in rep.rows if r["area"] == "settings" and "token-only" in r["check"]]
     assert rows and "rejected" in rows[0]["detail"]
     assert not any(r["check"] == "secret_scanning" for r in rep.rows)
+
+
+def _sig_rows(rep):
+    return {r["check"]: r for r in rep.rows if r["area"] == "signing"}
+
+
+def test_signature_with_seq_and_signed_triggers_is_reported_ok():
+    from wrapper_core import trust
+    seed = bytes(range(32))
+    trig = b'{"triggers": []}'
+    doc = trust.make_sig_doc(MANIFEST.encode(), seed, "2026-01-01T00:00:00Z", seq=12, extras={"triggers.json": hashlib.sha256(trig).hexdigest()})
+    rep = rd.run("o", "r", fake({"https://o.github.io/r/registry/manifest.yaml.sig": (200, json.dumps(doc).encode()),
+                                 "https://o.github.io/r/registry/triggers.json": (200, trig)}))
+    rows = _sig_rows(rep)
+    assert rows["manifest signed"]["status"] == rd.OK and rows["anti-rollback sequence"]["status"] == rd.OK
+    assert rows["triggers.json is signed"]["status"] == rd.OK and rep.failed == 0
+
+
+def test_tampered_triggers_or_missing_seq_are_flagged():
+    from wrapper_core import trust
+    doc = trust.make_sig_doc(MANIFEST.encode(), bytes(range(32)), "2026-01-01T00:00:00Z", seq=12,
+                             extras={"triggers.json": hashlib.sha256(b"original").hexdigest()})
+    rep = rd.run("o", "r", fake({"https://o.github.io/r/registry/manifest.yaml.sig": (200, json.dumps(doc).encode()),
+                                 "https://o.github.io/r/registry/triggers.json": (200, b"altered")}))
+    assert _sig_rows(rep)["triggers.json is signed"]["status"] == rd.FAIL
+    legacy = trust.make_sig_doc(MANIFEST.encode(), bytes(range(32)), "2026-01-01T00:00:00Z")
+    rep = rd.run("o", "r", fake({"https://o.github.io/r/registry/manifest.yaml.sig": (200, json.dumps(legacy).encode())}))
+    assert _sig_rows(rep)["anti-rollback sequence"]["status"] == rd.WARN
+    bad = rd.run("o", "r", fake({"https://o.github.io/r/registry/manifest.yaml.sig": (200, b"not json")}))
+    assert _sig_rows(bad)["manifest signature"]["status"] == rd.FAIL

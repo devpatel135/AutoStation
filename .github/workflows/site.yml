@@ -69,6 +69,14 @@ jobs:
         if: ${{ steps.artifacts.outputs.exists == 'true' }}
         continue-on-error: true
         run: python tools/build_registry.py --out registry-out --artifacts-dir ../ra
+      - name: Refuse to publish a site that lacks the registry
+        # Machines self-heal from /registry/manifest.yaml. If artifacts exist but the registry did not build (for example a released
+        # version whose content changed without a version bump), failing here keeps the last good Pages deployment live instead of
+        # replacing it with a site that has no registry (404 for every endpoint).
+        if: ${{ steps.artifacts.outputs.exists == 'true' && steps.registry.outcome != 'success' }}
+        run: |
+          echo "::error title=registry did not build::refusing to deploy a site without the registry; fix the registry build (see the step above) - the previous deployment stays live"
+          exit 1
       - name: Overlay on-demand triggers (branch 'triggers', written by ops-action)
         if: ${{ steps.registry.outcome == 'success' }}
         run: |
@@ -81,6 +89,7 @@ jobs:
         if: ${{ steps.registry.outcome == 'success' }}
         env:
           REGISTRY_SIGNING_SEED: ${{ secrets.REGISTRY_SIGNING_SEED }}
+          SIGN_SEQ: ${{ github.run_number }}
         run: |
           if [ -n "$REGISTRY_SIGNING_SEED" ]; then
             # a re-run of an old workflow run must not re-sign an OLDER manifest with a fresh signed_at (that would defeat rollback protection)

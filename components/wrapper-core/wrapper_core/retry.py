@@ -154,13 +154,69 @@ class Skipped:
 SKIPPED = Skipped()  # kept for isinstance-free callers
 
 
+_VPN_SUFFIXES = (".ps1", ".cmd", ".bat", ".exe")
+_VPN_BAD_CHARS = set('\x00"\'%&|;<>^`$\r\n')
+
+
+def vpn_tool_command(vpn_tool: str | None, cwd: str | None, allowed: list | None = None, system_dir: str | None = None) -> list | None:
+    """argv for the manifest's ``vpn_tool``, or None when the value is not allowed. The manifest is registry-supplied data, so it
+    must never be able to name an arbitrary executable. Allowed, and nothing else:
+
+    * a path INSIDE the automation's own folder (it ships in the same signed package as the payload),
+    * a bare ``name.exe`` that exists in ``%SystemRoot%\\System32`` (e.g. ``rasdial.exe``),
+    * an absolute path listed verbatim in platform.json ``vpn_tools`` (set by the operator on the machine).
+
+    UNC paths, ``..`` segments, shell metacharacters and everything else are refused; nothing runs through a shell."""
+    import os
+    if not isinstance(vpn_tool, str) or not vpn_tool.strip() or len(vpn_tool) > 260 or any(c in _VPN_BAD_CHARS for c in vpn_tool):
+        return None
+    tool = vpn_tool.strip()
+    if tool.startswith(("\\\\", "//")) or ".." in tool.replace("\\", "/").split("/"):
+        return None
+    has_sep = ("/" in tool) or ("\\" in tool) or (":" in tool)
+    path = None
+    if os.path.isabs(tool) or (len(tool) > 1 and tool[1] == ":"):
+        want = os.path.normcase(os.path.abspath(tool))
+        if any(isinstance(a, str) and os.path.normcase(os.path.abspath(a)) == want for a in (allowed or [])):
+            path = os.path.abspath(tool)
+    elif has_sep:
+        base = os.path.realpath(cwd or ".")
+        cand = os.path.realpath(os.path.join(base, tool))
+        try:
+            inside = os.path.commonpath([os.path.normcase(base), os.path.normcase(cand)]) == os.path.normcase(base)
+        except ValueError:
+            inside = False
+        if inside and os.path.splitext(cand)[1].lower() in _VPN_SUFFIXES:
+            path = cand
+    elif tool.lower().endswith(".exe"):
+        sysdir = system_dir or os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32")
+        cand = os.path.join(sysdir, tool)
+        path = cand
+    else:  # a bare script name: it is the automation's own script
+        base = os.path.realpath(cwd or ".")
+        cand = os.path.realpath(os.path.join(base, tool))
+        if os.path.dirname(cand) == base and os.path.splitext(cand)[1].lower() in _VPN_SUFFIXES:
+            path = cand
+    if path is None or not os.path.isfile(path):
+        return None
+    return (["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", path]
+            if path.lower().endswith(".ps1") else [path])
+
+
 def _run_vpn_tool(policy: RetryPolicy) -> bool:
     if not policy.vpn_tool:
         return False
-    import os
-    path = policy.vpn_tool if os.path.isabs(policy.vpn_tool) else os.path.join(policy.cwd or ".", policy.vpn_tool)
-    cmd = (["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", path]
-           if path.lower().endswith(".ps1") else [path])
+    try:
+        from .paths import platform_config
+        allowed = platform_config().get("vpn_tools")
+    except Exception:  # noqa: BLE001 - an unreadable config means an empty allow-list, not a crash
+        allowed = None
+    cmd = vpn_tool_command(policy.vpn_tool, policy.cwd, allowed if isinstance(allowed, list) else None)
+    if cmd is None:
+        import logging
+        logging.getLogger("wrapper_core").warning("vpn_tool %r ignored: not inside the automation folder, not a System32 .exe and not in "
+                                                  "platform.json vpn_tools", str(policy.vpn_tool)[:120])
+        return False
     try:
         return subprocess.run(cmd, capture_output=True, timeout=300).returncode == 0
     except (OSError, subprocess.SubprocessError):

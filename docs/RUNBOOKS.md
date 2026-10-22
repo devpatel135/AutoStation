@@ -84,6 +84,25 @@ The Playwright path only clicks the Microsoft account tile when the sign-in's `r
 `python tools/setup_live.py` (answer `y` to the signing key) stores `REGISTRY_SIGNING_SEED` and the repo variable `AUTOSTATION_REGISTRY_PUBKEY`. The next `site` run signs `registry/manifest.yaml`; the next installer build pins the public key in `platform.json` (`registry_pubkeys`). Machines installed before that hold no key and keep accepting the registry until reinstalled. To rotate: generate a new key, list both public keys in the variable (comma-separated), release, then drop the old one. Verify any machine with `python -m wrapper_core.trust --show`.
 
 
+
+### Rollback protection (`seq`) and what to do when it blocks you
+Each signed manifest carries a sequence number (the `site` workflow run number, `SIGN_SEQ`) and endpoints remember the highest one per key. A
+validly signed manifest with a LOWER number is refused (`rollback refused: seq N is lower than the newest accepted M`) and the machine keeps
+running from its last verified manifest. That is the point: a replayed old release cannot be installed. To roll a release back on purpose, do not
+re-publish an old manifest: revert the change on `main` (a new commit, a new run, a higher `seq`) or use the `rollback` ops-action, which also
+produces a new signed manifest. If the repository itself was re-created (run numbers restart from 1), rotate the signing key (below) or delete
+`state/manifest.seq.json` on the affected machines. `python tools/readiness.py` shows the current `seq` and whether `triggers.json` is covered.
+
+### Key rotation
+1. `python tools/sign_registry.py --gen-key new-seed.txt` prints the new PUBLIC key. Put the seed in the repo secret `REGISTRY_SIGNING_SEED`
+   only AFTER step 2 has reached the machines.
+2. Add the new public key next to the old one in the repo variable `AUTOSTATION_REGISTRY_PUBKEY` (comma separated) or in `platform.json`
+   `registry_pubkeys`, release, and let the fleet pick it up (installers built afterwards pin both).
+3. Switch the secret to the new seed; the next `site` run signs with the new key (its own `seq` counter starts fresh).
+4. After the fleet has verified a manifest signed by the new key, remove the old key from the list.
+`triggers.json` is signed together with the manifest on every `site` run, so a trigger added with `ops-action trigger-add` takes effect after the
+next site build, not instantly; a `triggers.json` that does not match the signed digest is ignored by endpoints with a pinned key.
+
 ## "I don't see the train icon while an automation runs"
 1. Windows 11 parks new notification-area icons behind the **up-caret** (^) at the bottom right. Click the caret: the train is in that flyout. To keep it visible drag it onto the taskbar, or turn it on under *Settings -> Personalization -> Taskbar -> Other system tray icons*.
 2. `python -m wrapper_core doctor` shows `tray indicator ... off: <reason>` when it is disabled (`AUTOMAGIX_NO_TRAY`, `AUTOMAGIX_NO_TOAST`, `tray: false` in `platform.json` or the automation's `automation.yaml`).

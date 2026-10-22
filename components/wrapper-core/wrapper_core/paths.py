@@ -84,6 +84,11 @@ class Paths:
         return self.state / "manifest.signed_at"
 
     @property
+    def manifest_seq(self) -> Path:
+        """Highest signed ``seq`` accepted per registry key id ({key_id: seq}): the replay/rollback high-water marks."""
+        return self.state / "manifest.seq.json"
+
+    @property
     def consumed_triggers(self) -> Path:
         return self.state / "consumed_triggers.json"
 

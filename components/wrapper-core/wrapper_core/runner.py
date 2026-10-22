@@ -30,7 +30,7 @@ from .synopsis import build as build_synopsis
 from .util import hostname, iso, new_run_id, read_json, user_hash, utcnow, write_json
 
 EXIT_OK, EXIT_FAILED, EXIT_HUNG = 0, 1, 2
-_SECRET_PREFIXES = ("AUTOSTATION_", "AUTOMAGIX_LOGGING_", "AUTOMAGIX_REGISTRY_TOKEN", "AUTOMAGIX_CRED_")
+_SECRET_PREFIXES = ("AUTOSTATION_", "AUTOMAGIX_LOGGING_", "AUTOMAGIX_REGISTRY_TOKEN", "AUTOMAGIX_CRED_", "AMX_CRED_")
 _SECRET_SUFFIXES = ("_TOKEN", "_SECRET", "_KEY", "_PASSWORD", "_PASSWD")
 
 
