@@ -12,9 +12,9 @@ compatibility:
 components:
   wrapper-core:
     rings:
-      dev: "0.6.0"
-      pilot: "0.6.0"
-      broad: "0.6.0"
+      dev: "0.6.1"
+      pilot: "0.6.1"
+      broad: "0.6.1"
     versions:
       "0.2.0":
         url: artifacts/components/wrapper-core-0.2.0.zip
@@ -40,6 +40,9 @@ components:
       "0.6.0":
         url: artifacts/components/wrapper-core-0.6.0.zip
         sha256: "7cee02aa767597355b18ecfadaa5fc145de076bc41a2aad8ca1d291f977e9a24"
+      "0.6.1":
+        url: artifacts/components/wrapper-core-0.6.1.zip
+        sha256: "8401838d434def158c60c77e33854c35fb13f62343ea9faefb8f3fc906bff72a"
   execution-framework:
     rings:
       dev: "0.4.0"
