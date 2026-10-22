@@ -154,3 +154,10 @@ When a run fails, a pre-flight check fails, or a login/idle heartbeat finds trou
 * `python -m wrapper_core remediate --dry-run` - diagnose the last failed run and the install, show what it *would* do; without `--dry-run` it applies the safe fixes (`--category X`, `--automation N`, `--include-tasks`, `--json`; `--clear-overrides` removes the native-mode override).
 * `python -m wrapper_core doctor --fix` - apply the safe playbooks for FAIL/WARN checks.
 * `python -m wrapper_core debug-bundle [--run RUN_ID] [--out FILE]` - one redacted zip for a support ticket (doctor output, versions, `platform.json` minus secret-like keys, log and run tails, scheduled-task state, registry cache, remediation history; never `secrets/`, profiles, screenshots).
+
+## Pinning the registry key on an existing install (no reinstall)
+Machines installed before the signing key was published hold no key and accept an unsigned or older registry. Pin it in place:
+
+    python -m wrapper_core trust --pin <public key hex>
+
+(`<install>\python\python.exe` with `AUTOMAGIX_HOME` and `PYTHONPATH=<install>\wrapper-core` set, or the installed `bin` launcher.) The command first downloads the live registry's `manifest.yaml` and `manifest.yaml.sig` and checks the signature against the key you give it; only a key that verifies is written to `platform.json` (`registry_pubkeys`), so a mistyped or wrong key can never lock the machine out. The public key is the value of the repository variable `AUTOSTATION_REGISTRY_PUBKEY` (Settings > Secrets and variables > Actions > Variables). Check with `python -m wrapper_core trust --show`.

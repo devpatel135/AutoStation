@@ -244,3 +244,34 @@ def test_triggers_ignored_when_the_cached_signature_is_gone(registry, monkeypatc
     fetch(registry)
     Paths().manifest_sig_cache.unlink()
     assert selfheal.pending_triggers(Paths(), str(registry.root), None, "auto-a") == []
+
+
+# ---- trust --pin on an existing install --------------------------------------------------------------------------------------
+def test_pin_keys_pins_only_after_the_live_manifest_verifies(tmp_path, monkeypatch):
+    import json as _json
+    from wrapper_core import ed25519, trust
+    from wrapper_core.paths import Paths
+    monkeypatch.setenv("AUTOMAGIX_HOME", str(tmp_path))
+    monkeypatch.delenv("AUTOMAGIX_REGISTRY_PUBKEYS", raising=False)
+    p = Paths().ensure()
+    p.platform_json.write_text(_json.dumps({"ring": "broad", "registry_url": "https://reg.example.test/registry/"}), encoding="utf-8")
+    seed, pub = ed25519.keypair_from_seed(bytes(range(32)))
+    manifest = b"components: {}\nautomations: {}\n"
+    doc = trust.make_sig_doc(manifest, seed, "2026-01-01T00:00:00Z", seq=5)
+    files = {"https://reg.example.test/registry/manifest.yaml": manifest,
+             "https://reg.example.test/registry/manifest.yaml.sig": _json.dumps(doc).encode()}
+    fetch = lambda loc: files[loc]
+    # wrong key: refused, nothing written
+    _, other_pub = ed25519.keypair_from_seed(bytes(range(1, 33)))
+    ok, msg = trust.pin_keys([other_pub.hex()], p, fetch)
+    assert not ok and "does NOT verify" in msg and "registry_pubkeys" not in _json.loads(p.platform_json.read_text(encoding="utf-8"))
+    # right key: pinned, merged, idempotent
+    ok, msg = trust.pin_keys([pub.hex()], p, fetch)
+    assert ok and _json.loads(p.platform_json.read_text(encoding="utf-8"))["registry_pubkeys"] == [pub.hex()]
+    ok, _ = trust.pin_keys([pub.hex()], p, fetch)
+    assert ok and _json.loads(p.platform_json.read_text(encoding="utf-8"))["registry_pubkeys"] == [pub.hex()]
+    # garbage input and an unreachable registry fail closed
+    assert trust.pin_keys(["nothex"], p, fetch)[0] is False
+    def boom(loc):
+        raise OSError("offline")
+    assert trust.pin_keys([pub.hex()], p, boom)[0] is False

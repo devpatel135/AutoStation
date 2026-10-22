@@ -6,7 +6,7 @@ name: health
 # Without LOGGING_TOKEN, or while the logs repo has no data yet, it does nothing and closes nothing (a missing data source
 # must never look like "all clear"). Closing is also gated on the report itself (tools/ops_issues.py report_trust: enough records,
 # fresh, few rejects, no failed signal builder) and needs TWO consecutive clean runs (label signal-clearing). Telemetry is advisory and untrusted: tools/ops_issues.py sanitises every field.
-# Operator guide: docs/PIPELINES.md ("ops-signal issues").
+# Operator guide: docs/PIPELINES.md ("ops-signal issues"). Also runs when this file or tools/ops_issues.py changes on main (scheduled runs can be late).
 on:
   schedule:
     - cron: "7,37 * * * *"
