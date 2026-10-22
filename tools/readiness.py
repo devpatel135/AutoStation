@@ -167,20 +167,32 @@ def check_settings(rep: Report, fetch: Fetch, owner: str, repo: str, token: Opti
         rep.add("settings", TODO, "secrets/variables, scanning, logs repo", "set GITHUB_TOKEN (repo admin) and re-run to verify these")
         return
     code, info = _json(fetch, f"https://api.github.com/repos/{owner}/{repo}", token)
-    sa = (info or {}).get("security_and_analysis") or {}
-    for key in ("secret_scanning", "secret_scanning_push_protection"):
-        on = (sa.get(key) or {}).get("status") == "enabled"
-        rep.add("settings", OK if on else FAIL, key, "enabled" if on else "disabled")
+    if not info:
+        why = {401: "GitHub rejected the token (expired, mistyped or revoked)", 403: "the token is not allowed to read this repo (scope or SSO authorisation)",
+               404: "the token cannot see this repo (needs the repo scope)", 0: "GitHub was unreachable"}.get(code, f"HTTP {code}")
+        rep.add("settings", TODO, "token-only checks skipped", f"{why}; scanning, secrets and the logs repo were NOT checked")
+        return
+    perms = info.get("permissions") or {}
+    sa = info.get("security_and_analysis")
+    if not perms.get("admin") or sa is None:
+        rep.add("settings", TODO, "secret scanning status", "not visible: the token needs admin on the repo (classic token with the repo scope)")
+    else:
+        for key in ("secret_scanning", "secret_scanning_push_protection"):
+            on = (sa.get(key) or {}).get("status") == "enabled"
+            rep.add("settings", OK if on else FAIL, key, "enabled" if on else "disabled (Settings > Advanced Security)")
     for kind, want in (("secrets", ("LOGGING_TOKEN",)), ("variables", ())):
         code, data = _json(fetch, f"https://api.github.com/repos/{owner}/{repo}/actions/{kind}", token)
-        have = {x["name"] for x in (data or {}).get(kind, [])} if data else set()
+        if data is None:
+            rep.add("settings", TODO, f"{kind} list", f"not readable (HTTP {code}): needs admin on the repo")
+            continue
+        have = {x["name"] for x in data.get(kind, [])}
         for w in want:
             rep.add("settings", OK if w in have else TODO, f"{kind[:-1]} {w}", "present" if w in have else "missing")
     code, logs = _json(fetch, f"https://api.github.com/repos/{owner}/AutoStation-logs", token)
     if logs:
         rep.add("settings", OK if logs.get("private") else FAIL, "logs repo is private", str(logs.get("private")))
     else:
-        rep.add("settings", TODO, "logs repo", f"HTTP {code}: run tools/setup_live.py")
+        rep.add("settings", TODO, "logs repo", f"not readable (HTTP {code}): check the token can see {owner}/AutoStation-logs")
 
 
 def run(owner: str, repo: str, fetch: Fetch = http_fetch, deep: bool = False, token: Optional[str] = None) -> Report:

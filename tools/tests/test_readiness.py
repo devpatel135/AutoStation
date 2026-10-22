@@ -68,3 +68,17 @@ def test_missing_page_and_failed_pipeline_are_reported():
 def test_unreachable_network_fails_closed():
     rep = rd.run("o", "r", lambda url, token=None: (0, b""))
     assert rep.failed >= 1
+
+
+def test_a_rejected_token_is_reported_as_unchecked_not_as_disabled_features():
+    base = fake()
+
+    def f(url, token=None):
+        if token and url.startswith("https://api.github.com/repos/o/"):
+            return 401, b""
+        return base(url, token)
+    rep = rd.run("o", "r", f, token="bad")
+    assert rep.failed == 0
+    rows = [r for r in rep.rows if r["area"] == "settings" and "token-only" in r["check"]]
+    assert rows and "rejected" in rows[0]["detail"]
+    assert not any(r["check"] == "secret_scanning" for r in rep.rows)

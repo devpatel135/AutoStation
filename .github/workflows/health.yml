@@ -10,6 +10,11 @@ name: health
 on:
   schedule:
     - cron: "7,37 * * * *"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/health.yml"
+      - "tools/ops_issues.py"
   workflow_dispatch:
 
 permissions:

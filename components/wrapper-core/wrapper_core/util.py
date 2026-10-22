@@ -60,13 +60,26 @@ def safe_name(text: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]", "_", text)[:128] or "_"
 
 
+def _replace_with_retry(src: str, dst: Path, attempts: int = 40) -> None:
+    """os.replace that rides out Windows' transient 'access denied' (a scanner/indexer or a reader briefly holds the target open)."""
+    import time
+    for i in range(attempts):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if os.name != "nt" or i == attempts - 1:
+                raise
+            time.sleep(0.005 * (i + 1) if i < 10 else 0.05)
+
+
 def atomic_write_text(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=path.name + ".", suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
             f.write(text)
-        os.replace(tmp, path)
+        _replace_with_retry(tmp, path)
     except BaseException:
         try:
             os.unlink(tmp)

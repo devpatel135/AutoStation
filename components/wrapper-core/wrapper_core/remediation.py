@@ -236,7 +236,9 @@ def state_lock(paths: Paths, timeout_s: float = 5.0, stale_s: float = 30.0):
         try:
             fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
             break
-        except FileExistsError:
+        except (FileExistsError, PermissionError):
+            # PermissionError: on Windows a lock file another process just deleted stays "delete pending" for a moment and
+            # O_EXCL fails with access denied - that is contention, not a broken lock, so retry like FileExistsError
             try:
                 if time.time() - lock.stat().st_mtime > stale_s:
                     lock.unlink()
@@ -245,7 +247,7 @@ def state_lock(paths: Paths, timeout_s: float = 5.0, stale_s: float = 30.0):
                 pass
             if time.monotonic() > deadline:
                 break
-            time.sleep(0.05)
+            time.sleep(0.02)
         except OSError:
             break
     try:
@@ -254,9 +256,16 @@ def state_lock(paths: Paths, timeout_s: float = 5.0, stale_s: float = 30.0):
         if fd is not None:
             try:
                 os.close(fd)
-                lock.unlink()
             except OSError:
                 pass
+            for _ in range(50):          # the unlink can race a virus scanner / indexer on Windows: retry briefly
+                try:
+                    lock.unlink()
+                    break
+                except FileNotFoundError:
+                    break
+                except OSError:
+                    time.sleep(0.01)
 
 
 def update_state(paths: Paths, fn: Callable[[dict], Any]) -> Any:
