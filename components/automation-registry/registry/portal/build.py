@@ -12,6 +12,26 @@ from . import admin, health, pages
 from .common import DEFAULT_CONFIG, describe_schedule, installer_rel, rings_of
 
 
+def _status_data(m: dict, hl: dict, signals: list[dict], run_list: list[dict]) -> dict:
+    """Compute the numbers shown in the fixed status strip on every page."""
+    autos = m.get("automations") or {}
+    healthy = sum(1 for h in hl.values() if h.get("status") == "healthy")
+    attention = sum(1 for h in hl.values() if h.get("status") in ("degraded", "failing"))
+    paused = sum(1 for e in autos.values() if (e or {}).get("status") == "paused")
+    hosts = {r.get("host") for r in run_list if r.get("host")}
+    silent = sum(1 for s in signals if s.get("type") == "SILENT")
+    total_items = sum((r.get("items") or {}).get("processed", 0) if isinstance(r.get("items"), dict) else 0 for r in run_list)
+    # fleet-average minutes_per_item across automations that declare it
+    mpi_vals = [((e or {}).get("catalog") or {}).get("minutes_per_item") for e in autos.values()]
+    mpi_vals = [float(v) for v in mpi_vals if v is not None]
+    avg_mpi = sum(mpi_vals) / len(mpi_vals) if mpi_vals else None
+    hours_saved = round(total_items * avg_mpi / 60) if (total_items and avg_mpi) else None
+    return {"healthy": healthy, "attention": attention, "paused": paused,
+            "machines": len(hosts), "silent": silent, "signals": len(signals),
+            "fleet_paused": bool((m.get("fleet") or {}).get("paused")),
+            "total_items": total_items, "hours_saved": hours_saved}
+
+
 def load_config(config_path: Path | None, manifest_dir: Path) -> dict:
     cfg = dict(DEFAULT_CONFIG)
     if os.environ.get("CI_SERVER_URL"):
@@ -85,14 +105,24 @@ def build_portal(manifest_path: Path, out_dir: Path, *, signals=None, runs=None,
     out_dir.mkdir(parents=True, exist_ok=True)
     files: list[str] = []
 
-    _write(out_dir, "index.html", pages.build_index(m, cfg, hl, text), files)
-    _write(out_dir, "compatibility.html", pages.build_compat(m, cfg, text), files)
-    _write(out_dir, "governance.html", pages.build_governance(find_governance(governance, manifest_dir), cfg, text), files)
-    _write(out_dir, "admin.html", admin.build_admin(m, cfg, hl, sig, text, trig_doc["triggers"]), files)
+    # compute status summary passed to every page's nav status strip
+    status_data = _status_data(m, hl, sig, run_list)
+
+    gov_text = find_governance(governance, manifest_dir)
+    _write(out_dir, "overview.html", pages.build_overview(m, cfg, hl, sig, run_list, text, status_data), files)
+    _write(out_dir, "index.html", pages.build_index(m, cfg, hl, text, status_data), files)
+    _write(out_dir, "health.html", pages.build_health(m, cfg, hl, sig, run_list, text, status_data), files)
+    _write(out_dir, "fleet.html", pages.build_fleet(m, cfg, hl, sig, run_list, text, status_data), files)
+    _write(out_dir, "admin.html", admin.build_admin(m, cfg, hl, sig, text, trig_doc["triggers"], status_data), files)
+    _write(out_dir, "audit.html", pages.build_audit(gov_text, hist, cfg, text, status_data), files)
+    # keep legacy pages so any bookmarks/links still work
+    _write(out_dir, "compatibility.html", pages.build_compat(m, cfg, text, status_data), files)
+    _write(out_dir, "governance.html", pages.build_governance(gov_text, cfg, text, status_data), files)
     for name, entry in (m.get("automations") or {}).items():
         mine = [h for h in hist if h["target"] == name]
         pend = [t for t in trig_doc["triggers"] if t.get("automation") == name]
-        _write(out_dir, f"automation/{name}.html", pages.build_detail(name, entry or {}, m, cfg, hl.get(name), mine, pend, text), files)
+        _write(out_dir, f"automation/{name}.html",
+               pages.build_detail(name, entry or {}, m, cfg, hl.get(name), mine, pend, text, status_data), files)
 
     _write(out_dir, "manifest.yaml", text, files)
     _write(out_dir, "triggers.json", json.dumps(trig_doc, indent=2, sort_keys=True) + "\n", files)

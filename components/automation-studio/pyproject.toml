@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "automation-studio"
+version = "0.1.0"
+description = "AUTOSTATION Studio: context-aware design surface for new automations"
+requires-python = ">=3.9"
+dependencies = []  # wrapper-core on PYTHONPATH via amx; stdlib only for core
+
+[project.optional-dependencies]
+server = ["fastapi>=0.110", "uvicorn>=0.29"]   # Phase 2: browser UI server
+dev    = ["pytest>=7"]
+
+[tool.setuptools.packages.find]
+include = ["automation_studio*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

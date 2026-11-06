@@ -34,6 +34,7 @@ function lazy(name, loader) {
 lazy('browser', () => require('./lib/browser'));
 lazy('cdp', () => require('./lib/cdp'));
 lazy('resilience', () => require('./lib/resilience'));
+lazy('llm', () => require('./lib/llm'));
 lazy('agent', () => require('./lib/agent'));
 lazy('mcp', () => require('./lib/mcp-server'));
 lazy('adapters', () => require('./lib/adapters'));

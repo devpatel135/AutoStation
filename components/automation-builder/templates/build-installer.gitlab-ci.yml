@@ -22,6 +22,9 @@
 #   SIGNING_PFX_PASSWORD_FILE[File] its password
 #   SIGNING_TIMESTAMP_URL    RFC3161 timestamp authority
 #   PYTHON_EMBED_ZIP         [File or path] python.org embeddable package zip (from the containeryard artifact mirror)
+#   REGISTRY_PUBKEYS         comma-separated 64-hex Ed25519 keys pinned into platform.json (optional; strongly recommended
+#                            for pilot/broad — without this the installer cannot verify the registry manifest signature)
+#                            alt: REGISTRY_PUBKEYS_FILE [File] – file holding the same content
 # Registry MR job:
 #   REGISTRY_PROJECT_ID, REGISTRY_BOT_TOKEN (MASKED, api + write_repository), REGISTRY_GIT_URL (https clone URL, no credentials)
 

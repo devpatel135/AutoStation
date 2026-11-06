@@ -131,3 +131,41 @@ archive-prune:
     - *archive_pull
     - python -m automation_logging prune --archive data/archive --days "${ARCHIVE_RETENTION_DAYS:-90}"
     - *archive_push
+
+# Monthly squash: collapses the archive branch to a single commit, bounding git history growth.
+# Trigger via CI schedule (1st of each month, 02:00) with variable SQUASH=1, or manually via "Run pipeline".
+# INGEST_TOKEN must have Maintainer role (needed to delete/recreate the protected branch protection during the squash).
+archive-squash:
+  stage: ingest
+  rules:
+    - if: $SQUASH == "1"
+  script:
+    - MONTH=$(date +%Y-%m)
+    - REMOTE="https://oauth2:${INGEST_TOKEN}@${CI_SERVER_HOST}/${CI_PROJECT_PATH}.git"
+    - git clone --quiet --branch archive "$REMOTE" squash-work
+    - |
+      cd squash-work
+      TREE=$(git log -1 --format="%T")
+      OLD_COUNT=$(git rev-list --count HEAD)
+      NEW_SHA=$(git commit-tree "$TREE" -m "squash: monthly archive squash $MONTH ($OLD_COUNT commits → 1)")
+      echo "Squashing $OLD_COUNT commits into one for $MONTH (tree $TREE → $NEW_SHA)"
+
+      # Temporarily remove branch protection so we can push the orphan history without force-push conflicts.
+      # Re-protect immediately after. The window is <5 s inside a single job.
+      curl --silent --fail --request DELETE \
+        --header "PRIVATE-TOKEN: $INGEST_TOKEN" \
+        "$CI_API_V4_URL/projects/$CI_PROJECT_ID/protected_branches/archive" || true
+
+      git push origin "$NEW_SHA:refs/heads/archive"
+
+      # Re-protect: Maintainers may push; force-push off; merge: Maintainers (access level 40).
+      curl --silent --fail --request POST \
+        --header "PRIVATE-TOKEN: $INGEST_TOKEN" \
+        --form "name=archive" \
+        --form "push_access_level=40" \
+        --form "merge_access_level=40" \
+        --form "allow_force_push=false" \
+        "$CI_API_V4_URL/projects/$CI_PROJECT_ID/protected_branches"
+
+      echo "archive-squash done: $OLD_COUNT → 1 commit ($MONTH)"
+      cd ..

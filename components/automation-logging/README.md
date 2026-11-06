@@ -52,10 +52,11 @@ Rotation: generate a new key pair, replace the deploy key, rebuild installers (r
 * **State** (`state/analytics.json` target-change timestamps for VERSION_DRIFT, `state/diagnoses.json` LLM cache,
   `state/alerts.json` delivery state, `state/alerts-outbox.jsonl`) is committed to the same branch so dedupe survives between pipelines.
 * **Retention**: analytics loads 30 days (`window_days`); the `archive-prune` schedule (`PRUNE=1`, default 90 days via
-  `ARCHIVE_RETENTION_DAYS`) deletes older day folders. The branch still grows in git history: squash it monthly
-  (`git checkout --orphan new && git add -A && git commit && git push -f origin new:archive` with a Maintainer token) or move old
-  months to a package/bucket.
-* **Schedules**: every 15 min `INGEST_ONLY=1` (ingest only); hourly full pipeline; monthly `PRUNE=1`.
+  `ARCHIVE_RETENTION_DAYS`) deletes older day folders. The branch still grows in git history: the `archive-squash` CI job
+  (`SQUASH=1`) collapses it to one commit monthly — set up a GitLab schedule for the 1st of each month at 02:00 with
+  variable `SQUASH=1`. The job temporarily removes then re-applies the `archive` branch protection (requires `INGEST_TOKEN`
+  at Maintainer role); the unprotected window is under 5 seconds within the job.
+* **Schedules**: every 15 min `INGEST_ONLY=1` (ingest only); hourly full pipeline; monthly `PRUNE=1`; monthly `SQUASH=1`.
 
 ## Compliance signals (SPEC §11)
 
@@ -99,7 +100,7 @@ python -m pytest                                              # 65 tests, no net
 The sample contains every signal type: a 3-day `LOGIC_ERROR` streak, a run that hid 12 failed items, a hung run, a slow run
 on a drifted host with failing self-heal, a run inside a maintenance window, a skipped day (`MISSED`) and a host that went dark.
 
-Commands: `ingest`, `analyze`, `diagnose`, `alert`, `triggers`, `dashboard`, `build` (all of them), `prune`, `sample`.
+Commands: `ingest`, `analyze`, `diagnose`, `alert`, `triggers`, `dashboard`, `build` (all of them), `prune`, `sample`, `audit`.
 Exit codes: **signals never fail a job**; a stage exception or a failing alert channel does (so a broken Jira connection is noticed),
 but the remaining stages - notably the dashboard - still run.
 

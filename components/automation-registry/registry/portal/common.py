@@ -134,9 +134,9 @@ def health_pill(h: dict | None) -> str:
     return pill(h.get("status", "unknown"), kind)
 
 
-NAV = [("index.html", "Catalog", "catalog"), ("compatibility.html", "Compatibility", "compat"),
-       ("governance.html", "Governance", "gov"), ("admin.html", "Admin", "admin")]
-
+NAV = [("overview.html", "Overview", "overview"), ("index.html", "Catalog", "catalog"),
+       ("health.html", "Health", "health"), ("fleet.html", "Fleet", "fleet"),
+       ("admin.html", "Admin", "admin"), ("audit.html", "Audit", "audit")]
 
 # The portal page never loads a font or fetches anything: nothing but inline style, data: images and the generator-authored inline
 # scripts (allowed by SHA-256, never 'unsafe-inline') may run.
@@ -154,26 +154,57 @@ TELEMETRY_NOTICE = "Telemetry is submitted by installed clients and is not authe
 TELEMETRY_BANNER = f'<div class="banner" role="note"><strong>Advisory data.</strong> {TELEMETRY_NOTICE}.</div>'
 
 
+def _status_strip(status_data: dict | None, base: str) -> str:
+    if not status_data:
+        return '<div class="status-strip"></div>'
+    healthy = status_data.get("healthy", 0)
+    attention = status_data.get("attention", 0)
+    paused = status_data.get("paused", 0)
+    machines = status_data.get("machines", 0)
+    silent = status_data.get("silent", 0)
+    sig_count = status_data.get("signals", 0)
+    fleet_paused = status_data.get("fleet_paused", False)
+    badge_cls = "crit" if fleet_paused else ("warn" if sig_count else "ok")
+    badge_txt = "FLEET PAUSED" if fleet_paused else (f"{sig_count} signal{'s' if sig_count != 1 else ''}" if sig_count else "All clear")
+    silent_txt = f"&nbsp;·&nbsp;<span style='color:var(--crit);font-weight:600'>{esc(str(silent))} silent</span>" if silent else ""
+    return (f'<div class="status-strip">'
+            f'<div class="ss"><span class="ss-dot ok"></span><span class="ss-n ok">{healthy}</span><span>healthy</span></div>'
+            f'<div class="ss"><span class="ss-dot warn"></span><span class="ss-n warn">{attention}</span><span>attention</span></div>'
+            f'<div class="ss"><span class="ss-dot mute"></span><span class="ss-n" style="color:var(--mute)">{paused}</span><span>paused</span></div>'
+            f'<div class="ss" style="border-right:none">{machines} machines{silent_txt}</div>'
+            f'<div class="fleet-badge {esc(badge_cls)}" style="margin-left:auto">{esc(badge_txt)}</div>'
+            f'</div>')
+
+
 def layout(title: str, body: str, *, config: dict, active: str = "", depth: int = 0, manifest_text: str = "",
-           extra_head: str = "", extra_js: str = "") -> str:
+           extra_head: str = "", extra_js: str = "", status_data: dict | None = None) -> str:
     base = "../" * depth
-    links = "".join(f'<a href="{base}{href}"{" class=active" if key == active else ""}>{label}</a>' for href, label, key in NAV)
-    if config.get("home_url"):  # embedded in a larger site (GitHub Pages): link back to its home page
-        links = f'<a href="{esc(base + str(config["home_url"]))}">Site home</a>' + links
+    tabs = "".join(f'<a href="{base}{href}" class="nav-tab{" active" if key == active else ""}">{label}</a>'
+                   for href, label, key in NAV)
+    if config.get("home_url"):
+        tabs = f'<a href="{esc(base + str(config["home_url"]))}" class="nav-tab">Site home</a>' + tabs
     digest = hashlib.sha256(manifest_text.encode("utf-8")).hexdigest()[:12] if manifest_text else "n/a"
     brand = esc(config.get("title", "AUTOSTATION"))
+    version_hint = esc(str(config.get("portal_version", "")))
+    ver_html = f'<div class="nav-ver">{version_hint}</div>' if version_hint else ""
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 {csp_meta(THEME_HEAD_JS, THEME_TOGGLE_JS, *_INLINE_SCRIPT.findall(extra_js))}
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{esc(title)} - {brand}</title>
+<title>{esc(title)} — {brand}</title>
 <script>{THEME_HEAD_JS}</script>
 <style>{CSS}</style>{extra_head}
-</head><body><div class="page">
-<header class="top">
-  <div class="brand">{LOGO_SVG}<div><div class="eyebrow">{brand} registry</div><div style="font-weight:700">{esc(title)}</div></div></div>
-  <nav class="main" aria-label="Main">{links}<button id="theme-toggle" type="button" title="Toggle light/dark theme" aria-label="Toggle theme">Theme</button></nav>
-</header>
+</head><body>
+<nav class="site-nav" aria-label="Main">
+  <a class="nav-brand" href="{base}overview.html">{LOGO_SVG}<div><div class="nav-wm">{brand}</div>{ver_html}</div></a>
+  <div class="nav-tabs">{tabs}</div>
+  <div class="nav-end">
+    <span class="nav-digest">manifest sha256 {esc(digest)}…</span>
+    <button id="theme-toggle" type="button" title="Toggle light/dark theme" aria-label="Toggle theme">Theme</button>
+  </div>
+</nav>
+{_status_strip(status_data, base)}
+<div class="page">
 {TELEMETRY_BANNER}
 {body}
 <footer class="foot">Generated from manifest.yaml (sha256 {esc(digest)}). Static site: no server, no scripts that call home.</footer>

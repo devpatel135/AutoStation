@@ -66,10 +66,10 @@ def test_all_pages_generated_and_well_formed(site):
 def test_index_cards_installers_and_rings(site):
     out, _ = site
     page = read(out, "index.html")
-    assert page.count('class="card') == 2
+    assert page.count('<article class="acard') == 2
     assert 'href="automation/auto-a.html"' in page
     # default ring = broad => broad version's installer
-    assert 'href="installers/auto-a-1.0.0-setup.exe"' in page and "Download installer v1.0.0 (broad)" in page
+    assert 'href="installers/auto-a-1.0.0-setup.exe"' in page and "↓ Install v1.0.0 (broad)" in page
     for r, v in (("dev", "1.2.0"), ("pilot", "1.1.0"), ("broad", "1.0.0")):
         assert f'data-v-{r}="{v}"' in page
         assert f'data-href-{r}="installers/auto-a-{v}-setup.exe"' in page
@@ -96,7 +96,7 @@ def test_unreleased_ring_has_no_download(tmp_path, mpath):
     out = tmp_path / "pub"
     build.build_portal(mpath, out)
     page = read(out, "index.html")
-    assert 'data-v-broad=""' in page and "Download installer v1.0.0 (dev)" in page   # falls back to the highest released ring
+    assert 'data-v-broad=""' in page and "↓ Install v1.0.0 (dev)" in page   # falls back to the highest released ring
 
 
 def test_detail_page_content(site):
@@ -150,7 +150,7 @@ def test_governance_present_and_absent(tmp_path, mpath):
 def test_health_absent_and_present(tmp_path, mpath):
     out = tmp_path / "pub"
     build.build_portal(mpath, out)
-    assert "no telemetry" in read(out, "index.html")
+    assert 'class="hdot mute"' in read(out, "index.html")
     signals = tmp_path / "signals.json"
     signals.write_text(json.dumps({"signals": [{"id": "s1", "type": "MISSED", "severity": "high", "automation": "auto-a", "detail": "no run"}]}))
     runs = tmp_path / "runs.json"
@@ -315,7 +315,7 @@ def test_admin_html_wiring(site):
     page = read(out, "admin.html")
     assert 'data-prepare="auto-a"' in page and 'id="auto-a"' in page and 'data-for="__fleet__"' in page
     assert "pipelines/new?ref=" in page and "merge_requests/new?merge_request[source_branch]=" in page and "/-/edit/" in page
-    assert "Fleet compliance summary" in page and "Mid-rollout" in page and "textContent" in page
+    assert "Fleet summary" in page and "Mid-rollout" in page and "textContent" in page
     assert "innerHTML" not in page and "document.write" not in page   # the page script only uses textContent/attributes
 
 

@@ -9,12 +9,17 @@ channels:
   - {name: jira, type: jira, issue_type: Bug}
   - {name: mail, type: email, to_owner: true}
 
-# severity -> channels. Start conservative: only the outbox, then add channels as the team proves they watch them.
+# severity -> channels.
+# Required CI/CD variables (Settings > CI/CD > Variables, masked, protected):
+#   teams  : TEAMS_WEBHOOK_URL          — Incoming Webhook URL for your Teams channel
+#   mail   : SMTP_HOST, SMTP_PORT, SMTP_FROM, SMTP_TO, SMTP_USER, SMTP_PASS (optional auth)
+#   jira   : JIRA_URL, JIRA_TOKEN, JIRA_PROJECT
+# Set at least TEAMS_WEBHOOK_URL before enabling the teams channel.
 routing:
-  critical: [outbox]        # e.g. [outbox, teams, jira, mail]
-  high: [outbox]            # e.g. [outbox, teams, jira]
-  medium: [outbox]
-  low: []
+  critical: [outbox, teams, mail]   # pages immediately; set TEAMS_WEBHOOK_URL + SMTP_* to activate
+  high:     [outbox, teams]         # degraded automations page the team
+  medium:   [outbox]
+  low:      []
 
 # per-automation override; `email` becomes the owner address on alerts for that automation
 owners: {}

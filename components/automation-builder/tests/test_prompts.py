@@ -21,7 +21,7 @@ VARS = {
 
 
 def test_all_templates_are_listed_with_versions():
-    assert set(loader.list_templates()) == {"scaffold", "review", "test_gen", "design_doc"}
+    assert set(loader.list_templates()) == {"scaffold", "review", "test_gen", "design_doc", "page_classifier"}
     for name in loader.list_templates():
         assert re.match(r"^\d+\.\d+\.\d+$", loader.template_version(name))
         assert loader.template_meta(name)["description"]

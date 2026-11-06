@@ -281,7 +281,7 @@ def _skew(entry: dict, order: list[str]) -> bool:
 
 
 def build_admin(m: dict, config: dict, health: dict[str, dict], signals: list[dict], manifest_text: str,
-                pending_triggers: list[dict]) -> str:
+                pending_triggers: list[dict], status_data: dict | None = None) -> str:
     order = rings_of(m)
     autos = m.get("automations") or {}
     actions = build_actions(m)
@@ -311,38 +311,54 @@ def build_admin(m: dict, config: dict, health: dict[str, dict], signals: list[di
     def select(key: str, defs: list[dict]) -> str:
         opts = "".join(f'<option value="{i}">{esc(d["label"])}</option>' for i, d in enumerate(defs))
         return (f'<select data-for="{esc(key)}" aria-label="Action for {esc(key)}">{opts}</select> '
-                f'<button type="button" data-prepare="{esc(key)}">Prepare</button>') if defs else '<span class="mono">no actions</span>'
+                f'<button type="button" data-prepare="{esc(key)}">Prepare →</button>') if defs else '<span class="mono">no actions available</span>'
 
     rows = []
     for name, entry in autos.items():
         entry = entry or {}
         rr = entry.get("rings") or {}
         rows.append(
-            f'<tr id="{esc(name)}"><td><a href="automation/{esc(name)}.html" class="mono">{esc(name)}</a><br>{status_pill(entry)} {health_pill(health.get(name))}'
-            f'{("<br><span class=mono>" + esc(entry.get("paused_reason")) + "</span>") if entry.get("status") == "paused" else ""}</td>'
-            + "".join(f"<td class=mono>{esc(rr.get(r) or '-')}</td>" for r in order)
+            f'<tr id="{esc(name)}"><td><a href="automation/{esc(name)}.html" class="mono" style="font-size:11px">{esc(name)}</a>'
+            f'<br>{status_pill(entry)} {health_pill(health.get(name))}'
+            f'{("<br><span class=mono style=font-size:10px>" + esc(entry.get("paused_reason")) + "</span>") if entry.get("status") == "paused" else ""}</td>'
+            + "".join(f'<td class="mono" style="font-size:11px">{esc(rr.get(r) or "-")}</td>' for r in order)
             + f'<td>{pill("mid-rollout", "warn") if _skew(entry, order) else pill("aligned", "ok")}</td>'
             f'<td>{select(name, actions["automations"].get(name, []))}</td></tr>')
     comp_rows = "".join(
-        f'<tr><td class=mono>{esc(n)}</td>' + "".join(f"<td class=mono>{esc(((c or {}).get('rings') or {}).get(r) or '-')}</td>" for r in order)
+        f'<tr><td class="mono" style="font-size:11px">{esc(n)}</td>'
+        + "".join(f'<td class="mono" style="font-size:11px">{esc(((c or {}).get("rings") or {}).get(r) or "-")}</td>' for r in order)
         + f'<td>{pill("mid-rollout", "warn") if _skew(c or {}, order) else pill("aligned", "ok")}</td></tr>'
         for n, c in (m.get("components") or {}).items())
     ring_head = "".join(f"<th>{esc(r)}</th>" for r in order)
     body = f"""{fleet_banner}
-<div class="banner"><strong>How this panel works.</strong> There is no server. Choose an action, review the exact diff, then run the
-<code>ops-action</code> pipeline (prefilled link) or paste the CLI command. Manifest changes open a merge request - <em>the approval is the
-governance gate</em>. On-demand triggers skip the MR (no manifest change) and go to a protected <code>triggers</code> branch.</div>
-<h2>Fleet compliance summary</h2><div class="tiles">{tiles}</div>
-<h3>Shared components</h3>
-<div class="tbl-wrap"><table><tr><th>Component</th>{ring_head}<th>State</th><th></th></tr>{comp_rows}</table></div>
+<div class="view-head">
+  <div><div class="view-title">Admin</div>
+  <div class="view-sub">No server · choose an action · review the exact manifest diff · MR approval is the governance gate</div></div>
+</div>
+<div class="banner"><strong>How this panel works.</strong> Choose an action below, review the exact manifest diff, CI variable set, and
+CLI command, then run the <code>ops-action</code> pipeline (prefilled link) or paste the CLI command.
+Manifest changes open a merge request — <em>the approval is the governance gate</em>.
+On-demand triggers skip the MR (no manifest change) and go to a protected <code>triggers</code> branch.</div>
+<h2>Fleet summary</h2>
+<div class="tiles">{tiles}</div>
+<div class="tbl-wrap" style="margin-bottom:1rem"><table><tr><th>Component</th>{ring_head}<th>State</th></tr>{comp_rows or "<tr><td colspan=9 class=empty>No components defined.</td></tr>"}</table></div>
 <h2>Fleet kill-switch</h2>
-<div class="panel {'accent' if actions['fleet'] else ''}"><p>Halts every automation at its next self-heal check (no per-machine action). Use for incidents; prefer pausing one automation when possible.</p>
-{select('__fleet__', actions['fleet'])}</div>
+<div class="panel {'accent' if actions['fleet'] else ''}" style="display:flex;align-items:center;justify-content:space-between;gap:1rem;flex-wrap:wrap">
+  <p style="margin:0">Halts every automation at its next self-heal check. Use for incidents; prefer per-automation pause when possible.</p>
+  {select('__fleet__', actions['fleet'])}
+</div>
 <h2>Automations</h2>
-<div class="tbl-wrap"><table><tr><th>Automation</th>{ring_head}<th>Rollout</th><th>Action</th></tr>{''.join(rows) or '<tr><td colspan=9 class=empty>None registered.</td></tr>'}</table></div>
+<div class="tbl-wrap"><table>
+  <thead><tr><th>Automation</th>{ring_head}<th>Rollout</th><th>Action</th></tr></thead>
+  <tbody>{''.join(rows) or '<tr><td colspan=9 class=empty>None registered.</td></tr>'}</tbody>
+</table></div>
+<h2>Pending triggers</h2>
+{('<div class="tbl-wrap"><table><thead><tr><th>Id</th><th>Automation</th><th>Slot</th><th>Created</th><th>Source</th></tr></thead><tbody>'
+  + "".join(f'<tr><td class="mono" style="font-size:10px">{esc(t.get("id",""))}</td><td class="mono" style="font-size:11px">{esc(t.get("automation",""))}</td><td class="mono" style="font-size:11px">{esc(t.get("slot",""))}</td><td style="font-size:11px">{esc(str(t.get("created_at",""))[:16])}</td><td style="font-size:11px">{esc(t.get("source",""))}</td></tr>' for t in pending_triggers)
+  + '</tbody></table></div>') if pending_triggers else '<p class="empty" style="padding:.5rem 0">No pending on-demand triggers.</p>'}
 <div id="composer" class="panel accent" hidden>
   <h2 style="margin-top:0" id="ctitle">Action</h2>
-  <div class="field"><label for="reason">Reason (single line, max 300 chars)</label><input id="reason" type="text" maxlength="300" autocomplete="off" placeholder="e.g. upstream data format changed - see INC-1234"></div>
+  <div class="field"><label for="reason">Reason (single line, max 300 chars &mdash; shown in MR title and CHANGELOG.md)</label><input id="reason" type="text" maxlength="300" autocomplete="off" placeholder="e.g. 7-day soak passed, no errors — INC-1234"></div>
   <div id="trigger-fields" hidden>
     <div class="field"><label for="slot">Poll slot</label><select id="slot"></select></div>
     <div class="field"><label for="params">Parameters (one k=v per line; become AUTOMATION_PARAM_*)</label><textarea id="params" rows="3" placeholder="date_range=yesterday"></textarea></div>
@@ -351,4 +367,5 @@ governance gate</em>. On-demand triggers skip the MR (no manifest change) and go
   <div id="out"></div>
 </div>
 <script type="application/json" id="admin-data">{json_for_script(data)}</script>"""
-    return layout("Fleet admin", body, config=config, active="admin", manifest_text=manifest_text, extra_js=f"<script>{ADMIN_JS}</script>")
+    return layout("Admin", body, config=config, active="admin", manifest_text=manifest_text,
+                  extra_js=f"<script>{ADMIN_JS}</script>", status_data=status_data)

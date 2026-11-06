@@ -25,7 +25,8 @@ WM_DESTROY, WM_CLOSE, WM_COMMAND, WM_TIMER = 0x0002, 0x0010, 0x0111, 0x0113
 WM_QUERYENDSESSION, WM_ENDSESSION, WM_NULL, WM_APP = 0x0011, 0x0016, 0x0000, 0x8000
 WM_LBUTTONDBLCLK, WM_RBUTTONUP = 0x0203, 0x0205
 NIM_ADD, NIM_MODIFY, NIM_DELETE = 0, 1, 2
-NIF_MESSAGE, NIF_ICON, NIF_TIP = 0x1, 0x2, 0x4
+NIF_MESSAGE, NIF_ICON, NIF_TIP, NIF_INFO = 0x1, 0x2, 0x4, 0x10
+NIIF_INFO, NIIF_NOSOUND = 0x1, 0x10
 MF_STRING, MF_GRAYED, MF_SEPARATOR = 0x0, 0x1, 0x800
 TPM_RIGHTBUTTON, TPM_BOTTOMALIGN = 0x0002, 0x0020
 LR_DEFAULTCOLOR = 0
@@ -93,8 +94,10 @@ def _api():
 
 
 class _State:
-    def __init__(self, name: str, pid: int, stop_file: Optional[Path], timeout_s: int, url: Optional[str], runs_dir: Path, verify: bool):
+    def __init__(self, name: str, pid: int, stop_file: Optional[Path], timeout_s: int, url: Optional[str], runs_dir: Path, verify: bool,
+                 last_run_file: Optional[Path] = None):
         self.name, self.pid, self.stop_file, self.timeout_s, self.url, self.runs_dir, self.verify = name, pid, stop_file, timeout_s, url, runs_dir, verify
+        self.last_run_file = last_run_file
         self.pid_start = 0
         self.start = time.monotonic()
         self.added = False
@@ -104,6 +107,7 @@ class _State:
         self.nid: Optional[NOTIFYICONDATAW] = None
         self.exit_code = 0
         self.last_sec = -1
+        self.balloon_shown = False
 
 
 def _make_icon(u) -> Optional[int]:
@@ -114,14 +118,14 @@ def _make_icon(u) -> Optional[int]:
 
 
 def run(name: str, pid: int, stop_file: Optional[Path], timeout_s: int, url: Optional[str], runs_dir: Path, verify: bool = False,
-        pid_start: int = 0) -> int:
+        pid_start: int = 0, last_run_file: Optional[Path] = None) -> int:
     try:
         u, s, k = _api()
     except Exception:  # noqa: BLE001
         return 0
     if not u.GetShellWindow():                           # no desktop shell (service / non-interactive session): nothing to show
         return 0
-    st = _State(name, pid, stop_file, timeout_s, url, runs_dir, verify)
+    st = _State(name, pid, stop_file, timeout_s, url, runs_dir, verify, last_run_file)
     st.pid_start = int(pid_start or 0)
 
     def remove_icon() -> None:
@@ -161,6 +165,56 @@ def run(name: str, pid: int, stop_file: Optional[Path], timeout_s: int, url: Opt
             except Exception:  # noqa: BLE001
                 pass
 
+    def _last_run_menu_items() -> list:
+        """Read the last-run summary file and return 0–2 grayed menu label strings."""
+        if st.last_run_file is None:
+            return []
+        try:
+            data = json.loads(st.last_run_file.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                return []
+            label = tray.format_last_run_label(data)
+            if not label:
+                return []
+            items = [label]
+            synopsis = tray.sanitize_name(str(data.get("synopsis") or "").strip(), limit=55)
+            if synopsis:
+                items.append(f"  {synopsis}")
+            return items
+        except Exception:  # noqa: BLE001
+            return []
+
+    def _read_stop_balloon() -> Optional[tuple]:
+        """Parse the stop file for an optional completion balloon payload (title, body), or return None."""
+        if st.stop_file is None:
+            return None
+        try:
+            raw = st.stop_file.read_text(encoding="utf-8")
+            data = json.loads(raw)
+            if isinstance(data, dict):
+                title, body = str(data.get("title") or ""), str(data.get("body") or "")
+                if title and body:
+                    return title[:63], body[:255]
+        except Exception:  # noqa: BLE001
+            pass
+        return None
+
+    def show_balloon(title: str, body: str) -> None:
+        """Pop a Shell_NotifyIconW balloon; survives icon removal so the helper can destroy immediately after."""
+        if not st.added or st.nid is None:
+            return
+        try:
+            nid = NOTIFYICONDATAW()
+            nid.cbSize = ctypes.sizeof(NOTIFYICONDATAW)
+            nid.hWnd, nid.uID = st.hwnd, 1
+            nid.uFlags = NIF_INFO
+            nid.szInfoTitle = title[:63]
+            nid.szInfo = body[:255]
+            nid.dwInfoFlags = NIIF_INFO | NIIF_NOSOUND
+            s.Shell_NotifyIconW(NIM_MODIFY, ctypes.byref(nid))
+        except Exception:  # noqa: BLE001
+            pass
+
     def show_menu() -> None:
         menu = u.CreatePopupMenu()
         if not menu:
@@ -168,6 +222,11 @@ def run(name: str, pid: int, stop_file: Optional[Path], timeout_s: int, url: Opt
         try:
             u.AppendMenuW(menu, MF_STRING | MF_GRAYED, 1, tray.sanitize_name(st.name) + " - running")
             u.AppendMenuW(menu, MF_SEPARATOR, 0, None)
+            last_items = _last_run_menu_items()
+            if last_items:
+                for item in last_items:
+                    u.AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, item)
+                u.AppendMenuW(menu, MF_SEPARATOR, 0, None)
             u.AppendMenuW(menu, MF_STRING, CMD_RUNS, "Open run log folder")
             if st.url:
                 u.AppendMenuW(menu, MF_STRING, CMD_SITE, "Open AUTOSTATION dashboard")
@@ -190,6 +249,11 @@ def run(name: str, pid: int, stop_file: Optional[Path], timeout_s: int, url: Opt
         try:
             if msg == WM_TIMER:
                 if should_stop():
+                    if not st.balloon_shown:
+                        st.balloon_shown = True
+                        balloon = _read_stop_balloon()
+                        if balloon:
+                            show_balloon(*balloon)
                     u.DestroyWindow(hwnd)
                 elif not st.added:
                     if time.monotonic() - st.start > ADD_RETRY_S:

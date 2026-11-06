@@ -13,4 +13,5 @@ schedule:
   expected_duration_ms: {baseline: 30000, warn_threshold: 4.0}
 error_handling: {max_retries: 2, network_retry_wait_s: 30, backoff_multiplier: 2.0, skip_on_data_error: true}
 data_classification: internal
+llm_allowed_classification: internal   # enables LLM page-classifier fallback (Pattern 1); page text only, no PII
 notify_on_complete: false

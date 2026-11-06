@@ -43,6 +43,56 @@ variables:
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
     - if: $CI_PIPELINE_SOURCE == "schedule"
 
+# ---- approval gate (4-eyes for high-impact ops-action MRs) -------------------------------------------------------
+# Fails the MR pipeline when required approval count is not yet met.  GitLab's native approval rules are the primary
+# gate; this job is a programmatic double-check with an audit trail.  Re-run the pipeline after the last approval.
+# Requires: OPS_BOT_TOKEN with api scope (already required by ops-action).
+check-approvals:
+  stage: validate
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+  allow_failure: false
+  script:
+    - |
+      # High-impact labels → 4-eyes (2 distinct approvals).  Others → 1.  trigger-add never opens an MR.
+      MR_JSON=$(curl --silent --fail \
+        --header "PRIVATE-TOKEN: $OPS_BOT_TOKEN" \
+        "$CI_API_V4_URL/projects/$CI_PROJECT_ID/merge_requests/$CI_MERGE_REQUEST_IID")
+      MR_LABELS=$(echo "$MR_JSON" | python3 -c "
+      import json, sys
+      d = json.load(sys.stdin)
+      ls = d.get('labels', [])
+      print(','.join(l if isinstance(l, str) else l.get('name', '') for l in ls))
+      ")
+      AUTHOR_ID=$(echo "$MR_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin).get('author',{}).get('id','0'))")
+      echo "MR labels: $MR_LABELS"
+
+      REQUIRED=1
+      case ",$MR_LABELS," in
+        *,promote,* | *,rollback,* | *,decommission,* | *,fleet-pause,* | *,fleet-resume,*)
+          REQUIRED=2 ;;
+      esac
+      echo "Action class → requiring $REQUIRED approval(s)"
+
+      APPROVALS_JSON=$(curl --silent --fail \
+        --header "PRIVATE-TOKEN: $OPS_BOT_TOKEN" \
+        "$CI_API_V4_URL/projects/$CI_PROJECT_ID/merge_requests/$CI_MERGE_REQUEST_IID/approvals")
+      APPROVED=$(echo "$APPROVALS_JSON" | python3 -c "
+      import json, sys
+      data = json.load(sys.stdin)
+      author_id = int('$AUTHOR_ID' or '0')
+      non_author = [e for e in data.get('approved_by', []) if e.get('user', {}).get('id') != author_id]
+      print(len(non_author))
+      ")
+      echo "Non-author approvals: $APPROVED / $REQUIRED"
+
+      if [ "$APPROVED" -lt "$REQUIRED" ]; then
+        echo "BLOCKED: $REQUIRED non-author approval(s) required; $APPROVED given."
+        echo "For promote, rollback, decommission, fleet-pause/resume: 2 approvals are mandatory (4-eyes)."
+        echo "Re-run this pipeline after the required approvals are in."
+        exit 1
+      fi
+
 # ---- validate (the merge gate) ----------------------------------------------------------------------------------
 validate:
   stage: validate
