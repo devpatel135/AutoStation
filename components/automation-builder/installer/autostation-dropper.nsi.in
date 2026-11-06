@@ -1,0 +1,195 @@
+; =====================================================================================================
+; AUTOSTATION automation dropper  -  TEMPLATE
+;
+; Rendered by scripts/build_installer.py --dropper. Installs only the automation payload; the shared
+; runtime (Python, wrapper-core, execution-framework) must already be on disk via the platform
+; installer. Aborts with a clear message if the platform is absent or below REQUIRES_PLATFORM.
+;
+; Silent: /S    Ring: /RING=pilot    Skip first run: /NORUN
+; =====================================================================================================
+Unicode true
+SetCompressor /SOLID lzma
+RequestExecutionLevel user
+ManifestDPIAware true
+@@DEFINES@@
+
+!define AUTOMATION       "@@AUTOMATION@@"
+!define VERSION          "@@VERSION@@"
+!define PUBLISHER        "@@PUBLISHER@@"
+!define DEFAULT_RING     "@@DEFAULT_RING@@"
+!define REGISTRY_URL     "@@REGISTRY_URL@@"
+!define REQUIRES_PLATFORM "@@REQUIRES_PLATFORM@@"
+!define UNINST_KEY       "Software\Microsoft\Windows\CurrentVersion\Uninstall\AUTOMAGIX-${AUTOMATION}"
+
+!ifdef HAVE_ICON
+  !define MUI_ICON   "@@ICON@@"
+  !define MUI_UNICON "@@ICON@@"
+!endif
+
+Name "${AUTOMATION} ${VERSION}"
+OutFile "@@OUTFILE@@"
+InstallDir "$LOCALAPPDATA\AUTOMAGIX"
+InstallDirRegKey HKCU "Software\AUTOMAGIX" "InstallDir"
+BrandingText "${PUBLISHER}"
+ShowInstDetails show
+ShowUninstDetails show
+
+VIProductVersion "@@VIVERSION@@"
+VIAddVersionKey "ProductName"     "AUTOMAGIX ${AUTOMATION}"
+VIAddVersionKey "ProductVersion"  "${VERSION}"
+VIAddVersionKey "FileVersion"     "${VERSION}"
+VIAddVersionKey "CompanyName"     "${PUBLISHER}"
+VIAddVersionKey "LegalCopyright"  "${PUBLISHER}"
+VIAddVersionKey "FileDescription" "AUTOMAGIX installer for ${AUTOMATION}"
+
+!include "MUI2.nsh"
+!include "LogicLib.nsh"
+!include "FileFunc.nsh"
+!include "WordFunc.nsh"
+!include "TextFunc.nsh"
+!insertmacro GetParameters
+!insertmacro GetOptions
+!insertmacro VersionCompare
+!insertmacro TrimNewLines
+
+Var Ring
+Var NoRun
+Var PythonExe
+
+!insertmacro MUI_PAGE_WELCOME
+!insertmacro MUI_PAGE_INSTFILES
+!insertmacro MUI_PAGE_FINISH
+!insertmacro MUI_UNPAGE_CONFIRM
+!insertmacro MUI_UNPAGE_INSTFILES
+!insertmacro MUI_LANGUAGE "English"
+
+; ---- helpers --------------------------------------------------------------------------------------
+!macro RunPS SCRIPT ARGS
+  nsExec::ExecToLog `"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\scripts\${SCRIPT}" ${ARGS}`
+  Pop $0
+!macroend
+
+!macro FailInstall MSG CODE
+  DetailPrint "ERROR: ${MSG}"
+  MessageBox MB_OK|MB_ICONSTOP "${MSG}" /SD IDOK
+  SetErrorLevel ${CODE}
+  Abort
+!macroend
+
+Function .onInit
+  ${GetParameters} $R0
+  StrCpy $Ring "${DEFAULT_RING}"
+  ClearErrors
+  ${GetOptions} $R0 "/RING=" $R1
+  ${IfNot} ${Errors}
+    StrCpy $Ring $R1
+  ${EndIf}
+  ClearErrors
+  ${If} $Ring != "dev"
+  ${AndIf} $Ring != "pilot"
+  ${AndIf} $Ring != "broad"
+    MessageBox MB_OK|MB_ICONSTOP "Invalid /RING=$Ring (expected dev, pilot or broad)." /SD IDOK
+    SetErrorLevel 3
+    Abort
+  ${EndIf}
+  StrCpy $NoRun "0"
+  ${GetOptions} $R0 "/NORUN" $R1
+  ${IfNot} ${Errors}
+    StrCpy $NoRun "1"
+  ${EndIf}
+  ClearErrors
+
+  ; -- Platform version check (fail fast before writing anything) --
+  ${IfNot} ${FileExists} "$INSTDIR\platform-version.txt"
+    MessageBox MB_OK|MB_ICONSTOP "AUTOSTATION platform is not installed.$\n$\nRun autostation-platform-setup.exe first, then re-run this installer." /SD IDOK
+    SetErrorLevel 10
+    Abort
+  ${EndIf}
+  StrCpy $R9 "0.0.0"
+  FileOpen $R8 "$INSTDIR\platform-version.txt" r
+  FileRead $R8 $R9
+  FileClose $R8
+  ${TrimNewLines} "$R9" $R9
+  ${VersionCompare} "$R9" "${REQUIRES_PLATFORM}" $R7
+  ${If} $R7 == 2   ; installed < required
+    MessageBox MB_OK|MB_ICONSTOP "AUTOSTATION platform $R9 is too old for ${AUTOMATION} ${VERSION} (requires >= ${REQUIRES_PLATFORM}).$\n$\nUpgrade the platform installer, then re-run." /SD IDOK
+    SetErrorLevel 11
+    Abort
+  ${EndIf}
+FunctionEnd
+
+; ---- install --------------------------------------------------------------------------------------
+Section "Install" SecInstall
+  SectionIn RO
+  SetOverwrite on
+
+  InitPluginsDir
+  SetOutPath "$PLUGINSDIR\scripts"
+  File "@@STAGE_DIR@@\scripts\first-run.ps1"
+
+  ; Platform Python (already on disk, installed by platform installer)
+  ${If} ${FileExists} "$INSTDIR\python\python.exe"
+    StrCpy $PythonExe `"$INSTDIR\python\python.exe"`
+  ${Else}
+    StrCpy $PythonExe "python.exe"
+    System::Call 'Kernel32::SetEnvironmentVariable(t, t)i("PYTHONPATH", "$INSTDIR\wrapper-core").r9'
+  ${EndIf}
+
+!ifdef HAVE_PAYLOAD
+  ; bundled automation payload: trust root is the signed dropper; self-heal updates it later
+  DetailPrint "Bundling ${AUTOMATION} ${VERSION}..."
+  CreateDirectory "$INSTDIR\bundled"
+  SetOutPath "$INSTDIR\bundled"
+  File "@@STAGE_DIR@@\bundled\*.*"
+!endif
+
+  ; hand over to wrapper-core: dynamic assembly + Task Scheduler registration
+  DetailPrint "Installing ${AUTOMATION} (wrapper-core install)..."
+  System::Call 'Kernel32::SetEnvironmentVariable(t, t)i("AUTOMAGIX_HOME", "$INSTDIR").r9'
+  nsExec::ExecToLog `$PythonExe -m wrapper_core install ${AUTOMATION}`
+  Pop $0
+  ${If} $0 != 0
+    !insertmacro FailInstall "wrapper-core could not install ${AUTOMATION} (exit code $0). See $INSTDIR\logs\wrapper.log." 8
+  ${EndIf}
+
+  ; Add/Remove Programs entry (HKCU, no admin)
+  WriteUninstaller "$INSTDIR\uninstall-${AUTOMATION}.exe"
+  WriteRegStr   HKCU "Software\AUTOMAGIX" "InstallDir" "$INSTDIR"
+  WriteRegStr   HKCU "${UNINST_KEY}" "DisplayName"     "AUTOMAGIX ${AUTOMATION}"
+  WriteRegStr   HKCU "${UNINST_KEY}" "DisplayVersion"  "${VERSION}"
+  WriteRegStr   HKCU "${UNINST_KEY}" "Publisher"       "${PUBLISHER}"
+  WriteRegStr   HKCU "${UNINST_KEY}" "InstallLocation" "$INSTDIR"
+  WriteRegStr   HKCU "${UNINST_KEY}" "UninstallString" `"$INSTDIR\uninstall-${AUTOMATION}.exe"`
+  WriteRegStr   HKCU "${UNINST_KEY}" "QuietUninstallString" `"$INSTDIR\uninstall-${AUTOMATION}.exe" /S`
+!ifdef HAVE_ICON
+  WriteRegStr   HKCU "${UNINST_KEY}" "DisplayIcon"     "$INSTDIR\uninstall-${AUTOMATION}.exe"
+!endif
+  WriteRegDWORD HKCU "${UNINST_KEY}" "NoModify" 1
+  WriteRegDWORD HKCU "${UNINST_KEY}" "NoRepair" 1
+
+  ${If} $NoRun == "0"
+    !insertmacro RunPS "first-run.ps1" '-Python $PythonExe -AutomagixHome "$INSTDIR" -Automation "${AUTOMATION}"'
+  ${EndIf}
+  DetailPrint "Done."
+SectionEnd
+
+; ---- uninstall ------------------------------------------------------------------------------------
+Section "Uninstall"
+  ${If} ${FileExists} "$INSTDIR\python\python.exe"
+    StrCpy $PythonExe `"$INSTDIR\python\python.exe"`
+  ${Else}
+    StrCpy $PythonExe "python.exe"
+    System::Call 'Kernel32::SetEnvironmentVariable(t, t)i("PYTHONPATH", "$INSTDIR\wrapper-core").r9'
+  ${EndIf}
+  System::Call 'Kernel32::SetEnvironmentVariable(t, t)i("AUTOMAGIX_HOME", "$INSTDIR").r9'
+
+  DetailPrint "Decommissioning ${AUTOMATION}..."
+  nsExec::ExecToLog `$PythonExe -m wrapper_core uninstall ${AUTOMATION}`
+  Pop $0
+  ${If} $0 != 0
+    DetailPrint "WARNING: wrapper-core uninstall returned $0; continuing."
+  ${EndIf}
+
+  Delete "$INSTDIR\uninstall-${AUTOMATION}.exe"
+  DeleteRegKey HKCU "${UNINST_KEY}"
+SectionEnd

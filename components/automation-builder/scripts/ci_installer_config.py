@@ -6,7 +6,7 @@
 
 All inputs are CI variables (never argv): REGISTRY_URL, REGISTRY_READ_TOKEN_FILE (or REGISTRY_READ_TOKEN),
 BUILD_RING (default dev), AUTOMATION_NAME, AUTOMATION_VERSION, LOG_REMOTE, LLM_ENDPOINT, LLM_MODEL, PUBLISHER,
-ICON_FILE, PYTHON_EMBED_ZIP, KNOWN_HOSTS_FILE.
+ICON_FILE, PYTHON_EMBED_ZIP, KNOWN_HOSTS_FILE, REGISTRY_PUBKEYS (or REGISTRY_PUBKEYS_FILE).
 
 The wrapper-core bundled into an installer is whatever version the registry assigns to the installer's ring; self-heal keeps
 it current afterwards, so the bundled copy only needs to be good enough to bootstrap.
@@ -78,6 +78,20 @@ def make_config(env: dict, out: Path, wrapper_zip: Path | None = None) -> dict:
     for key, var in (("icon", "ICON_FILE"), ("python_embed_zip", "PYTHON_EMBED_ZIP")):
         if env.get(var):
             cfg[key] = env[var]
+
+    # registry signing keys — trust anchor for manifest verification (optional; strongly recommended for pilot/broad)
+    # Accepted as a plain variable (comma-separated hex) or a File variable.
+    pubkeys = ""
+    if env.get("REGISTRY_PUBKEYS_FILE"):
+        try:
+            pubkeys = Path(env["REGISTRY_PUBKEYS_FILE"]).read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            raise ConfigError(f"REGISTRY_PUBKEYS_FILE: {exc}") from exc
+    elif env.get("REGISTRY_PUBKEYS"):
+        pubkeys = env["REGISTRY_PUBKEYS"].strip()
+    if pubkeys:
+        cfg["registry_pubkeys"] = pubkeys
+
     out = Path(out)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
