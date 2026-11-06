@@ -94,7 +94,7 @@ Pages (`trigger-add`). No git credentials or push rights on `main` are needed.
    - `triggers`: *Allowed to push*: **the ops bot only**; *Allowed to merge*: No one; force-push off. (Create it by running the first `trigger-add`.)
    - `ops/*`: protected wildcard, push allowed for the ops bot only (so only the bot creates operator-action branches).
 2. **Merge request approvals** (the governance gate)
-   - Rule "Registry owners": at least **1** approval (2 recommended for `broad` promotions and `decommission`), eligible: automation-platform team.
+   - Rule "Registry owners": at least **2** approvals, eligible: automation-platform team. The `check-approvals` CI job enforces 2 non-author approvals for high-impact actions (`promote`, `rollback`, `decommission`, `fleet-pause`, `fleet-resume`) and 1 for all others; re-run the pipeline after the last approval lands.
    - Rule "Automation owner" via CODEOWNERS (below): changes to an automation's stanza need an approval from its owner/team.
    - Enable *Prevent approval by author* and *Prevent editing approval rules in merge requests*; require *All discussions resolved* and *Pipelines must succeed*.
 3. **Merge request settings**: merge method *Fast-forward* or *Merge commit* (keeps the audit trail), *Squash*: optional, *Delete source branch*: on.

@@ -4,7 +4,7 @@
 # Default: the platform team reviews everything.
 *                                   @automation-platform
 
-# Registry code, CI and the schema change the governance gate itself -> platform maintainers only (2 approvals recommended).
+# Registry code, CI and the schema change the governance gate itself -> platform maintainers only (2 approvals required).
 [Registry tooling and CI][2]
 /registry/                          @automation-platform/maintainers
 /tests/                             @automation-platform/maintainers
