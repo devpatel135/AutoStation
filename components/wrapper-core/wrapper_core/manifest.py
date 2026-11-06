@@ -34,7 +34,7 @@ def parse(text: str) -> dict:
     major = data.get("schema_version")
     if major != SUPPORTED_SCHEMA:
         raise ManifestError(f"unsupported manifest schema_version {major!r} (this wrapper supports {SUPPORTED_SCHEMA})")
-    for key in ("fleet", "components", "automations", "assets"):
+    for key in ("fleet", "components", "automations", "assets", "platform_overrides"):
         if data.get(key) is not None and not isinstance(data[key], dict):
             raise ManifestError(f"manifest {key!r} must be a mapping")
     if data.get("compatibility") is not None and not isinstance(data["compatibility"], list):

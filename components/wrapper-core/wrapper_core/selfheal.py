@@ -26,6 +26,11 @@ from .paths import Paths, check_name, get_logger, platform_config
 from .util import atomic_write_text, read_json, sha256_file, write_json
 
 COMPONENTS = ("wrapper-core", "execution-framework")
+PLATFORM_VERSION_FILE = "platform-version.txt"
+
+# Keys from the manifest's platform_overrides section that selfheal is allowed to write into platform.json.
+# Non-secret config only: no tokens, no keys, no credentials.
+_PLATFORM_OVERRIDE_KEYS = frozenset({"llm_endpoint", "llm_model"})
 
 
 class HealError(RuntimeError):
@@ -225,6 +230,16 @@ def read_installed(paths: Paths) -> dict:
 
 def write_installed(paths: Paths, data: dict) -> None:
     write_json(paths.installed_json, data)
+
+
+def installed_platform_version(paths: Paths) -> str | None:
+    """Read the platform version written by the platform installer (``platform-version.txt``).
+    Returns None when the file is absent (platform not installed or pre-split legacy install)."""
+    p = paths.root / PLATFORM_VERSION_FILE
+    try:
+        return p.read_text(encoding="utf-8").strip() or None
+    except OSError:
+        return None
 
 
 def installed_component_version(paths: Paths, name: str) -> str | None:
@@ -570,11 +585,63 @@ def _run(paths: Paths, cfg: dict, automation: str | None, res: HealResult) -> He
             res.versions = _versions_snapshot(paths)
             return res
 
+    # platform version drift: read-only check; cannot self-heal (requires re-running the platform installer).
+    # Only flags when the installed version is OLDER than the manifest target — ahead-of-manifest is fine
+    # and happens during staged rollouts or early adopter installs.
+    platform_entry = (m.get("components") or {}).get("platform")
+    if platform_entry:
+        tv = mf.target_version(platform_entry, ring)
+        cur = installed_platform_version(paths)
+        if tv and cur is None:
+            log.warning("platform not installed (platform-version.txt missing), manifest targets %s for ring %s", tv, ring)
+            res.errors.append(f"platform not installed (platform-version.txt missing): manifest targets {tv} — run the platform installer")
+        elif tv and cur:
+            try:
+                if versions.compare(str(cur), str(tv)) < 0:
+                    log.warning("platform version drift: installed %s, manifest targets %s for ring %s", cur, tv, ring)
+                    res.errors.append(f"platform version drift: installed {cur}, target {tv} — run the platform installer to upgrade")
+            except ValueError:
+                pass  # non-semver versions (dev builds): skip the drift check
+
     res.assets = mf.assets_for(m, ring)
     try:
         write_json(paths.assets_json, res.assets)
     except OSError as exc:
         res.errors.append(f"cannot write assets.json: {exc}")
+
+    # secret rotation via manifest — fetch plaintext asset, DPAPI-encrypt locally, atomically replace the blob
+    for name, entry in (m.get("secret_refresh") or {}).items():
+        if not isinstance(name, str) or not isinstance(entry, dict):
+            continue
+        loc = resolve_location(str(entry.get("url", "")), base)
+        expected_sha = str(entry.get("sha256", ""))
+        plaintext: bytes | None = None
+        try:
+            raw = fetch_bytes(loc, token, trusted_base=base, max_bytes=8192)
+            actual = hashlib.sha256(raw).hexdigest()
+            if actual.lower() != expected_sha.lower():
+                raise HealError(f"secret_refresh/{name}: sha256 mismatch (manifest says {expected_sha[:12]}…, got {actual[:12]}…)")
+            plaintext = raw.strip()
+            secrets.refresh_dpapi_secret(paths, name, plaintext)
+            res.installed.append(f"secret {name} rotated")
+            log.info("secret %s rotated via manifest", name)
+        except (HealError, secrets.SecretError, ValueError, OSError) as exc:
+            log.error("secret_refresh/%s failed: %s", name, exc)
+            res.errors.append(f"secret {name}: {exc}")
+        finally:
+            if plaintext is not None:
+                # zero the buffer — best-effort; CPython may not honour this for immutable bytes
+                import ctypes as _ct
+                try:
+                    _ct.memset(id(plaintext) + _ct.sizeof(_ct.c_ssize_t) * 3, 0, len(plaintext))
+                except Exception:  # noqa: BLE001
+                    pass
+                del plaintext
+
+    # platform_overrides: fleet-wide non-secret config (llm_endpoint, llm_model) from the signed manifest
+    overrides = m.get("platform_overrides")
+    if isinstance(overrides, dict) and overrides:
+        _apply_platform_overrides(paths, overrides, res)
 
     if offline:
         res.versions = _versions_snapshot(paths)
@@ -615,6 +682,35 @@ def _run(paths: Paths, cfg: dict, automation: str | None, res: HealResult) -> He
 
     res.versions = _versions_snapshot(paths)
     return res
+
+
+def _apply_platform_overrides(paths: Paths, overrides: dict, res: HealResult) -> None:
+    """Write operator-pushed non-secret config (llm_endpoint, llm_model) from the signed manifest into platform.json."""
+    log = get_logger(paths)
+    allowed = {k: v for k, v in overrides.items()
+               if k in _PLATFORM_OVERRIDE_KEYS and isinstance(v, str)}
+    ep = allowed.get("llm_endpoint")
+    if ep is not None and ep:
+        try:
+            check_url(ep)
+        except HealError as exc:
+            log.warning("platform_overrides.llm_endpoint refused: %s", exc)
+            res.errors.append(f"platform_overrides.llm_endpoint refused: {exc}")
+            allowed.pop("llm_endpoint", None)
+    if not allowed:
+        return
+    try:
+        cfg = read_json(paths.platform_json, {}) or {}
+        changed = [k for k in allowed if cfg.get(k) != allowed[k]]
+        if changed:
+            cfg.update(allowed)
+            write_json(paths.platform_json, cfg)
+            for k in changed:
+                res.installed.append(f"platform.{k} updated via manifest")
+            log.info("platform_overrides applied: %s", ", ".join(changed))
+    except OSError as exc:
+        log.error("platform_overrides write failed: %s", exc)
+        res.errors.append(f"platform_overrides: {exc}")
 
 
 def _wants_triggers(entry: dict) -> bool:

@@ -70,6 +70,10 @@ def maintain(paths: Paths | None = None, scheduler: Scheduler | None = None) -> 
                 send_lifecycle(paths, "updated", name, {"installed": heal.installed, "via": "login-check"})
         except Exception as exc:  # noqa: BLE001 - an update check must never break sign-in
             log.warning("update check for %s failed: %s", name, exc)
+    try:
+        sched.register_heartbeat()
+    except Exception as exc:  # noqa: BLE001 - heartbeat task failure must not break sign-in
+        log.warning("maintain: heartbeat task registration failed: %s", exc)
     transport.flush_spool(paths)
     send_heartbeat(paths, "login")
     return {"touched": touched, "updated": updated}
@@ -107,6 +111,7 @@ def uninstall_automation(name: str, paths: Paths | None = None, scheduler: Sched
     paths.status_file(name).unlink(missing_ok=True)
     # 4. shared components + secrets only when nothing else needs them
     if not data["automations"] and purge_shared:
+        sched.unregister_heartbeat()
         sched.remove_startup_script()
         for d in (paths.framework, paths.wrapper_core):
             if d.exists():
