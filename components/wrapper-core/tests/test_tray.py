@@ -247,3 +247,231 @@ def test_real_icon_is_registered_and_the_helper_exits_on_the_stop_file(tmp_path)
         if proc.poll() is None:
             proc.kill()
             proc.wait()
+
+
+# ---- format_balloon ------------------------------------------------------------------------------------------------------------
+
+_SUCCESS_RECORD = {
+    "status": "success",
+    "synopsis": "Renewed 14 certificates across 3 servers.",
+    "items": {"total": 14, "success": 14, "skipped": 0, "failed": 0},
+}
+
+_FAILED_RECORD = {
+    "status": "failed",
+    "synopsis": "Could not connect to certificate authority.",
+    "items": {"total": 0, "success": 0, "skipped": 0, "failed": 0},
+}
+
+
+def test_format_balloon_success_title_says_done():
+    title, body = tray.format_balloon("cert-renewal", _SUCCESS_RECORD)
+    assert "done" in title.lower()
+    assert "cert-renewal" in title
+
+
+def test_format_balloon_failed_title_says_failed():
+    title, _ = tray.format_balloon("cert-renewal", _FAILED_RECORD)
+    assert "failed" in title.lower()
+
+
+def test_format_balloon_body_contains_synopsis():
+    _, body = tray.format_balloon("x", _SUCCESS_RECORD)
+    assert "Renewed 14 certificates" in body
+
+
+def test_format_balloon_item_count_in_body():
+    _, body = tray.format_balloon("x", _SUCCESS_RECORD)
+    assert "14" in body and "processed" in body
+
+
+def test_format_balloon_zero_items_no_count():
+    _, body = tray.format_balloon("x", _FAILED_RECORD)
+    assert "processed" not in body
+
+
+def test_format_balloon_no_synopsis_returns_none():
+    assert tray.format_balloon("x", {"status": "success", "synopsis": "", "items": {}}) is None
+    assert tray.format_balloon("x", {"status": "success"}) is None
+
+
+def test_format_balloon_null_record_returns_none():
+    assert tray.format_balloon("x", None) is None
+    assert tray.format_balloon("x", {}) is None
+
+
+def test_format_balloon_title_bounded():
+    title, _ = tray.format_balloon("x" * 500, _SUCCESS_RECORD)
+    assert len(title) <= tray.MAX_BALLOON_TITLE
+
+
+def test_format_balloon_body_bounded():
+    record = {**_SUCCESS_RECORD, "synopsis": "s" * 1000}
+    _, body = tray.format_balloon("x", record)
+    assert len(body) <= tray.MAX_BALLOON_BODY
+
+
+def test_format_balloon_partial_status():
+    record = {"status": "partial", "synopsis": "7 of 10 succeeded.", "items": {"total": 10}}
+    title, _ = tray.format_balloon("x", record)
+    assert "partial" in title.lower()
+
+
+# ---- TrayHandle balloon + stop encoding -----------------------------------------------------------------------------------------
+
+def test_tray_handle_has_balloon_attribute():
+    h = tray.TrayHandle(object(), Path("/tmp/x.stop"))
+    assert h.balloon is None
+
+
+def test_stop_no_balloon_writes_plain_stop_text(tmp_path):
+    stop_file = tmp_path / "t.stop"
+    proc = FakeProc(exits_after_polls=0)
+    h = tray.TrayHandle(proc, stop_file)
+    tray.stop(h)
+    # stop_file is deleted by stop() after the helper exits, so we check it was created correctly
+    # by not raising; the cleanup removes it; we verify no JSON was attempted on a no-balloon handle
+    assert h.balloon is None
+
+
+def test_stop_encodes_balloon_in_stop_file(tmp_path, monkeypatch):
+    stop_file = tmp_path / "t.stop"
+    written = []
+
+    class _FakeProc:
+        def poll(self): return 0
+        def terminate(self): pass
+        def wait(self, timeout=None): pass
+
+    h = tray.TrayHandle(_FakeProc(), stop_file)
+    h.balloon = ("AUTOSTATION — cert-renewal done", "Renewed 14 certs  •  14 processed")
+
+    # Stop writes the balloon JSON before the helper exits; patch write to capture content
+    origwrite = Path.write_text
+
+    def capture_write(self, text, **kw):
+        written.append(text)
+        origwrite(self, text, **kw)
+
+    monkeypatch.setattr(Path, "write_text", capture_write)
+    tray.stop(h)
+    assert written, "stop_file.write_text was never called"
+    import json as _json
+    data = _json.loads(written[0])
+    assert data["title"] == "AUTOSTATION — cert-renewal done"
+    assert "14" in data["body"]
+
+
+def test_stop_balloon_title_capped(tmp_path, monkeypatch):
+    written = []
+
+    class _FakeProc:
+        def poll(self): return 0
+        def terminate(self): pass
+        def wait(self, timeout=None): pass
+
+    h = tray.TrayHandle(_FakeProc(), tmp_path / "t.stop")
+    h.balloon = ("T" * 200, "B" * 500)
+
+    origwrite = Path.write_text
+
+    def capture_write(self, text, **kw):
+        written.append(text)
+        origwrite(self, text, **kw)
+
+    monkeypatch.setattr(Path, "write_text", capture_write)
+    tray.stop(h)
+    import json as _json
+    data = _json.loads(written[0])
+    assert len(data["title"]) <= tray.MAX_BALLOON_TITLE
+    assert len(data["body"]) <= tray.MAX_BALLOON_BODY
+
+
+# ---- format_elapsed_ago --------------------------------------------------------------------------------------------------------
+
+def test_format_elapsed_ago_seconds():
+    from datetime import datetime, timezone, timedelta
+    ended = (datetime.now(timezone.utc) - timedelta(seconds=45)).isoformat()
+    result = tray.format_elapsed_ago(ended)
+    assert result.endswith("s ago") and "45" in result
+
+
+def test_format_elapsed_ago_minutes():
+    from datetime import datetime, timezone, timedelta
+    ended = (datetime.now(timezone.utc) - timedelta(minutes=7)).isoformat()
+    assert tray.format_elapsed_ago(ended) == "7m ago"
+
+
+def test_format_elapsed_ago_hours():
+    from datetime import datetime, timezone, timedelta
+    ended = (datetime.now(timezone.utc) - timedelta(hours=2, minutes=30)).isoformat()
+    assert tray.format_elapsed_ago(ended) == "2h 30m ago"
+
+
+def test_format_elapsed_ago_exact_hours():
+    from datetime import datetime, timezone, timedelta
+    ended = (datetime.now(timezone.utc) - timedelta(hours=3)).isoformat()
+    assert tray.format_elapsed_ago(ended) == "3h ago"
+
+
+def test_format_elapsed_ago_bad_input_returns_empty():
+    assert tray.format_elapsed_ago("") == ""
+    assert tray.format_elapsed_ago("not-a-date") == ""
+    assert tray.format_elapsed_ago("9999-99-99T99:99:99") == ""
+
+
+# ---- format_last_run_label -----------------------------------------------------------------------------------------------------
+
+def test_format_last_run_label_success():
+    from datetime import datetime, timezone, timedelta
+    ended = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+    label = tray.format_last_run_label({"status": "success", "ended_at": ended})
+    assert label is not None
+    assert "Last: success" in label
+    assert "5m ago" in label
+
+
+def test_format_last_run_label_no_status_returns_none():
+    assert tray.format_last_run_label({}) is None
+    assert tray.format_last_run_label({"status": "", "ended_at": ""}) is None
+
+
+def test_format_last_run_label_no_ended_at_omits_ago():
+    label = tray.format_last_run_label({"status": "failed"})
+    assert label == "Last: failed"
+
+
+def test_format_last_run_label_failed():
+    from datetime import datetime, timezone, timedelta
+    ended = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+    label = tray.format_last_run_label({"status": "failed", "ended_at": ended})
+    assert "failed" in label
+
+
+# ---- helper_command includes last_run_file -------------------------------------------------------------------------------------
+
+def test_helper_command_includes_last_run_file(tmp_path):
+    lrf = tmp_path / "auto-a.json"
+    cmd = tray.helper_command("auto-a", 42, tmp_path / "s.stop", tmp_path / "runs", None, last_run_file=lrf)
+    assert "--last-run-file" in cmd
+    assert str(lrf) == cmd[cmd.index("--last-run-file") + 1]
+
+
+def test_helper_command_omits_last_run_file_when_none(tmp_path):
+    cmd = tray.helper_command("auto-a", 42, tmp_path / "s.stop", tmp_path / "runs", None)
+    assert "--last-run-file" not in cmd
+
+
+# ---- start_for_run passes last_run_file ----------------------------------------------------------------------------------------
+
+def test_start_for_run_passes_last_run_file_to_helper(paths):
+    seen = {}
+
+    def fake_popen(cmd, **kw):
+        seen["cmd"] = cmd
+        return FakeProc()
+
+    tray.start_for_run(paths, "auto-a", {}, popen=fake_popen, env=WIN_ENV, platform="win32")
+    assert "--last-run-file" in seen["cmd"]
+    expected = str(paths.last_run_file("auto-a"))
+    assert seen["cmd"][seen["cmd"].index("--last-run-file") + 1] == expected

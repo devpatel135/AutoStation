@@ -18,13 +18,14 @@ Everything here is stdlib only; the pure helpers work on any OS, the window code
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 from urllib.parse import urlparse
 
 from .paths import Paths, check_name, get_logger, platform_config
@@ -32,6 +33,8 @@ from .paths import Paths, check_name, get_logger, platform_config
 MAX_TIP = 127                      # NOTIFYICONDATAW.szTip is 128 UTF-16 units including the terminator
 MAX_NAME = 60
 MAX_LIFETIME_S = 4 * 3600 + 900    # a little over the runner's lock TTL: a leaked helper can never outlive a stuck run for long
+MAX_BALLOON_TITLE = 63             # NOTIFYICONDATAW.szInfoTitle is 64 UTF-16 units including the terminator
+MAX_BALLOON_BODY = 255             # NOTIFYICONDATAW.szInfo is 256 UTF-16 units including the terminator
 
 _CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f  ​-‏‪-‮⁦-⁩]")
 _HOST = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$")
@@ -144,6 +147,61 @@ def site_url(cfg: Mapping[str, Any]) -> Optional[str]:
     return f"https://{u.hostname}{path}"
 
 
+def format_elapsed_ago(ended_at: str) -> str:
+    """Human-readable elapsed since an ISO 8601 UTC timestamp (e.g. '3m ago', '1h 2m ago')."""
+    try:
+        from datetime import datetime, timezone
+        dt = datetime.fromisoformat(ended_at.replace("Z", "+00:00"))
+        elapsed = int((datetime.now(timezone.utc) - dt).total_seconds())
+        if elapsed < 0:
+            return ""
+        if elapsed < 60:
+            return f"{elapsed}s ago"
+        m = elapsed // 60
+        if m < 60:
+            return f"{m}m ago"
+        h, rm = divmod(m, 60)
+        return f"{h}h {rm}m ago" if rm else f"{h}h ago"
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def format_last_run_label(last_run: Mapping[str, Any]) -> Optional[str]:
+    """Single-line tray menu label for a last-run record, e.g. 'Last: success  ·  3m ago'."""
+    raw_status = str(last_run.get("status") or "").strip()
+    if not raw_status:
+        return None
+    status = sanitize_name(raw_status, limit=20)
+    ago = format_elapsed_ago(str(last_run.get("ended_at") or ""))
+    return f"Last: {status}  ·  {ago}" if ago else f"Last: {status}"
+
+
+def format_balloon(name: Any, record: Optional[Mapping[str, Any]]) -> Optional[Tuple[str, str]]:
+    """Return (title, body) for a completion balloon notification, or None when there is nothing worth showing.
+
+    Called by the runner after a run ends and before ``stop()`` is called; the result is stored on the
+    ``TrayHandle`` so the helper subprocess can read it from the stop file and display it.
+    """
+    if not record:
+        return None
+    raw = str(record.get("synopsis") or "").strip()
+    if not raw:
+        return None
+    synopsis = sanitize_name(raw, limit=MAX_BALLOON_BODY)
+    status = str(record.get("status") or "")
+    items = record.get("items") or {}
+    total = int(items.get("total") or 0) if isinstance(items, dict) else 0
+    name_s = sanitize_name(name)
+    if status in ("failed", "hung"):
+        title = f"AUTOSTATION — {name_s} failed"
+    elif status == "partial":
+        title = f"AUTOSTATION — {name_s} partial"
+    else:
+        title = f"AUTOSTATION — {name_s} done"
+    body = f"{synopsis}  •  {total:,} processed" if total else synopsis
+    return title[:MAX_BALLOON_TITLE], body[:MAX_BALLOON_BODY]
+
+
 def disabled_reason(cfg: Mapping[str, Any], descriptor: Optional[Mapping[str, Any]] = None, env: Optional[Mapping[str, str]] = None,
                     platform: Optional[str] = None, dry_run: bool = False) -> Optional[str]:
     """Why the tray indicator is off (None = on). Pure; ``env``/``platform`` are injectable for tests."""
@@ -186,19 +244,22 @@ def _helper_python() -> str:
 
 
 def helper_command(name: str, pid: int, stop_file: Path, runs_dir: Path, url: Optional[str], timeout_s: int = MAX_LIFETIME_S,
-                   pid_start: Optional[int] = None) -> List[str]:
+                   pid_start: Optional[int] = None, last_run_file: Optional[Path] = None) -> List[str]:
     cmd = [_helper_python(), "-m", "wrapper_core", "tray", "--name", sanitize_name(name), "--pid", str(int(pid)),
            "--timeout-s", str(int(timeout_s)), "--stop-file", str(stop_file), "--runs-dir", str(runs_dir)]
     if pid_start:
         cmd += ["--pid-start", str(int(pid_start))]
     if url:
         cmd += ["--url", url]
+    if last_run_file:
+        cmd += ["--last-run-file", str(last_run_file)]
     return cmd
 
 
 class TrayHandle:
     def __init__(self, proc: Any, stop_file: Path):
         self.proc, self.stop_file = proc, stop_file
+        self.balloon: Optional[Tuple[str, str]] = None  # set by caller before stop() to show a completion notification
 
 
 # ---------------------------------------------------------------------------------------------- runner integration
@@ -221,7 +282,8 @@ def start_for_run(paths: Paths, name: str, cfg: Optional[Mapping[str, Any]] = No
             stop_file.unlink()
         except OSError:
             pass
-        cmd = helper_command(name, os.getpid(), stop_file, paths.runs, site_url(cfg), pid_start=process_start_time(os.getpid()))
+        cmd = helper_command(name, os.getpid(), stop_file, paths.runs, site_url(cfg),
+                             pid_start=process_start_time(os.getpid()), last_run_file=paths.last_run_file(name))
         child_env = dict(os.environ if env is None else env)
         child_env["AUTOMAGIX_HOME"] = str(paths.root)
         pkg_parent = str(Path(__file__).resolve().parent.parent)
@@ -240,12 +302,22 @@ def start_for_run(paths: Paths, name: str, cfg: Optional[Mapping[str, Any]] = No
 
 
 def stop(handle: Optional[TrayHandle], grace_s: float = 1.0) -> None:
-    """Ask the helper to remove its icon and exit; terminate only if it does not (that can leave a ghost icon until hover)."""
+    """Ask the helper to remove its icon and exit; terminate only if it does not (that can leave a ghost icon until hover).
+
+    If ``handle.balloon`` is set the stop file carries a JSON payload so the helper can show a completion
+    balloon before removing the icon.  The file content is either the plain string ``"stop"`` or a JSON
+    object ``{"title": "...", "body": "..."}``.
+    """
     if handle is None:
         return
     try:
         handle.stop_file.parent.mkdir(parents=True, exist_ok=True)
-        handle.stop_file.write_text("stop", encoding="ascii")
+        if handle.balloon is not None:
+            title, body = handle.balloon
+            content = json.dumps({"title": str(title)[:MAX_BALLOON_TITLE], "body": str(body)[:MAX_BALLOON_BODY]})
+            handle.stop_file.write_text(content, encoding="utf-8")
+        else:
+            handle.stop_file.write_text("stop", encoding="ascii")
     except OSError:
         pass
     proc = handle.proc
@@ -278,6 +350,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--stop-file", default=None)
     ap.add_argument("--runs-dir", default=None)
     ap.add_argument("--url", default=None)
+    ap.add_argument("--last-run-file", default=None, help="path to last-run summary JSON for the context menu")
     ap.add_argument("--demo", type=int, default=0, metavar="SECONDS", help="preview the icon for N seconds")
     ap.add_argument("--verify", action="store_true", help="after adding the icon print whether Windows registered it (JSON)")
     a = ap.parse_args(argv)
@@ -290,8 +363,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     url = site_url({"registry_url": a.url}) if a.url else None
     from . import _traywin
     runs_dir = Path(a.runs_dir) if a.runs_dir else paths.runs
+    last_run_file = Path(a.last_run_file) if a.last_run_file else None
     return _traywin.run(sanitize_name(a.name if not a.demo else "demo"), pid, Path(a.stop_file) if a.stop_file else None,
-                        timeout, url, runs_dir, verify=a.verify, pid_start=a.pid_start)
+                        timeout, url, runs_dir, verify=a.verify, pid_start=a.pid_start, last_run_file=last_run_file)
 
 
 if __name__ == "__main__":
