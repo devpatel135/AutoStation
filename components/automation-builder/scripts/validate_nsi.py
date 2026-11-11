@@ -206,8 +206,8 @@ def validate(nsi: Path, forbidden: list[str] | None = None) -> list[str]:
         errors.append("no WriteUninstaller: the installer would have no uninstall path")
     if not re.search(r"Section\s+\"Uninstall\"", text, re.I):
         errors.append("missing Section \"Uninstall\"")
-    if "wrapper_core uninstall" not in text:
-        errors.append("uninstall section does not call 'wrapper_core uninstall'")
+    if "wrapper_core uninstall" not in text and "wrapper_core platform-uninstall" not in text:
+        errors.append("uninstall section does not call 'wrapper_core uninstall' or 'wrapper_core platform-uninstall'")
     return errors
 
 

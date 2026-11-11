@@ -24,6 +24,8 @@ from .util import atomic_write_text, read_json, write_json
 
 IS_WINDOWS = sys.platform == "win32"
 TASK_FOLDER = "AUTOMAGIX"
+HEARTBEAT_TASK = f"{TASK_FOLDER}\\heartbeat"
+HEARTBEAT_INTERVAL_H = 4  # fire every 4 hours independent of any automation run
 _DAY_TAG = {"Monday": "Monday", "Tuesday": "Tuesday", "Wednesday": "Wednesday", "Thursday": "Thursday",
             "Friday": "Friday", "Saturday": "Saturday", "Sunday": "Sunday"}
 
@@ -134,6 +136,47 @@ def maintain_cmd(paths: Paths, python_exe: str | None = None) -> str:
             f'start "" /b "{py}" -m wrapper_core maintain\r\n')
 
 
+def heartbeat_cmd(paths: Paths, python_exe: str | None = None) -> str:
+    py = _cmd_safe(python_exe or sys.executable, "python path")
+    root = _cmd_safe(str(paths.root), "AUTOMAGIX_HOME")
+    return ("@echo off\r\n"
+            f'set "AUTOMAGIX_HOME={root}"\r\n'
+            f'set "PYTHONPATH={root}\\wrapper-core"\r\n'
+            f'"{py}" -m wrapper_core heartbeat\r\n'
+            "exit /b %ERRORLEVEL%\r\n")
+
+
+def heartbeat_task_xml(paths: Paths, python_exe: str | None = None) -> str:
+    cmd = paths.bin / "heartbeat.cmd"
+    return (f'<?xml version="1.0" encoding="UTF-16"?>\n'
+            f'<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">\n'
+            f'  <RegistrationInfo><Description>AUTOMAGIX machine heartbeat — fires every {HEARTBEAT_INTERVAL_H}h'
+            f' independent of automation runs (managed by wrapper-core; do not edit)</Description></RegistrationInfo>\n'
+            f'  <Triggers>\n'
+            f'    <TimeTrigger>\n'
+            f'      <Repetition><Interval>PT{HEARTBEAT_INTERVAL_H}H</Interval>'
+            f'<StopAtDurationEnd>false</StopAtDurationEnd></Repetition>\n'
+            f'      <StartBoundary>2000-01-01T00:00:00</StartBoundary><Enabled>true</Enabled>\n'
+            f'    </TimeTrigger>\n'
+            f'  </Triggers>\n'
+            f'  <Principals><Principal id="Author">'
+            f'<LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel>'
+            f'</Principal></Principals>\n'
+            f'  <Settings>\n'
+            f'    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>\n'
+            f'    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>\n'
+            f'    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>\n'
+            f'    <StartWhenAvailable>true</StartWhenAvailable>\n'
+            f'    <ExecutionTimeLimit>PT5M</ExecutionTimeLimit>\n'
+            f'    <Enabled>true</Enabled><Hidden>false</Hidden>\n'
+            f'  </Settings>\n'
+            f'  <Actions Context="Author"><Exec>'
+            f'<Command>cmd.exe</Command>'
+            f'<Arguments>/c &quot;{escape(str(cmd))}&quot;</Arguments>'
+            f'</Exec></Actions>\n'
+            f'</Task>\n')
+
+
 def startup_dir() -> Path:
     override = os.environ.get("AUTOMAGIX_STARTUP_DIR")
     if override:
@@ -238,6 +281,30 @@ class Scheduler:
             if f.exists():
                 f.unlink()
         return gone
+
+    def register_heartbeat(self) -> bool:
+        """Ensure the every-4-hour heartbeat task exists. Returns True if it was created or updated."""
+        atomic_write_text(self.paths.bin / "heartbeat.cmd", heartbeat_cmd(self.paths, self.python_exe))
+        xml = heartbeat_task_xml(self.paths, self.python_exe)
+        digest = hashlib.sha256(xml.encode("utf-8")).hexdigest()
+        st = self._state()
+        if st.get(HEARTBEAT_TASK) == digest and self.exists(HEARTBEAT_TASK):
+            return False
+        if self._create(HEARTBEAT_TASK, xml):
+            st[HEARTBEAT_TASK] = digest
+            self._save_state(st)
+            return True
+        return False
+
+    def unregister_heartbeat(self) -> None:
+        """Remove the heartbeat task (called when the last automation is uninstalled)."""
+        self._delete(HEARTBEAT_TASK)
+        st = self._state()
+        st.pop(HEARTBEAT_TASK, None)
+        self._save_state(st)
+        hb_cmd = self.paths.bin / "heartbeat.cmd"
+        if hb_cmd.exists():
+            hb_cmd.unlink()
 
     # ---- schtasks -----------------------------------------------------------------------------
     def exists(self, name: str) -> bool:

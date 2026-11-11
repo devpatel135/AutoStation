@@ -356,7 +356,7 @@ def run_automation(name: str, slot_id: str | None = None, dry_run: bool = False,
             record.update(status=status, ended_at=iso(now), duration_ms=int((time.monotonic() - t0) * 1000))
             _finalise(paths, record, ctx, dry_run, use_llm)
             if not dry_run:
-                write_json(paths.last_run_file(name), {k: record[k] for k in ("run_id", "status", "started_at", "ended_at", "automation_version")})
+                write_json(paths.last_run_file(name), {k: record[k] for k in ("run_id", "status", "started_at", "ended_at", "automation_version", "synopsis") if k in record})
                 send_heartbeat(paths, "run_end", name, record["run_id"])
             _prune_runs(paths)
             return RunOutcome(record, exit_code)
@@ -397,6 +397,10 @@ def run_automation(name: str, slot_id: str | None = None, dry_run: bool = False,
                              finish, dry_run, ignore_maintenance, t0)
         return last or RunOutcome(None, EXIT_OK)
     finally:
+        if isinstance(tray_handle, tray_mod.TrayHandle) and last is not None and last.record:
+            balloon = tray_mod.format_balloon(name, last.record)
+            if balloon:
+                tray_handle.balloon = balloon
         tray_mod.stop(tray_handle)
         lock.release()
 

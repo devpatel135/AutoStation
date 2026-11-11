@@ -214,7 +214,7 @@ def test_starter_builds_a_portal(tmp_path):
     res = build.build_portal(STARTER, tmp_path / "pub")
     assert "automation/automation-notifier.html" in res["files"]
     index = (tmp_path / "pub" / "index.html").read_text(encoding="utf-8")
-    assert 'Download installer v1.0.0 (broad)' in index and "PLACEHOLDER - not a real release" in index
+    assert '↓ Install v1.0.0 (broad)' in index and "PLACEHOLDER - not a real release" in index
 
 
 def test_schema_file_is_wellformed_and_catches_shape_errors(manifest):

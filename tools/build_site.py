@@ -50,9 +50,10 @@ def _inject(html_path: Path, snippet: str) -> None:
     if not html_path.is_file():
         return
     text = html_path.read_text(encoding="utf-8")
-    marker = '<div class="page">'
-    if marker in text and snippet not in text:
-        html_path.write_text(text.replace(marker, marker + snippet, 1), encoding="utf-8")
+    for marker in ('<div class="page">', '<main class="main">'):
+        if marker in text and snippet not in text:
+            html_path.write_text(text.replace(marker, marker + snippet, 1), encoding="utf-8")
+            return
 
 
 def decorate_dashboard_pages(out: Path, cfg: SiteConfig) -> None:

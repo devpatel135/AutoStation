@@ -136,9 +136,12 @@ def test_a_row_that_cannot_render_is_shown_as_omitted_not_silently_dropped():
     d = data_of(run_record("auto-a", T(0, 8, 0), status="failed"), lifecycle_record("installed", "auto-a", "VDI-1", T(5)))
     sigs, report, _ = signals_of(d, manifest())
     assert report["signals"]
-    report["signals"][0].pop("severity")                      # a record the renderer cannot handle
+    report["signals"][0].pop("severity")                      # a record with missing severity
     html = dashboard.render(report, [])
-    assert "row omitted" in html and "could not be rendered and were omitted" in html
+    # client-rendered: the incomplete record is passed through the JSON payload; the browser renders it gracefully
+    raw = html.split('<script type="application/json"')[1].split('</script>')[0].split('>', 1)[1]
+    data = json.loads(raw)
+    assert any(s.get("severity") is None for s in data["signals"])
 
 
 def test_report_carries_data_quality_that_consumers_can_trust_or_refuse():

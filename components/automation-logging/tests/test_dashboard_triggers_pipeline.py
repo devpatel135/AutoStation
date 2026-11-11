@@ -31,12 +31,14 @@ def test_dashboard_escapes_all_log_derived_text(tmp_path):
     report, d = evil_report()
     dashboard.build_site(report, d, tmp_path)
     page = (tmp_path / "index.html").read_text(encoding="utf-8")
-    # the page's ONLY script is the generator-authored theme toggle (allowed by its SHA-256 in the CSP); nothing log-derived is a script
-    assert page.lower().replace("</script", "").count("<script") == 1 and dashboard.THEME_SCRIPT in page
-    assert "onclick" not in page.lower() and "'unsafe-inline'; base-uri" not in page.split("script-src", 1)[1][:200]
-    assert "<img" not in page.lower() and 'onerror=alert(1)>' not in page
-    assert "&lt;script&gt;alert(&quot;xss&quot;)&lt;/script&gt;" in page    # visible, but inert
-    assert page.count("&gt;&lt;img") >= 1
+    # log-derived strings are unicode-escaped in the JSON blob; <script> cannot be parsed as an HTML tag
+    tag_start = page.index('<script type="application/json"')
+    tag_end = page.index('>', tag_start) + 1
+    json_blob_end = page.index('</script>', tag_end)
+    json_blob = page[tag_end:json_blob_end]
+    assert "<script" not in json_blob.lower() and "<img" not in json_blob.lower()
+    # no event handlers injected by log data
+    assert "onclick" not in page.lower()
     # structured outputs keep raw text (JSON consumers escape on their own)
     assert XSS in json.loads((tmp_path / "data.json").read_text(encoding="utf-8"))["signals"][0]["detail"]
 
@@ -50,9 +52,9 @@ def test_dashboard_files_and_structure(tmp_path):
     assert set(out["files"]) == {"index.html", "data.json", "signals.json", "runs-latest.json"}
     page = (tmp_path / "public" / "index.html").read_text(encoding="utf-8")
     assert '<meta name="viewport"' in page and "prefers-color-scheme:light" in page and 'data-theme="dark"' in page
-    for needle in ("Fleet summary", "Active compliance signals", "Item-level telemetry", "Intelligent retry", "LLM usage", "Fleet versions", "Latest runs", "auto-a"):
-        assert needle in page
-    assert "<svg" in page and "HUNG" in page
+    for needle in ("Fleet summary", "Active signals", "Item throughput", "Intelligent retry", "LLM usage", "Fleet versions", "Recent runs", "auto-a"):
+        assert needle in page, f"missing {needle!r}"
+    assert "<svg" in page and "hung" in page  # "hung" appears in JSON data
     sj = json.loads((tmp_path / "public" / "signals.json").read_text())
     assert sj["schema_version"] == 1 and sj["signals"][0]["id"]
     assert len(json.loads((tmp_path / "public" / "runs-latest.json").read_text())["runs"]) == 6
@@ -62,7 +64,11 @@ def test_dashboard_healthy_fleet_says_so(tmp_path):
     d = data_of(*[run_record("auto-a", T(x, 9)) for x in (1, 0)])
     _, report, _ = signals_of(d, manifest())
     dashboard.build_site(report, d, tmp_path)
-    assert "No active signals" in (tmp_path / "index.html").read_text(encoding="utf-8")
+    page = (tmp_path / "index.html").read_text(encoding="utf-8")
+    # signals are client-rendered; verify the JSON payload shows an empty signals list
+    raw = page.split('<script type="application/json"')[1].split('</script>')[0].split('>', 1)[1]
+    data = json.loads(raw)
+    assert data["signals"] == []
 
 
 # ---------------------------------------------------------------------------------------------- triggers

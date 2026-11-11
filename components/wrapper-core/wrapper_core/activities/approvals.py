@@ -89,6 +89,9 @@ class Task:
     decided_by: Optional[str] = None
     decision_note: str = ""
     audit: List[dict] = field(default_factory=list)
+    require_ad_group: Optional[str] = None        # approver must be a member of this Windows/domain group
+    second_approval_required: bool = False         # two distinct approvers required; first approve = endorsement only
+    endorsements: List[dict] = field(default_factory=list)  # [{ts, by}] — populated when second_approval_required
 
     def __repr__(self) -> str:  # titles/fields may hold business data
         return f"Task(id={self.id}, automation={self.automation}, status={self.status})"
@@ -111,9 +114,51 @@ def _clean(text: Any, limit: int, what: str, multiline: bool = False) -> str:
     return s
 
 
-def _who(by: Optional[str]) -> str:
-    who = by or os.environ.get("USERNAME") or os.environ.get("USER") or "unknown"
+def _who(by: Optional[str], domain_qualified: bool = False) -> str:
+    if domain_qualified and sys.platform == "win32":
+        # USERDOMAIN\USERNAME gives auditors a domain-verifiable identity (not just a bare username)
+        domain = os.environ.get("USERDOMAIN", "")
+        user = os.environ.get("USERNAME", "")
+        who = by or (f"{domain}\\{user}" if domain and user else user or "unknown")
+    else:
+        who = by or os.environ.get("USERNAME") or os.environ.get("USER") or "unknown"
     return _clean(who, 64, "approver name") or "unknown"
+
+
+def _check_ad_group(who: str, group: str) -> None:
+    """Verify the current user is a member of ``group`` (Windows group or domain group).
+
+    Uses ``whoami /groups /fo csv`` which works offline against the cached Kerberos ticket — no LDAP
+    connectivity needed. Raises ApprovalError if the user is not a member or the check cannot run.
+    ``group`` may be a bare name (e.g. "Automation-Approvers") or domain-qualified ("DOMAIN\\Approvers").
+    """
+    if sys.platform != "win32":
+        raise ApprovalError("AD group check is only available on Windows")
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["whoami", "/groups", "/fo", "csv"],
+            capture_output=True, text=True, timeout=15, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ApprovalError(f"AD group membership check could not run: {exc}") from exc
+    if result.returncode != 0:
+        raise ApprovalError(f"AD group membership check failed (whoami /groups exited {result.returncode}): {result.stderr[:200]}")
+    group_lower = group.lower().strip()
+    for line in result.stdout.splitlines()[1:]:  # skip header
+        # CSV: "Group Name","Type","SID","Attributes"
+        cols = [c.strip('" \t') for c in line.split('","')]
+        if not cols:
+            continue
+        name = cols[0].lower()
+        # match on full qualified name OR the short part after the last backslash
+        short = name.rsplit("\\", 1)[-1]
+        if name == group_lower or short == group_lower:
+            return
+    raise ApprovalError(
+        f"the current user ({who}) is not a member of the required group '{group}'; "
+        "only members of that group may approve this task"
+    )
 
 
 def _check_id(task_id: str) -> str:
@@ -128,7 +173,10 @@ def _from_json(d: Any, task_id: str) -> Task:
     return Task(id=task_id, automation=str(d.get("automation", "")), title=str(d.get("title", "")), description=str(d.get("description", "")),
                 fields={str(k): str(v) for k, v in (d.get("fields") or {}).items()}, status=d["status"], created_at=str(d.get("created_at", "")),
                 expires_at=str(d.get("expires_at", "")), decided_at=d.get("decided_at"), decided_by=d.get("decided_by"),
-                decision_note=str(d.get("decision_note", "")), audit=list(d.get("audit") or []))
+                decision_note=str(d.get("decision_note", "")), audit=list(d.get("audit") or []),
+                require_ad_group=d.get("require_ad_group") or None,
+                second_approval_required=bool(d.get("second_approval_required", False)),
+                endorsements=list(d.get("endorsements") or []))
 
 
 def _save(task: Task, paths: Optional[Paths]) -> None:
@@ -185,8 +233,14 @@ def _expired(task: Task, now: Optional[Any] = None) -> bool:
 
 # --- API --------------------------------------------------------------------------------------------------
 def create(title: str, description: str = "", fields: Optional[Dict[str, Any]] = None, automation: Optional[str] = None,
-           expires_in_s: float = DEFAULT_TTL_S, notify: bool = True, paths: Optional[Paths] = None) -> Task:
-    """Create a pending approval task. ``fields`` (scalars only, shown to the approver) hold the facts needed to decide."""
+           expires_in_s: float = DEFAULT_TTL_S, notify: bool = True, paths: Optional[Paths] = None,
+           require_ad_group: Optional[str] = None, require_second_approver: bool = False) -> Task:
+    """Create a pending approval task. ``fields`` (scalars only, shown to the approver) hold the facts needed to decide.
+
+    ``require_ad_group``: if set, only members of this Windows/domain group may approve (checked at decision time).
+    ``require_second_approver``: if True, two distinct Windows users must each approve; the first approve is an endorsement
+    only and the task stays pending until a second distinct user also approves. A single reject by either user is final.
+    """
     paths = paths or Paths()
     title = _clean(title, MAX_TITLE, "title")
     if not title.strip():
@@ -211,9 +265,11 @@ def create(title: str, description: str = "", fields: Optional[Dict[str, Any]] =
     if sum(1 for t in list_tasks("pending", paths)) >= MAX_PENDING:
         raise ApprovalError(f"too many pending approvals ({MAX_PENDING})")
     now = utcnow()
+    req_group = _clean(require_ad_group, 128, "require_ad_group") if require_ad_group else None
     task = Task(id="t" + _secrets.token_urlsafe(16), automation=auto, title=title, description=description, fields=clean_fields, status="pending",
                 created_at=iso(now), expires_at=iso(now + timedelta(seconds=ttl)),
-                audit=[{"ts": iso(now), "event": "created", "by": _who(None), "note": ""}])
+                audit=[{"ts": iso(now), "event": "created", "by": _who(None), "note": ""}],
+                require_ad_group=req_group, second_approval_required=bool(require_second_approver))
     _save(task, paths)
     _telemetry("approval_requested", {"approval_id": task.id, "automation": auto, "expires_at": task.expires_at, "fields": len(clean_fields)})
     emit("approvals.create", automation=auto)
@@ -262,18 +318,43 @@ def list_tasks(status: Optional[str] = None, paths: Optional[Paths] = None, limi
 
 
 def decide(task_id: str, decision: str, by: Optional[str] = None, note: str = "", paths: Optional[Paths] = None) -> Task:
-    """Approve or reject a pending task (``decision`` is ``"approve"`` or ``"reject"``). Raises ApprovalError if it is not pending."""
+    """Approve or reject a pending task (``decision`` is ``"approve"`` or ``"reject"``). Raises ApprovalError if it is not pending.
+
+    If the task has ``require_ad_group`` set, the current Windows user must be a member of that group.
+    If the task has ``second_approval_required`` set, the first "approve" is an endorsement only (status stays pending)
+    and the task resolves only when a second *distinct* user also approves. A single "reject" by either user is final.
+    """
     if decision not in DECISIONS:
         raise ApprovalError(f"decision must be one of {DECISIONS}")
     note = _clean(note, MAX_NOTE, "note", multiline=True)
-    who = _who(by)
-    get(task_id, paths)  # applies expiry
+    domain_qualified = bool(getattr(get(task_id, paths), "require_ad_group", None))  # applies expiry; re-read inside lock
+    who = _who(by, domain_qualified=domain_qualified)
     with _Lock(_dir(paths) / f"{task_id}.lock"):
         task = _from_json(read_json(_dir(paths) / f"{task_id}.json", None), task_id)
         if _expired(task):
             raise ApprovalError("approval has expired and can no longer be decided")
         if task.status != "pending":
             raise ApprovalError(f"approval was already {task.status}")
+
+        # AD group membership check (runs inside the lock so any auth failure is atomic with the record)
+        if task.require_ad_group:
+            _check_ad_group(who, task.require_ad_group)
+
+        # second-approver logic: a reject is always immediate; an approve by the first person = endorsement only
+        if task.second_approval_required and decision == "approve":
+            existing_endorsers = [e.get("by", "") for e in task.endorsements]
+            if who in existing_endorsers:
+                raise ApprovalError("you have already endorsed this approval; a second distinct approver is required")
+            task.endorsements.append({"ts": iso(), "by": who})
+            if len(task.endorsements) < 2:
+                # first endorsement — stay pending, record in audit
+                task.audit.append({"ts": iso(), "event": "endorsed", "by": who, "note": note})
+                _save(task, paths)
+                emit("approvals.decide", decision="endorsed")
+                return task
+            # second endorsement — resolve
+            who = f"{task.endorsements[0]['by']} + {who}"  # audit trail shows both approvers
+
         task.status = "approved" if decision == "approve" else "rejected"
         task.decided_at, task.decided_by, task.decision_note = iso(), who, note
         task.audit.append({"ts": task.decided_at, "event": decision, "by": who, "note": note})

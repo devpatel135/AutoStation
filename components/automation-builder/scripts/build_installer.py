@@ -48,9 +48,11 @@ from _wc import versions  # noqa: E402
 import validate_nsi  # noqa: E402
 
 TEMPLATE = HERE.parent / "installer" / "autostation.nsi.in"
+DROPPER_TEMPLATE = HERE.parent / "installer" / "autostation-dropper.nsi.in"
 PS_SCRIPTS = HERE.parent / "installer" / "scripts"
 STAGE_SCRIPTS = ["install-check.ps1", "protect-secret.ps1", "restrict-acl.ps1", "set-credential.ps1",
                  "configure-python.ps1", "write-platform-config.ps1", "first-run.ps1"]
+DROPPER_SCRIPTS = ["first-run.ps1"]
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 LOG_REMOTE_RE = re.compile(r"^(git@[A-Za-z0-9.-]+:[\w./~-]+|ssh://[\w.@:/~-]+|[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)$")  # ssh remote, or owner/repo (github-api)
 URL_RE = re.compile(r"^(https?://|mock://)\S+$")
@@ -74,12 +76,14 @@ class Config:
     publisher: str = "AUTOMAGIX"
     icon: str = ""
     wrapper_core_zip: str = ""
-    framework_zip: str = ""       # optional: execution-framework (Node + node_modules) bundled in the installer
-    registry_pubkeys: str = ""    # comma-separated hex Ed25519 keys pinned into platform.json (manifest signature verification)
-    git_zip: str = ""             # optional: MinGit (git + ssh) bundled so the ssh log transport needs no pre-installed git
-    automation_zip: str = ""      # optional: payload bundled INSIDE the installer (offline-capable first install)
+    framework_zip: str = ""       # optional: execution-framework bundled in bundled-mode installer
+    registry_pubkeys: str = ""    # comma-separated hex Ed25519 keys pinned into platform.json
+    git_zip: str = ""             # optional: MinGit bundled for ssh log transport
+    automation_zip: str = ""      # optional: payload bundled inside the installer
     python_embed_zip: str = ""
     known_hosts_file: str = ""
+    dropper: bool = False         # dropper mode: skip platform components, check platform version
+    requires_platform: str = ""   # dropper only: minimum platform version required
     base_dir: Path = field(default_factory=Path.cwd)
 
 
@@ -124,11 +128,23 @@ def load_config(src: Path | dict, base_dir: Path | None = None) -> Config:
     llm = _clean("llm_endpoint", raw.get("llm_endpoint", ""), allow_empty=True)
     if llm and not URL_RE.match(llm):
         raise BuildError("config: llm_endpoint must be an http(s):// URL")
+    dropper = bool(raw.get("dropper", False))
+    requires_platform = _clean("requires_platform", raw.get("requires_platform", ""), allow_empty=True)
+    if dropper and not requires_platform:
+        raise BuildError("config: dropper mode requires 'requires_platform' (minimum platform version)")
+    if requires_platform:
+        try:
+            versions.parse(requires_platform)
+        except ValueError as exc:
+            raise BuildError(f"config: requires_platform: {exc}") from exc
     return Config(automation=name, version=version, registry_url=registry, log_remote=log_remote, ring=ring,
                   llm_endpoint=llm, llm_model=_clean("llm_model", raw.get("llm_model", ""), allow_empty=True),
                   publisher=_clean("publisher", raw.get("publisher", "AUTOMAGIX")), icon=raw.get("icon", "") or "",
-                  wrapper_core_zip=raw.get("wrapper_core_zip", "") or "", automation_zip=raw.get("automation_zip", "") or "", framework_zip=raw.get("framework_zip", "") or "", git_zip=raw.get("git_zip", "") or "", registry_pubkeys=_pubkeys(raw.get("registry_pubkeys", "")), python_embed_zip=raw.get("python_embed_zip", "") or "",
-                  known_hosts_file=raw.get("known_hosts_file", "") or "", base_dir=base)
+                  wrapper_core_zip=raw.get("wrapper_core_zip", "") or "", automation_zip=raw.get("automation_zip", "") or "",
+                  framework_zip=raw.get("framework_zip", "") or "", git_zip=raw.get("git_zip", "") or "",
+                  registry_pubkeys=_pubkeys(raw.get("registry_pubkeys", "")), python_embed_zip=raw.get("python_embed_zip", "") or "",
+                  known_hosts_file=raw.get("known_hosts_file", "") or "", dropper=dropper,
+                  requires_platform=requires_platform, base_dir=base)
 
 
 # --- NSIS rendering -----------------------------------------------------------------------------------
@@ -158,7 +174,7 @@ def numeric_version(version: str) -> str:
 
 def render_nsi(cfg: Config, wrapper_version: str, flags: dict[str, bool], outfile: str, stage_dir: str = ".",
                icon: str = "") -> str:
-    tpl = TEMPLATE.read_text(encoding="utf-8")
+    tpl = (DROPPER_TEMPLATE if cfg.dropper else TEMPLATE).read_text(encoding="utf-8")
     defines = "\n".join(f"!define {k}" for k, v in sorted(flags.items()) if v)
     values = {
         "DEFINES": defines, "AUTOMATION": cfg.automation, "VERSION": cfg.version, "VIVERSION": vi_version(cfg.version),
@@ -166,6 +182,7 @@ def render_nsi(cfg: Config, wrapper_version: str, flags: dict[str, bool], outfil
         "LLM_ENDPOINT": cfg.llm_endpoint, "LLM_MODEL": cfg.llm_model, "WRAPPER_VERSION": numeric_version(wrapper_version),
         "STAGE_DIR": stage_dir, "OUTFILE": outfile, "ICON": icon, "REGISTRY_PUBKEYS": cfg.registry_pubkeys,
         "GIT_ARG": "" if cfg.log_remote.startswith(("git@", "ssh://")) and not flags.get("HAVE_GIT") else "-SkipGit",
+        "REQUIRES_PLATFORM": cfg.requires_platform,
     }
     out = tpl
     for key, val in values.items():
@@ -234,47 +251,61 @@ def stage_build(cfg: Config, stage: Path, env: dict, allow_missing_secrets: bool
     stage.mkdir(parents=True)
     flags = {"HAVE_FRAMEWORK": False, "HAVE_GIT": False, "HAVE_LOG_TOKEN": False, "HAVE_PAYLOAD": False, "HAVE_ICON": False, "HAVE_PYTHON_EMBED": False, "HAVE_SSH_KEY": False, "HAVE_TOKEN": False, "HAVE_KNOWN_HOSTS": False}
 
-    # scripts
+    # scripts: dropper only needs first-run.ps1; bundled installer needs the full set
     (stage / "scripts").mkdir()
-    for name in STAGE_SCRIPTS:
+    script_list = DROPPER_SCRIPTS if cfg.dropper else STAGE_SCRIPTS
+    for name in script_list:
         src = PS_SCRIPTS / name
         if not src.exists():
             raise BuildError(f"installer script missing: {src}")
         shutil.copyfile(src, stage / "scripts" / name)
 
-    # wrapper-core bootstrap payload
-    if not cfg.wrapper_core_zip:
-        raise BuildError("config: wrapper_core_zip is required (build it with package.py component wrapper-core ...)")
-    wz = _resolve(cfg, cfg.wrapper_core_zip)
-    if not wz.is_file():
-        raise BuildError(f"wrapper_core_zip not found: {wz}")
-    safe_extract(wz, stage / "wrapper-core")
-    vfile = stage / "wrapper-core" / "VERSION"
-    if not vfile.exists() or not (stage / "wrapper-core" / "wrapper_core" / "__init__.py").exists():
-        raise BuildError("wrapper_core_zip must contain VERSION and wrapper_core/__init__.py (use package.py)")
-    wrapper_version = vfile.read_text(encoding="utf-8").strip()
-    versions.parse(wrapper_version)
+    # wrapper-core: skip in dropper mode (already on disk via platform installer)
+    if cfg.dropper:
+        wrapper_version = cfg.requires_platform  # dropper uses platform version as its compat reference
+    else:
+        if not cfg.wrapper_core_zip:
+            raise BuildError("config: wrapper_core_zip is required (build it with package.py component wrapper-core ...)")
+        wz = _resolve(cfg, cfg.wrapper_core_zip)
+        if not wz.is_file():
+            raise BuildError(f"wrapper_core_zip not found: {wz}")
+        safe_extract(wz, stage / "wrapper-core")
+        vfile = stage / "wrapper-core" / "VERSION"
+        if not vfile.exists() or not (stage / "wrapper-core" / "wrapper_core" / "__init__.py").exists():
+            raise BuildError("wrapper_core_zip must contain VERSION and wrapper_core/__init__.py (use package.py)")
+        wrapper_version = vfile.read_text(encoding="utf-8").strip()
+        versions.parse(wrapper_version)
 
-    # bundled execution-framework (Node runtime + playwright-core): lets browser automations run with nothing pre-installed
-    if cfg.framework_zip:
-        fz = _resolve(cfg, cfg.framework_zip)
-        if not fz.is_file():
-            raise BuildError(f"framework_zip not found: {fz}")
-        safe_extract(fz, stage / "execution-framework")
-        if not (stage / "execution-framework" / "VERSION").exists() or not (stage / "execution-framework" / "index.js").exists():
-            raise BuildError("framework_zip must contain VERSION and index.js (use package.py component execution-framework ...)")
-        flags["HAVE_FRAMEWORK"] = True
+    # dropper mode: platform components (python, framework, git) already on disk — skip them
+    if not cfg.dropper:
+        if cfg.framework_zip:
+            fz = _resolve(cfg, cfg.framework_zip)
+            if not fz.is_file():
+                raise BuildError(f"framework_zip not found: {fz}")
+            safe_extract(fz, stage / "execution-framework")
+            if not (stage / "execution-framework" / "VERSION").exists() or not (stage / "execution-framework" / "index.js").exists():
+                raise BuildError("framework_zip must contain VERSION and index.js (use package.py component execution-framework ...)")
+            flags["HAVE_FRAMEWORK"] = True
 
-    if cfg.git_zip:
-        gz = _resolve(cfg, cfg.git_zip)
-        if not gz.is_file():
-            raise BuildError(f"git_zip not found: {gz}")
-        safe_extract(gz, stage / "git")
-        if not (stage / "git" / "cmd" / "git.exe").exists():
-            raise BuildError("git_zip must be a MinGit archive (cmd/git.exe) - use tools/fetch_mingit.py")
-        flags["HAVE_GIT"] = True
+        if cfg.git_zip:
+            gz = _resolve(cfg, cfg.git_zip)
+            if not gz.is_file():
+                raise BuildError(f"git_zip not found: {gz}")
+            safe_extract(gz, stage / "git")
+            if not (stage / "git" / "cmd" / "git.exe").exists():
+                raise BuildError("git_zip must be a MinGit archive (cmd/git.exe) - use tools/fetch_mingit.py")
+            flags["HAVE_GIT"] = True
 
-    # bundled automation payload: the installer itself is the trust root, so a first install works with no registry
+        if cfg.python_embed_zip:
+            pz = _resolve(cfg, cfg.python_embed_zip)
+            if not pz.is_file():
+                raise BuildError(f"python_embed_zip not found: {pz}")
+            safe_extract(pz, stage / "python")
+            if not (stage / "python" / "python.exe").exists():
+                raise BuildError("python_embed_zip must contain python.exe at its root (python.org 'embeddable package')")
+            flags["HAVE_PYTHON_EMBED"] = True
+
+    # bundled automation payload (valid for both bundled and dropper modes)
     if cfg.automation_zip:
         az = _resolve(cfg, cfg.automation_zip)
         if not az.is_file():
@@ -287,16 +318,6 @@ def stage_build(cfg: Config, stage: Path, env: dict, allow_missing_secrets: bool
         meta = {"name": cfg.automation, "version": cfg.version, "sha256": hashlib.sha256(az.read_bytes()).hexdigest()}
         (stage / "bundled" / f"{cfg.automation}.json").write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
         flags["HAVE_PAYLOAD"] = True
-
-    # interpreter
-    if cfg.python_embed_zip:
-        pz = _resolve(cfg, cfg.python_embed_zip)
-        if not pz.is_file():
-            raise BuildError(f"python_embed_zip not found: {pz}")
-        safe_extract(pz, stage / "python")
-        if not (stage / "python" / "python.exe").exists():
-            raise BuildError("python_embed_zip must contain python.exe at its root (python.org 'embeddable package')")
-        flags["HAVE_PYTHON_EMBED"] = True
 
     # known_hosts (public)
     kh = env.get("KNOWN_HOSTS_FILE") or (str(_resolve(cfg, cfg.known_hosts_file)) if cfg.known_hosts_file else "")
@@ -514,11 +535,21 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--allow-missing-secrets", action="store_true", help="dev builds only")
     ap.add_argument("--makensis")
     ap.add_argument("--keep-stage", action="store_true")
+    ap.add_argument("--dropper", action="store_true",
+                    help="build a dropper: skip platform components, check platform version at install time")
+    ap.add_argument("--requires-platform", metavar="VERSION",
+                    help="minimum platform version required (mandatory with --dropper)")
     args = ap.parse_args(argv)
     try:
         cfg = load_config(Path(args.config))
         if args.ring:
             cfg.ring = args.ring
+        if args.dropper:
+            cfg.dropper = True
+        if args.requires_platform:
+            cfg.requires_platform = args.requires_platform
+        if cfg.dropper and not cfg.requires_platform:
+            raise BuildError("--dropper requires --requires-platform (or set 'requires_platform' in build config)")
         res = run_build(cfg, Path(args.out), dict(os.environ), sign=args.sign, require_signing=args.require_signing,
                         render_only=args.render_only, allow_missing_secrets=args.allow_missing_secrets, makensis=args.makensis,
                         signer=args.signer, keep_stage=args.keep_stage)

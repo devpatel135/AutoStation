@@ -20,6 +20,20 @@
 const path = require('node:path');
 const fw = require(process.env.AUTOMAGIX_FRAMEWORK_DIR || path.resolve(__dirname, '..', '..', 'execution-framework'));
 const native = require('./lib/native');
+
+// Pattern 1: LLM page classifier — used as a fallback when the deterministic classifier returns 'other'.
+// The deterministic path runs first (fast, free, no LLM dependency); LLM only engages on unknown states.
+// Fail-safe: null result or low confidence → keep kind = 'other' → automation polls again or times out naturally.
+const _PAGE_CLASSIFY_SCHEMA = {
+  type: 'object',
+  required: ['kind', 'confidence', 'reasoning'],
+  properties: {
+    kind: { type: 'string', enum: ['target', 'credential', 'signin', 'account-picker', 'other'] },
+    confidence: { type: 'number', minimum: 0, maximum: 1 },
+    reasoning: { type: 'string', maxLength: 200 },
+  },
+  additionalProperties: false,
+};
 const {
   DEFAULT_URL, DEFAULT_ACCOUNT, assertEmail, accountTileSelectors, classifyPage, hostOf,
   parseAllowedHosts, isAllowedPortal, isMicrosoftLoginHost, redirectAllowed, postClickOk,
@@ -93,9 +107,31 @@ fw.wrapper.entrypoint(async (framework) => {
     let kind = 'other';
     let clicked = false;
     let untrusted = '';
+    let llmFiredThisIteration = false;
     while (Date.now() < deadline) {
       const state = await pageState(page, selectors);
       kind = classifyPage(state, portalUrl, { pickerHost });
+      // Pattern 1: LLM fallback for unknown page states — deterministic path has first priority.
+      // Once per loop iteration only: if the LLM fired this pass, skip on the next to avoid burning
+      // quota when the page stays in 'other' across multiple polling cycles.
+      if (kind === 'other' && !llmFiredThisIteration) {
+        llmFiredThisIteration = true;
+        const llmResult = await fw.llm.llmCall({
+          prompt: 'Classify the state of this browser page navigating to a corporate certification portal.',
+          context: `URL: ${state.url}\nTitle: ${state.title}\nPage text:\n${state.text.slice(0, 1200)}`,
+          schema: _PAGE_CLASSIFY_SCHEMA,
+          caller: 'automation-certification-site/page-classifier',
+          template: 'page_classifier',
+          classification: 'internal',
+          decisionLog: true,
+          timeoutS: 15,
+        }, { logEvent: w.logEvent });
+        if (llmResult && typeof llmResult.confidence === 'number' && llmResult.confidence >= 0.7 && llmResult.kind !== 'other') {
+          w.logEvent('page_classified_by_llm', { from: 'other', to: llmResult.kind, confidence: llmResult.confidence, reasoning: llmResult.reasoning });
+          kind = llmResult.kind;
+        }
+        // null or low-confidence → keep kind = 'other'; automation polls again or times out naturally
+      }
       w.logEvent('page_state', { kind, host: new URL(state.url).host });
       if (kind === 'target' || kind === 'credential' || kind === 'signin') break;
       if (kind === 'account-picker') {

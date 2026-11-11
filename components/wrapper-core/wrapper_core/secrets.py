@@ -228,6 +228,33 @@ def logging_key_blob(paths: Paths | None = None) -> Path | None:
     return f if f.exists() else None
 
 
+# Names that may be rotated via a manifest secret_refresh entry.  Only these are accepted — no path traversal.
+_REFRESHABLE_SECRETS = frozenset(("logging_key", "registry_token", "logging_token", "llm_key"))
+
+
+def refresh_dpapi_secret(paths: "Paths", name: str, plaintext: bytes) -> Path:
+    """Atomically replace the DPAPI blob for ``name`` with a freshly-encrypted copy of ``plaintext``.
+
+    Called by self-heal when the manifest carries a ``secret_refresh`` entry.  The plaintext is never
+    written to disk — only the DPAPI-encrypted blob is persisted.  The caller is responsible for clearing
+    the ``plaintext`` reference immediately after this returns.
+
+    Raises SecretError if DPAPI fails, ValueError if the name is not in the allowed set.
+    """
+    if name not in _REFRESHABLE_SECRETS:
+        raise ValueError(f"unknown refreshable secret {name!r}; allowed: {sorted(_REFRESHABLE_SECRETS)}")
+    dst = paths.secrets / f"{name}.dpapi"
+    blob = dpapi_protect(plaintext)
+    staging = dst.with_suffix(".dpapi.new")
+    staging.parent.mkdir(parents=True, exist_ok=True)
+    staging.write_bytes(blob)
+    if not restrict_to_owner(staging):
+        wipe_file(staging)
+        raise SecretError(f"cannot restrict {staging.name} to owner; refusing to write secret")
+    os.replace(staging, dst)
+    return dst
+
+
 class TempPrivateKey:
     """Context manager that materialises the logging SSH key for the few seconds `git push` needs it.
 

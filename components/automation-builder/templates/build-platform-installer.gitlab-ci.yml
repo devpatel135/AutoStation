@@ -1,0 +1,76 @@
+# Reusable job templates for building and publishing the AUTOSTATION platform installer.
+# The platform installer is installed ONCE per machine; automation droppers depend on it.
+#
+#   include:
+#     - project: platform/automation-builder
+#       ref: main
+#       file: /templates/build-platform-installer.gitlab-ci.yml
+#
+# Pipeline stages expected: build -> installer -> publish.
+#
+# Required CI variables (project/group level; mark secrets MASKED + PROTECTED, files as type "File"):
+#   BUILDER_IMAGE            builder image from this project's registry
+#   PLATFORM_VERSION         semver (e.g. 1.3.0); set from the git tag in your downstream pipeline
+#   REGISTRY_URL             base URL (or share) of the registry, as deployed runtimes will read it
+#   LOG_REMOTE               git@host:group/automation-logging.git   (ssh remote for write-only logging key)
+#   LOGGING_SSH_KEY_FILE     [File] write-only logging deploy key
+#   KNOWN_HOSTS_FILE         [File] known_hosts for LOG_REMOTE (public data)
+#   REGISTRY_READ_TOKEN_FILE [File] read-only registry token
+#   SIGNING_PFX_FILE         [File] code-signing certificate (.pfx) from the internal PKI
+#   SIGNING_PFX_PASSWORD_FILE[File] its password
+#   SIGNING_TIMESTAMP_URL    RFC3161 timestamp authority
+#   PYTHON_EMBED_ZIP         [File or path] python.org embeddable package zip (from the containeryard artifact mirror)
+#   FRAMEWORK_ZIP            [File or path] execution-framework zip (from the containeryard artifact store)
+#   WRAPPER_CORE_ZIP         [File or path] wrapper-core zip — if absent, fetched from the registry at build time
+#   REGISTRY_PUBKEYS         comma-separated 64-hex Ed25519 keys pinned into the platform's trust store (strongly
+#                            recommended for pilot/broad — without this the runtime cannot verify manifest signatures)
+#                   alt: REGISTRY_PUBKEYS_FILE [File] — file holding the same content
+# Registry MR job:
+#   REGISTRY_PROJECT_ID, REGISTRY_BOT_TOKEN (MASKED, api + write_repository), REGISTRY_GIT_URL (https clone URL)
+
+variables:
+  BUILD_RING: broad
+
+# --- build the platform-build.json config file --------------------------------------------------------
+.build-platform-config:
+  stage: build
+  image: $BUILDER_IMAGE
+  script:
+    - mkdir -p dist
+    - python /opt/autostation-builder/scripts/ci_platform_config.py config --out dist/platform-build.json
+  artifacts:
+    paths:
+      - dist/platform-build.json
+
+# --- compile and sign the platform installer ----------------------------------------------------------
+# Signing is mandatory outside the dev ring: the platform installer is a persistent shared component,
+# so unsigned platform builds are rejected for pilot/broad regardless of REQUIRE_SIGNING.
+.build-platform-installer:
+  stage: installer
+  image: $BUILDER_IMAGE
+  variables:
+    REQUIRE_SIGNING: "0"
+  script:
+    - mkdir -p dist/installers
+    - >
+      if [ "$REQUIRE_SIGNING" = "1" ] || [ "$BUILD_RING" != "dev" ]; then
+        SIGN_FLAGS="--require-signing";
+      else
+        SIGN_FLAGS="--sign --allow-missing-secrets";
+      fi
+    - autostation-build platform-installer --config dist/platform-build.json --out dist --signer osslsigncode $SIGN_FLAGS | tee dist/platform-installer.json
+  artifacts:
+    paths:
+      - dist/installers
+      - dist/platform-installer.json
+    expire_in: 90 days
+
+# --- publish: open a registry MR for the new platform version -----------------------------------------
+# Governance gate: the MR review is the promotion decision; broad ring requires a second approval.
+.open-platform-registry-mr:
+  stage: publish
+  image: $BUILDER_IMAGE
+  script:
+    - python /opt/autostation-builder/scripts/ci_registry_mr.py --clone --registry-dir registry-checkout --kind platform --name autostation-platform --version "$PLATFORM_VERSION" --installer "dist/installers/autostation-platform-$PLATFORM_VERSION-setup.exe"
+  environment:
+    name: registry/platform

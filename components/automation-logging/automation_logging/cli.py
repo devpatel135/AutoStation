@@ -87,7 +87,28 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--seed", type=int, default=7)
     s.add_argument("--days", type=int, default=14)
 
+    au = sub.add_parser("audit", help="query archive for LLM classification decisions (Pattern 1/2/3 audit trail)")
+    au.add_argument("--archive", required=True)
+    au.add_argument("--automation", default=None, help="filter to one automation")
+    au.add_argument("--days", type=int, default=30, help="how many days of archive to scan (default 30)")
+    au.add_argument("--min-confidence", type=float, default=None, metavar="0.0-1.0", help="only show decisions at or above this confidence")
+    au.add_argument("--format", dest="fmt", choices=["json", "table"], default="json")
+    au.add_argument("--out", default=None, help="write output to file instead of stdout")
+    au.add_argument("--now", default=None, help="ISO timestamp (testing)")
+
     args = p.parse_args(argv)
+
+    if args.cmd == "audit":
+        from . import audit as _audit
+        result = _audit.run(args.archive, automation=args.automation, days=args.days,
+                            min_confidence=args.min_confidence, now=_now(args.now))
+        text = _audit.format_table(result) if args.fmt == "table" else json.dumps(result, indent=2)
+        if args.out:
+            Path(args.out).write_text(text, encoding="utf-8")
+            print(f"audit: {result['total']} decision(s) written to {args.out}")
+        else:
+            sys.stdout.write(text)
+        return 0
 
     if args.cmd == "ingest":
         from . import ingest
