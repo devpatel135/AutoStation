@@ -321,6 +321,19 @@ body { padding-left:clamp(1rem,2.5vw,2.5rem); padding-right:clamp(1rem,2.5vw,2.5
 header.top { display:flex; align-items:center; gap:1rem; flex-wrap:wrap; padding:.9rem 0 .7rem; }
 header.top .brand { display:flex; align-items:center; gap:.7rem; min-width:0; }
 header.top .brand svg { width:2.3rem; height:auto; flex:none; }
+/* The train chugs in place, constantly: wheels turn, steam puffs rise and fade, the body bobs, the rail ties slide under it.
+   Pure CSS (no script, no external file); anyone with 'reduce motion' set gets the still logo. */
+.train .tr-wheel { transform-box:fill-box; transform-origin:center; animation:tr-spin .8s linear infinite; }
+.train .tr-body { animation:tr-bob .4s ease-in-out infinite alternate; }
+.train .tr-puff { transform-box:fill-box; transform-origin:center; opacity:0; animation:tr-puff 2.4s ease-out infinite; }
+.train .tr-puff.p2 { animation-delay:.8s; }
+.train .tr-puff.p3 { animation-delay:1.6s; }
+.train .tr-rail { animation:tr-rail .3s linear infinite; }
+@keyframes tr-spin { to { transform:rotate(360deg); } }
+@keyframes tr-bob { from { transform:translateY(0); } to { transform:translateY(-.4px); } }
+@keyframes tr-puff { 0% { opacity:0; transform:translate(0,0) scale(.5); } 15% { opacity:.75; } 100% { opacity:0; transform:translate(5px,-9px) scale(1.7); } }
+@keyframes tr-rail { to { stroke-dashoffset:-4.4; } }
+@media (prefers-reduced-motion: reduce) { .train .tr-wheel, .train .tr-body, .train .tr-puff, .train .tr-rail { animation:none; } .train .tr-puff { opacity:0; } }
 header.top .eyebrow { font:600 10px var(--mono); letter-spacing:.12em; text-transform:uppercase; color:var(--accent); }
 #view [id], #view tr[data-auto] { scroll-margin-top:7rem; }
 .tw { overflow-x:auto; max-width:100%; }

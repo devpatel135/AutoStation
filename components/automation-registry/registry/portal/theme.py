@@ -280,13 +280,23 @@ THEME_TOGGLE_JS = r"""
 })();
 """
 
+# The train. Static outline everywhere; the classes (tr-*) let a page animate it (tools/site/site_app.py: wheels turn, steam puffs rise,
+# the body chugs, the rail ties slide). Extra headroom in the viewBox (y from -9) is where the steam goes.
 LOGO_SVG = (
-    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 28 18" width="28" height="18" aria-hidden="true" style="color:var(--ac);flex-shrink:0">'
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="-1 -9 30 28" width="30" height="28" aria-hidden="true" class="train" style="color:var(--ac);flex-shrink:0;overflow:visible">'
+    '<g class="tr-puffs" fill="currentColor">'
+    '<circle class="tr-puff p1" cx="6.2" cy="1.5" r="1.3"/>'
+    '<circle class="tr-puff p2" cx="6.2" cy="1.5" r="1.3"/>'
+    '<circle class="tr-puff p3" cx="6.2" cy="1.5" r="1.3"/>'
+    '</g>'
+    '<g class="tr-body">'
     '<rect x="1" y="6" width="22" height="7" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.5"/>'
     '<rect x="16" y="2" width="7" height="5" rx="1" fill="none" stroke="currentColor" stroke-width="1.5"/>'
     '<rect x="5" y="3" width="2.5" height="3" fill="none" stroke="currentColor" stroke-width="1.2"/>'
-    '<circle cx="5.5" cy="14.5" r="2" fill="none" stroke="currentColor" stroke-width="1.4"/>'
-    '<circle cx="12" cy="14.5" r="2" fill="none" stroke="currentColor" stroke-width="1.4"/>'
-    '<circle cx="18.5" cy="14.5" r="2" fill="none" stroke="currentColor" stroke-width="1.4"/>'
     '<path d="M1 9.5L0 13" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>'
+    '<g class="tr-wheel"><circle cx="5.5" cy="14.5" r="2" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M5.5 12.9V16.1" stroke="currentColor" stroke-width="0.9"/></g>'
+    '<g class="tr-wheel"><circle cx="12" cy="14.5" r="2" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M12 12.9V16.1" stroke="currentColor" stroke-width="0.9"/></g>'
+    '<g class="tr-wheel"><circle cx="18.5" cy="14.5" r="2" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M18.5 12.9V16.1" stroke="currentColor" stroke-width="0.9"/></g>'
+    '</g>'
+    '<path class="tr-rail" d="M-1 17.8H29" fill="none" stroke="currentColor" stroke-width="1" stroke-dasharray="2.2 2.2" opacity="0.55"/>'
     '</svg>')
