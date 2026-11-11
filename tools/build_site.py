@@ -213,7 +213,7 @@ def build(out: Path, repo: Path = ROOT, *, registry: Path | None = None, manifes
     site_landing.build_landing(out, m, cfg, set(docs_info["docs"]), have)
     # ---- single-page app: every page above becomes a view of ONE shell with ONE tab bar; old URLs become redirect stubs ---------
     app = site_app.assemble(out, cfg, m, docs_info)
-    pages = ["index.html", "404.html", "docs/assessment.html"] + [f"views/{t}.json" for t in site_app.TAB_NAMES] + app["stubs"] + [
+    pages = ["index.html", "404.html", "docs/assessment.html"] + [f"views/{t}.json" for t in site_app.TAB_NAMES + list(site_app.LAZY_VIEWS)] + app["stubs"] + [
         p for p in pages if p.startswith("registry/") or p.endswith((".json", ".ps1"))]
     status = {"schema_version": 1, "built_at": cfg.built_at, "build_warnings": list(sc.BUILD_WARNINGS), "commit": cfg.commit, "repo": cfg.repo, "pages_url": cfg.pages_url,
               "mode": "demo" if cfg.demo else ("live" if archive else "no-fleet-data"),

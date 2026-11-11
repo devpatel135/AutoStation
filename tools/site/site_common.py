@@ -95,12 +95,8 @@ def now_iso() -> str:
     return os.environ.get("SITE_NOW") or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-NAV = [("index.html", "Home", "home"), ("install/index.html", "Install", "install"), ("docs/index.html", "Docs", "docs"),
-       ("portal/index.html", "Catalog", "portal"), ("dashboard/index.html", "Dashboard", "dashboard"),
-       ("program/index.html", "Program", "program"), ("jobs/index.html", "Jobs", "jobs"), ("machines/index.html", "Machines", "machines"),
-       ("reliability/index.html", "Reliability", "reliability"), ("errors/index.html", "Errors", "errors"),
-       ("queues/index.html", "Queues", "queues"), ("schedules/index.html", "Schedules", "schedules"),
-       ("audit/index.html", "Audit", "audit"), ("portal/admin.html", "Admin", "admin")]
+# the app has four tabs; the staging pages (extracted into views, never published as pages) still call layout() with the old keys, which just means "no tab highlighted"
+NAV = [("index.html", "Home", "home"), ("install/index.html", "Install", "install"), ("jobs/index.html", "Fleet", "fleet"), ("docs/index.html", "Docs", "docs")]
 
 EXTRA_CSS = r"""
 .gs { position:relative; display:inline-block; margin:0 .4rem; } .gs input { width:15rem; max-width:44vw; padding:.3rem .6rem; border:1px solid var(--border); border-radius:6px; background:var(--surface); color:var(--fg); font:12px var(--mono); }

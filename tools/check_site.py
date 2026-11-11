@@ -13,10 +13,14 @@ from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
-TABS = ["home", "install", "docs", "catalog", "dashboard", "program", "jobs", "machines", "reliability", "errors", "queues", "schedules", "audit", "admin"]
+TABS = ["home", "install", "fleet", "docs"]       # exactly four tabs, one tab bar
+SINGLE = ("fleet", "install")                      # one scrolling view each; their route's second part is a section / row inside it
+LAZY = ["runs"]                                    # views/<name>.json loaded when its host scrolls into view
+FLEET_SECTIONS = ["problems", "automations", "runs", "machines", "schedules", "releases", "admin", "value"]
+SECOND_ROW = re.compile(r'class="(?:[^"]*\s)?(subtabs|nav-tabs|dash-nav)(?:\s[^"]*)?"')   # a second row of tabs anywhere is a regression
 REQUIRED = (["index.html", "404.html", ".nojekyll", "status.json", "assets/site.css", "assets/app.js", "assets/views.js", "assets/jobs.js", "assets/redirect.js",
              "install/catalog.json", "install/bootstrap.ps1", "docs/search-index.json", "docs/assessment.html", "metrics.json", "metrics.prom",
-             "fleet-status.json", "search-ops.json", "badges/fleet.svg"] + [f"views/{t}.json" for t in TABS])
+             "fleet-status.json", "search-ops.json", "badges/fleet.svg"] + [f"views/{t}.json" for t in TABS + LAZY])
 REAL_PAGES = {"index.html", "404.html", "docs/assessment.html"}      # every other .html must be a tiny redirect stub into the app
 ROUTE_RE = re.compile(r"^/(" + "|".join(TABS) + r")(/[A-Za-z0-9_.\-/]+)?(\?[A-Za-z0-9_.\-=&%~]*)?$")
 TAB_LINK = re.compile(r'<a id="tab-([a-z-]+)" role="tab" data-tab="([a-z-]+)" href="#/([a-z-]+)"')
@@ -86,7 +90,7 @@ def _check_inline_scripts(rel: str, info: "_Page") -> list[str]:
 
 def _load_views(site: Path, problems: list[str]) -> dict:
     views: dict = {}
-    for t in TABS:
+    for t in TABS + LAZY:
         f = site / "views" / f"{t}.json"
         if not f.is_file():
             continue
@@ -109,7 +113,16 @@ def _route_exists(route: str, views: dict) -> bool:
         return False
     path = route.split("?")[0].strip("/").split("/")
     tab, sub = path[0], "/".join(path[1:])
-    return tab in views and sub in views[tab]
+    if tab not in views:
+        return False
+    if tab in SINGLE:
+        if not sub:
+            return True
+        main = views[tab].get("", "")
+        if tab == "fleet":
+            return f'id="auto-{sub[2:]}"' in main if sub.startswith("a/") else (sub in FLEET_SECTIONS and f'id="sec-{sub}"' in main)
+        return f'id="a-{sub}"' in main
+    return sub in views[tab]
 
 
 def _check_view(tab: str, sub: str, html_text: str, site: Path, views: dict) -> list[str]:
@@ -117,6 +130,8 @@ def _check_view(tab: str, sub: str, html_text: str, site: Path, views: dict) -> 
     info = _Page()
     info.feed(html_text)
     out: list[str] = []
+    if SECOND_ROW.search(html_text):
+        out.append(f"{name}: a second row of tabs (subtabs / nav-tabs / dash-nav) - the app has exactly one tab bar")
     if info.inline_scripts:
         out.append(f"{name}: executable inline <script> in a view (scripts belong in assets/views.js)")
     if info.handlers:
@@ -183,6 +198,14 @@ def check_site(site: Path) -> list[str]:
     for tab, v in views.items():
         for sub, html_text in v.items():
             problems += _check_view(tab, sub, html_text, site, views)
+    fleet = (views.get("fleet") or {}).get("", "")
+    for sec in FLEET_SECTIONS:
+        if fleet and f'id="sec-{sec}"' not in fleet:
+            problems.append(f"fleet view has no section {sec}")
+    if fleet and 'class="jump"' not in fleet:
+        problems.append("fleet view has no jump menu")
+    if fleet and 'data-lazy="runs"' not in fleet:
+        problems.append("fleet view does not lazy-load the runs table")
     # ---- every other HTML file is a redirect stub (or the 404 / the assessment document) ----------------------------------------------
     for page in sorted(site.rglob("*.html")):
         rel = page.relative_to(site).as_posix()
@@ -203,9 +226,9 @@ def check_site(site: Path) -> list[str]:
             cat = {}
             problems.append("install/catalog.json is not valid JSON")
         for name, entry in (cat.get("automations") or {}).items():
-            text = (views.get("install") or {}).get(name)
-            if text is None:
-                problems.append(f"install view missing for {name}")
+            text = (views.get("install") or {}).get("", "")
+            if f'id="a-{name}"' not in text:
+                problems.append(f"install view missing the details for {name}")
                 continue
             url = (entry.get("installer") or {}).get("url", "")
             if not url or url not in text:

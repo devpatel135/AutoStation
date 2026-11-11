@@ -1,11 +1,18 @@
-/* Live panels of individual views (Home: fleet right now; Catalog: reliability per automation and the automation's recent runs).
-   They read the JSON files the build publishes next to the app (fleet-status.json, metrics.json, dashboard/signals.json, dashboard/runs-latest.json) and
-   draw with createElement/textContent only: telemetry-derived text is never parsed as HTML. When a file is missing (no fleet data yet) the panel says so. */
+/* Live panels of the Home and Fleet views. They read the JSON files the build publishes next to the app (fleet-status.json, metrics.json,
+   dashboard/signals.json, dashboard/runs-latest.json) and draw with createElement/textContent only: telemetry-derived text is never parsed
+   as HTML. When a file is missing (no fleet data yet) the panel says so in plain words. */
 (function () {
   'use strict';
   var NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
   var ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
   var SEV = { critical: 4, high: 3, medium: 2, low: 1 };
+  /* plain-language names for the signal types the analytics produce (unknown types are shown as they are, escaped) */
+  var PLAIN = {
+    FAILED: 'A run failed', MISSED: 'A scheduled run did not happen', SILENT: 'A machine stopped reporting', HUNG: 'A run hung',
+    VERSION_DRIFT: 'A machine is not on the latest version', ERROR_BUDGET_BURN: 'Failing more often than allowed', FLAKY: 'Keeps switching between pass and fail',
+    DURATION_ANOMALY: 'Taking much longer than usual', REGRESSION_AFTER_RELEASE: 'Started failing after a release', REMEDIATION_FAILING: 'The automatic fix keeps failing',
+    PERSISTENT_MANUAL_STEP: 'Waiting for a person', MACHINE_UNHEALTHY: 'A machine keeps failing', ITEM_FAILURES: 'Some items failed', PAUSED: 'Paused'
+  };
 
   function el(tag, text, cls) {
     var e = document.createElement(tag);
@@ -13,11 +20,7 @@
     if (cls) e.className = cls;
     return e;
   }
-  function link(text, route, cls) {
-    var a = el('a', text, cls);
-    a.href = '#' + route;
-    return a;
-  }
+  function link(text, route, cls) { var a = el('a', text, cls); a.href = '#' + route; return a; }
   function pill(text, kind) { return el('span', text, 'pill ' + (kind || '')); }
   function getJSON(url) {
     return fetch(AS.url(url), { credentials: 'same-origin' }).then(function (r) { if (!r.ok) throw new Error('http ' + r.status); return r.json(); }).catch(function () { return null; });
@@ -31,8 +34,11 @@
   function when(iso) { return typeof iso === 'string' ? iso.replace('T', ' ').replace(/\.\d+Z$|Z$/, ' UTC').slice(0, 24) : '-'; }
   function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); }
   function safeName(v) { return typeof v === 'string' && NAME_RE.test(v) ? v : ''; }
-  function runKind(status) { return status === 'success' ? 'ok' : status === 'partial' ? 'medium' : (status === 'failed' || status === 'hung' || status === 'self_heal_failed') ? 'failing' : 'paused'; }
-
+  function plural(n, one, many) { return n + ' ' + (n === 1 ? one : many); }
+  /* the site stylesheet knows these pill kinds: ok (green), warn (amber), bad (red), info, sys (neutral) */
+  function runKind(status) { return status === 'success' ? 'ok' : status === 'partial' ? 'warn' : (status === 'failed' || status === 'hung' || status === 'self_heal_failed') ? 'bad' : 'sys'; }
+  function sevKind(sev) { return sev === 'critical' || sev === 'high' ? 'bad' : sev === 'medium' ? 'warn' : 'sys'; }
+  function newest(runs) { return runs.slice().sort(function (a, b) { return String(b.started_at || '').localeCompare(String(a.started_at || '')); }); }
   function table(headers, rows) {
     var t = el('table'), tr = el('tr');
     headers.forEach(function (h) { tr.appendChild(el('th', h)); });
@@ -45,107 +51,160 @@
     var wrap = el('div', null, 'tw'); wrap.appendChild(t); return wrap;
   }
 
-  /* ------------------------------------------------------------------------------------------------ Home: the fleet right now */
-  AS.hook('home/', function () {
+  /* the one-sentence verdict used on Home and at the top of Fleet */
+  function verdict(fleet, nSignals) {
+    var status = fleet && ['green', 'amber', 'red'].indexOf(fleet.status) >= 0 ? fleet.status : 'grey';
+    var text;
+    if (status === 'green') text = 'Everything is running';
+    else if (status === 'grey') text = 'Waiting for the first run';
+    else if (nSignals > 0) text = (status === 'red' ? 'Action needed: ' : '') + plural(nSignals, 'problem needs attention', 'problems need attention');
+    else text = status === 'red' ? 'Action needed' : 'Needs attention';
+    var detail = '';
+    if (status === 'grey') detail = 'Nothing is shown yet because no installed automation has reported. Install one from the Install tab and let it run once; results appear here within 30 minutes.';
+    else if (fleet && fleet.counts) {
+      var c = fleet.counts, parts = [];
+      ['passing', 'degraded', 'failing', 'paused', 'no data'].forEach(function (k) { if (c[k]) parts.push(c[k] + ' ' + k); });
+      detail = parts.join(' - ') + (fleet.generated_at ? '  (as of ' + when(fleet.generated_at) + ')' : '');
+    }
+    return { status: status, text: text, detail: detail };
+  }
+  function banner(v) {
+    var b = el('div', null, 'status-banner ' + v.status), t = el('div');
+    t.appendChild(el('b', v.text));
+    if (v.detail) t.appendChild(el('div', v.detail, 'sub'));
+    b.appendChild(t);
+    return b;
+  }
+  function signalTitle(s) { var t = String(s.type || ''); return PLAIN[t] || t.slice(0, 60) || 'Problem'; }
+  function sortedSignals(sig) {
+    var sigs = sig && Array.isArray(sig.signals) ? sig.signals : [];
+    return sigs.slice().sort(function (a, b) { return (SEV[b.severity] || 0) - (SEV[a.severity] || 0); });
+  }
+  function totals(metrics) {
+    var out = { names: 0, runs: 0, failed: 0 };
+    if (!metrics || !metrics.automations) return out;
+    Object.keys(metrics.automations).forEach(function (k) { var a = metrics.automations[k] || {}; out.names++; out.runs += a.runs || 0; out.failed += a.failed || 0; });
+    return out;
+  }
+
+  /* ------------------------------------------------------------------------------------------------------------------ Home */
+  AS.hook('home', function () {
     var host = document.getElementById('fleet-now');
     if (!host) return;
-    Promise.all([getJSON('fleet-status.json'), getJSON('dashboard/signals.json'), getJSON('dashboard/runs-latest.json'), getJSON('metrics.json')]).then(function (r) {
-      var fleet = r[0], sig = r[1], runs = r[2], metrics = r[3];
+    Promise.all([getJSON('fleet-status.json'), getJSON('dashboard/signals.json'), getJSON('metrics.json')]).then(function (r) {
+      var fleet = r[0], sigs = sortedSignals(r[1]), t = totals(r[2]);
       clear(host);
-      if (!fleet && !runs && !metrics) {
-        var w = el('div', null, 'status-banner grey');
-        w.appendChild(el('div', null));
-        w.firstChild.appendChild(el('b', 'Waiting for the first run'));
-        w.firstChild.appendChild(el('div', 'Nothing is charted yet because no installed automation has reported. Install one from the Install tab and let it run once - results appear here within 30 minutes.', 'sub'));
-        host.appendChild(w);
-        return;
-      }
-      var status = fleet && ['green', 'amber', 'red'].indexOf(fleet.status) >= 0 ? fleet.status : 'grey';
-      var label = { green: 'Fleet healthy', amber: 'Needs attention', red: 'Action needed', grey: 'No fleet verdict yet' }[status];
-      var banner = el('div', null, 'status-banner ' + status);
-      var txt = el('div'); txt.appendChild(el('b', label));
-      if (fleet && fleet.counts) {
-        var c = fleet.counts, parts = [];
-        ['passing', 'degraded', 'failing', 'paused', 'no data'].forEach(function (k) { if (c[k]) parts.push(c[k] + ' ' + k); });
-        txt.appendChild(el('div', parts.join(' - ') + (fleet.generated_at ? '  (as of ' + when(fleet.generated_at) + ')' : ''), 'sub'));
-      }
-      (fleet && Array.isArray(fleet.reasons) ? fleet.reasons.slice(0, 3) : []).forEach(function (x) { txt.appendChild(el('div', String(x).slice(0, 160), 'sub')); });
-      banner.appendChild(txt); host.appendChild(banner);
-
+      var v = verdict(fleet, sigs.length);
+      host.appendChild(banner(v));
+      if (v.status === 'grey') return;
       var tiles = el('div', null, 'tiles');
       var tile = function (n, l) { var d = el('div', null, 'tile'); d.appendChild(el('div', n, 'n')); d.appendChild(el('div', l, 'l')); tiles.appendChild(d); };
-      if (metrics && metrics.automations) {
-        var total = 0, failed = 0, budget = 0, names = Object.keys(metrics.automations);
-        names.forEach(function (k) { var a = metrics.automations[k] || {}; total += a.runs || 0; failed += a.failed || 0; if (typeof a.error_budget_remaining === 'number' && a.error_budget_remaining <= 0) budget++; });
-        tile(names.length, 'Automations reporting'); tile(total, 'Runs (30 days)');
-        tile(total ? pct(1 - failed / total) : '-', 'Success rate'); tile(budget, 'Error budgets exhausted');
-      }
-      var sigs = sig && Array.isArray(sig.signals) ? sig.signals : [];
-      tile(sigs.length, 'Open signals');
+      tile(t.names, 'Automations reporting'); tile(t.runs, 'Runs (30 days)'); tile(t.runs ? pct(1 - t.failed / t.runs) : '-', 'Success rate'); tile(sigs.length, 'Open problems');
       host.appendChild(tiles);
-
       if (sigs.length) {
-        host.appendChild(el('h2', 'Open signals'));
-        var srt = sigs.slice().sort(function (a, b) { return (SEV[b.severity] || 0) - (SEV[a.severity] || 0); }).slice(0, 6);
-        host.appendChild(table(['Severity', 'Signal', 'Automation', 'Detail'], srt.map(function (s) {
-          var name = safeName(s.automation);
-          return [pill(String(s.severity || 'low'), String(s.severity || 'low')), String(s.type || '').slice(0, 40),
-                  name ? link(name, '/jobs?auto=' + encodeURIComponent(name)) : String(s.automation || '-').slice(0, 60), String(s.detail || '').slice(0, 160)];
-        })));
-        host.appendChild(link('All signals and diagnoses on the Dashboard', '/dashboard'));
-      }
-      var rs = runs && Array.isArray(runs.runs) ? runs.runs.slice().sort(function (a, b) { return String(b.started_at || '').localeCompare(String(a.started_at || '')); }).slice(0, 8) : [];
-      if (rs.length) {
-        host.appendChild(el('h2', 'Latest runs'));
-        host.appendChild(table(['Status', 'Automation', 'Machine', 'Started', 'Duration', ''], rs.map(function (x) {
-          var id = ID_RE.test(String(x.run_id || '')) ? x.run_id : '';
-          return [pill(String(x.status || '?'), runKind(x.status)), String(x.automation || '').slice(0, 80), String(x.host || '-').slice(0, 60), when(x.started_at), dur(x.duration_ms),
-                  id ? link('details', '/jobs?run=' + encodeURIComponent(id)) : ''];
-        })));
-        host.appendChild(link('All runs on the Jobs tab', '/jobs'));
+        host.appendChild(el('h2', 'Needs attention'));
+        var ul = el('ul', null, 'attn');
+        sigs.slice(0, 5).forEach(function (s) {
+          var li = el('li'), name = safeName(s.automation);
+          li.appendChild(pill(String(s.severity || 'low'), sevKind(s.severity)));
+          li.appendChild(el('span', signalTitle(s) + (name ? ' - ' + name : '')));
+          ul.appendChild(li);
+        });
+        host.appendChild(ul);
+        host.appendChild(link('See all ' + sigs.length + ' on the Fleet page', '/fleet/problems'));
       }
     });
   });
 
-  /* ------------------------------------------------------------------------------------------ Catalog: reliability + recent runs */
-  AS.hook('catalog', function (root) {
-    var cards = Array.prototype.slice.call(root.querySelectorAll('article.card[data-name]'));
-    var live = document.getElementById('live-runs');
-    if (!cards.length && !live) return;
-    Promise.all([getJSON('metrics.json'), getJSON('dashboard/runs-latest.json')]).then(function (r) {
-      var metrics = (r[0] && r[0].automations) || {}, runs = (r[1] && Array.isArray(r[1].runs)) ? r[1].runs : [];
-      cards.forEach(function (card) {
-        var name = card.getAttribute('data-name'), m = metrics[name], dl = card.querySelector('dl.kv');
-        if (!m || !dl) return;
-        var dt = el('dt', 'Reliability'), dd = el('dd', pct(m.success_ratio) + ' over ' + (m.runs || 0) + ' runs; error budget left ' + pct(m.error_budget_remaining) + ' (SLO ' + pct(m.slo_target) + ')');
-        dl.appendChild(dt); dl.appendChild(dd);
-      });
-      if (!live) return;
-      var name = live.getAttribute('data-automation');
-      clear(live);
-      live.appendChild(el('h2', 'Live health'));
-      var m = metrics[name];
-      if (!m) { live.appendChild(el('p', 'No run telemetry for this automation yet.', 'sub')); }
-      else {
-        var tiles = el('div', null, 'tiles');
-        var tile = function (n, l) { var d = el('div', null, 'tile'); d.appendChild(el('div', n, 'n')); d.appendChild(el('div', l, 'l')); tiles.appendChild(d); };
-        tile(pct(m.success_ratio), 'Success (30 d)'); tile(pct(m.error_budget_remaining), 'Error budget left'); tile(m.runs || 0, 'Runs');
-        tile(dur(m.duration_ms && m.duration_ms.p95), 'p95 duration'); tile(typeof m.mttr_seconds === 'number' ? dur(m.mttr_seconds * 1000) : '-', 'MTTR');
-        live.appendChild(tiles);
+  /* ------------------------------------------------------------------------------------------------------------------ Fleet */
+  AS.hook('fleet', function (root) {
+    var byName = function (list, n) { return list.filter(function (x) { return x.automation === n; }); };
+    Promise.all([getJSON('fleet-status.json'), getJSON('dashboard/signals.json'), getJSON('dashboard/runs-latest.json'), getJSON('metrics.json')]).then(function (r) {
+      var fleet = r[0], sigs = sortedSignals(r[1]), runs = r[2] && Array.isArray(r[2].runs) ? newest(r[2].runs) : [], metrics = (r[3] && r[3].automations) || {}, t = totals(r[3]);
+      var v = verdict(fleet, sigs.length);
+
+      var fb = document.getElementById('fleet-banner');
+      if (fb) { clear(fb); fb.appendChild(banner(v)); }
+
+      /* Problems: a short list, most serious first; the long-form analysis stays one click away */
+      var pl = document.getElementById('problems-list');
+      if (pl) {
+        clear(pl);
+        if (!sigs.length) pl.appendChild(el('p', v.status === 'grey' ? 'Nothing to show yet.' : 'No problems right now.', 'sub'));
+        sigs.slice(0, 25).forEach(function (s) {
+          var d = el('div', null, 'p ' + String(s.severity || 'low').replace(/[^a-z]/g, ''));
+          d.appendChild(pill(String(s.severity || 'low'), sevKind(s.severity)));
+          var name = safeName(s.automation), host = typeof s.host === 'string' ? s.host.slice(0, 60) : '';
+          d.appendChild(el('span', signalTitle(s) + (name ? ' - ' + name : '') + (host ? ' on ' + host : ''), 't'));
+          if (name) d.appendChild(link('Its runs', '/fleet/runs?auto=' + encodeURIComponent(name)));
+          else d.appendChild(el('span', ''));
+          if (s.detail) d.appendChild(el('div', String(s.detail).slice(0, 240), 'd'));
+          pl.appendChild(d);
+        });
+        if (sigs.length > 25) pl.appendChild(el('p', '+ ' + (sigs.length - 25) + ' more', 'sub'));
       }
-      var mine = runs.filter(function (x) { return x.automation === name; }).sort(function (a, b) { return String(b.started_at || '').localeCompare(String(a.started_at || '')); }).slice(0, 10);
-      live.appendChild(el('h3', 'Recent runs'));
-      if (!mine.length) live.appendChild(el('p', 'None yet.', 'sub'));
-      else live.appendChild(table(['Status', 'Machine', 'Started', 'Duration', 'Synopsis', ''], mine.map(function (x) {
-        var id = ID_RE.test(String(x.run_id || '')) ? x.run_id : '';
-        return [pill(String(x.status || '?'), runKind(x.status)), String(x.host || '-').slice(0, 60), when(x.started_at), dur(x.duration_ms), String(x.synopsis || '').slice(0, 120),
-                id ? link('details', '/jobs?run=' + encodeURIComponent(id)) : ''];
-      })));
-      var nav = el('p');
-      [['All jobs', '/jobs?auto=' + encodeURIComponent(name)], ['Reliability', '/reliability'], ['Errors', '/errors'], ['Schedules', '/schedules']].forEach(function (l, i) {
-        if (i) nav.appendChild(document.createTextNode(' · ')); nav.appendChild(link(l[0], l[1]));
+
+      /* one-sentence headline under every section title */
+      var rows = function (sel) { var tb = root.querySelector(sel + ' tbody'); return tb ? tb.rows.length : 0; };
+      var leads = {
+        problems: sigs.length ? plural(sigs.length, 'open problem', 'open problems') + ', most serious first.' : 'No problems right now.',
+        automations: plural(rows('#autos') / 2, 'automation', 'automations') + '; click a name for versions, schedule and recent runs.',
+        runs: t.runs ? plural(t.runs, 'run', 'runs') + ' in the last 30 days, ' + t.failed + ' failed.' : 'No runs have been reported yet.',
+        machines: rows('#sec-machines') ? plural(rows('#sec-machines'), 'machine', 'machines') + ' reporting.' : 'No machine has reported yet.',
+        schedules: rows('#sec-schedules') ? plural(rows('#sec-schedules'), 'scheduled slot', 'scheduled slots') + ', with the next run times.' : 'Nothing is scheduled yet.',
+        releases: 'What was released to which ring, who changed what, and whether the registry is signed.',
+        admin: 'Pause, resume, promote, roll back or run now. Each action produces the exact command to run.',
+        value: ''
+      };
+      Array.prototype.forEach.call(root.querySelectorAll('[data-lead]'), function (p) { var k = p.getAttribute('data-lead'); if (Object.prototype.hasOwnProperty.call(leads, k)) p.textContent = leads[k]; });
+      var vl = root.querySelector('[data-lead="value"]'); if (vl) vl.textContent = 'hours saved and cost (click to open)';
+
+      /* Automations: success rate and last run per row, recent runs in the row's details */
+      Array.prototype.forEach.call(root.querySelectorAll('tr[data-auto]'), function (tr) {
+        var name = tr.getAttribute('data-auto'), m = metrics[name], mine = byName(runs, name);
+        var ok = tr.querySelector('[data-cell="ok"]'), last = tr.querySelector('[data-cell="last"]');
+        if (ok && m && typeof m.success_ratio === 'number') ok.textContent = pct(m.success_ratio) + ' (' + (m.runs || 0) + ')';
+        if (last && mine.length) { clear(last); last.appendChild(pill(String(mine[0].status || '?'), runKind(mine[0].status))); last.appendChild(document.createTextNode(' ' + when(mine[0].started_at))); }
+        var rec = root.querySelector('.auto-recent[data-recent="' + name.replace(/"/g, '') + '"]');
+        if (rec) {
+          clear(rec);
+          rec.appendChild(el('h3', 'Recent runs'));
+          if (!mine.length) rec.appendChild(el('p', 'None yet.', 'sub'));
+          else rec.appendChild(table(['Status', 'Machine', 'Started', 'Duration', ''], mine.slice(0, 6).map(function (x) {
+            var id = ID_RE.test(String(x.run_id || '')) ? x.run_id : '';
+            return [pill(String(x.status || '?'), runKind(x.status)), String(x.host || '-').slice(0, 60), when(x.started_at), dur(x.duration_ms), id ? link('details', '/fleet/runs?run=' + encodeURIComponent(id)) : ''];
+          })));
+        }
       });
-      live.appendChild(nav);
     });
+
+    /* row toggles (no inline handlers: the CSP forbids them) */
+    Array.prototype.forEach.call(root.querySelectorAll('button.rowbtn[aria-controls]'), function (b) {
+      b.addEventListener('click', function () {
+        var d = document.getElementById(b.getAttribute('aria-controls')); if (!d) return;
+        var open = d.hasAttribute('hidden');
+        if (open) d.removeAttribute('hidden'); else d.setAttribute('hidden', '');
+        b.setAttribute('aria-expanded', open ? 'true' : 'false');
+      });
+    });
+
+    /* the jump menu highlights the section you are in */
+    var jumps = Array.prototype.slice.call(root.querySelectorAll('.jump a[data-jump]'));
+    var secs = jumps.map(function (a) { return document.getElementById('sec-' + a.getAttribute('data-jump')); });
+    var ticking = false;
+    function mark() {
+      ticking = false;
+      var cur = -1;
+      secs.forEach(function (s, i) { if (s && s.getBoundingClientRect().top <= 170) cur = i; });
+      jumps.forEach(function (a, i) { if (i === cur) a.classList.add('on'); else a.classList.remove('on'); });
+    }
+    function onScroll() { if (!ticking) { ticking = true; window.requestAnimationFrame(mark); } }
+    if (window.__asFleetScroll) window.removeEventListener('scroll', window.__asFleetScroll);   /* one scroll listener, however often the view is mounted */
+    window.__asFleetScroll = onScroll;
+    window.addEventListener('scroll', onScroll, { passive: true });
+    jumps.forEach(function (a) {                                     /* a click on the current section still scrolls to it */
+      a.addEventListener('click', function () { if (location.hash === a.getAttribute('href')) { var s = document.getElementById('sec-' + a.getAttribute('data-jump')); if (s) s.scrollIntoView(); } });
+    });
+    mark();
   });
 })();

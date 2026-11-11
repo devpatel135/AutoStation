@@ -30,9 +30,9 @@ sys.path.insert(0, str(ROOT / "components" / "wrapper-core"))
 from wrapper_core import miniyaml  # noqa: E402
 
 OK, WARN, TODO, FAIL = "ok", "warn", "todo", "FAIL"
-TABS = ["home", "install", "docs", "catalog", "dashboard", "program", "jobs", "machines", "reliability", "errors", "queues", "schedules", "audit", "admin"]
+TABS = ["home", "install", "fleet", "docs"]       # the four tabs of the app
 # the site is one single-page app: the shell, its scripts and one views/<tab>.json per tab; "jobs/" is an old URL that must still redirect
-PAGES = ["", "assets/app.js", "assets/views.js", "jobs/"] + [f"views/{t}.json" for t in TABS]
+PAGES = ["", "assets/app.js", "assets/views.js", "assets/jobs.js", "views/runs.json", "jobs/"] + [f"views/{t}.json" for t in TABS]   # jobs/ is an old URL: a redirect stub that must keep answering
 WORKFLOWS = ["ci", "release", "installers", "site", "codeql"]
 
 Fetch = Callable[[str, Optional[str]], Tuple[int, bytes]]

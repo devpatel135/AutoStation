@@ -518,7 +518,7 @@ SAFE_TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,60}$")
 
 
 def _run_now(cfg: SiteConfig, name: str, slot_id: str) -> str:
-    """A prefilled 'run this slot now' recipe: the ops-action workflow (trigger-add) or the Admin tab, which writes the exact shell command."""
+    """A prefilled 'run this slot now' recipe: the ops-action workflow (trigger-add) or the Admin actions section, which writes the exact shell command."""
     if not (SAFE_TOKEN.match(str(name)) and SAFE_TOKEN.match(str(slot_id))):
         return "-"
     params = '{"slot":"%s","params":{}}' % slot_id
@@ -526,7 +526,7 @@ def _run_now(cfg: SiteConfig, name: str, slot_id: str) -> str:
     return ('<details><summary>Run now</summary><div class="sub">'
             f'Open the <a href="{esc(cfg.repo_url)}/actions/workflows/ops-action.yml" rel="noopener">ops-action workflow</a> &rarr; Run workflow: '
             f'action <code>trigger-add</code>, target <code>{esc(name)}</code>, params <code>{esc(params)}</code>. '
-            f'Or use the <a href="../portal/admin.html#{esc(name)}">Admin tab</a> (it writes the exact command for bash and PowerShell). '
+            f'Or use the <a href="../portal/admin.html#{esc(name)}">Admin actions</a> (it writes the exact command for bash and PowerShell). '
             f'Bash: <code>{esc(cmd)}</code><br>The machine picks the trigger up at its next poll (minutes), not instantly.</div></details>')
 
 

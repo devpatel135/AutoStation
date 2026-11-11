@@ -11,24 +11,25 @@ from site_common import ROOT, SiteConfig, esc, harden_html, layout, slug, write
 
 from registry.portal import markdown
 
-# (file stem, group, one-line description) - order matters; unknown docs are appended under "More"
+# (file stem, group, one-line description) - order matters. Only these documents are published: four groups, the ones a user needs first.
+# Everything else in docs/ and the component READMEs stay on GitHub (links to them become GitHub links).
 KNOWN = [
     ("GETTING_STARTED", "Start here", "From a process to a running pilot automation"),
-    ("ACTIVITIES", "Start here", "The activity library: Excel, mail, files, queues, UI, HTTP, database"),
-    ("WRAPPER_CORE_API", "Reference", "wrapper-core API: telemetry, retry, LLM seam, parameters"),
-    ("AUTOMATION_STANDARD", "Reference", "The rules every automation is reviewed against"),
-    ("SPEC", "Reference", "Contracts between components (manifest, logs, broker)"),
-    ("ARCHITECTURE", "Reference", "Repo map and roadmap coverage"),
     ("RUNBOOKS", "Operate", "Kill-switch, rollback, triage, rotation, decommission"),
-    ("GOVERNANCE", "Operate", "Roles, change control, data classification"),
+    ("LIVE_LOGGING", "Operate", "Send run logs to the private logs repository and light up the dashboards"),
     ("PIPELINES", "Operate", "GitHub workflows, secrets, promotion on GitHub"),
+    ("GOVERNANCE", "Operate", "Roles, change control, data classification"),
     ("SITE", "Operate", "How this site is built and published"),
-    ("SECURITY", "Security", "Trust boundaries, controls, known gaps"),
-    ("VERIFY_IN_YOUR_ENVIRONMENT", "Security", "What CI cannot verify for you"),
+    ("ACTIVITIES", "Build", "The activity library: Excel, mail, files, queues, UI, HTTP, database"),
+    ("RECORDER", "Build", "Record a browser automation instead of writing it"),
+    ("AUTOMATION_STANDARD", "Build", "The rules every automation is reviewed against"),
+    ("WRAPPER_CORE_API", "Build", "wrapper-core API: telemetry, retry, LLM seam, parameters"),
+    ("SPEC", "Build", "Contracts between components (manifest, logs, broker)"),
+    ("SECURITY", "Security and design", "Trust boundaries, controls, known gaps"),
+    ("VERIFY_IN_YOUR_ENVIRONMENT", "Security and design", "What CI cannot verify for you"),
+    ("ARCHITECTURE", "Security and design", "Repo map and roadmap coverage"),
 ]
-# repo docs that are deliberately not published on the site
-SKIP = {"UIPATH_MIGRATION", "UIPATH_PARITY"}
-GROUP_ORDER = ["Start here", "Reference", "Operate", "Security", "Components", "More"]
+GROUP_ORDER = ["Start here", "Operate", "Build", "Security and design"]
 
 
 @dataclass
@@ -60,17 +61,6 @@ def collect(repo: Path) -> list[Doc]:
             md = f.read_text(encoding="utf-8")
             docs.append(Doc(stem, _title(md, stem.replace("_", " ").title()), group, desc, f"docs/{stem}.md", md))
             seen.add(stem)
-    for f in sorted((repo / "docs").glob("*.md")) if (repo / "docs").is_dir() else []:
-        if f.stem not in seen and f.stem not in SKIP:
-            md = f.read_text(encoding="utf-8")
-            docs.append(Doc(f.stem, _title(md, f.stem), "More", "", f"docs/{f.name}", md))
-    comp = repo / "components"
-    if comp.is_dir():
-        for d in sorted(p for p in comp.iterdir() if p.is_dir() and not p.name.startswith((".", "_")) and p.name != "node_modules"):
-            r = d / "README.md"
-            if r.is_file():
-                md = r.read_text(encoding="utf-8")
-                docs.append(Doc(f"components-{d.name}", _title(md, d.name), "Components", f"components/{d.name}/README.md", f"components/{d.name}/README.md", md))
     return docs
 
 
@@ -177,7 +167,7 @@ def _nav(docs: list[Doc], current: str | None, depth_prefix: str = "") -> str:
             parts.append(f"<h4>{esc(g)}</h4>")
             for d in by_group[g]:
                 parts.append(f'<a href="{esc(depth_prefix + d.page)}"' + (' class="on"' if d.stem == current else "") + f">{esc(d.title)}</a>")
-    parts.append('<h4>Original</h4><a href="assessment.html">Architecture assessment</a></nav>')
+    parts.append('<h4>Background</h4><a href="assessment.html">Architecture assessment</a></nav>')
     return "".join(parts)
 
 

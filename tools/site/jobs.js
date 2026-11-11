@@ -154,5 +154,5 @@
   readHash(); render();
   if (state.run) show(state.run);
   }
-  if (window.AS) { AS.hook('jobs', jobsView); } else { jobsView(); }
+  if (window.AS) { AS.hook('lazy:runs', jobsView); } else { jobsView(); }
 })();

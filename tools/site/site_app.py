@@ -10,7 +10,10 @@ output directory, which acts as a staging area. ``assemble`` then
 * replaces every old page URL with a tiny redirect stub (bookmarks, docs, issues and installers keep working),
 * and writes the shell, the merged search index and ``assets/app.js``.
 
-Routes:  ``#/<tab>``  ``#/install/<automation>``  ``#/docs/<DOC>``  ``#/catalog/a/<automation>``  ``#/catalog/compatibility|governance``  ``#/<tab>?key=value``
+Routes (exactly four tabs):  ``#/home``  ``#/install[/<automation>]``  ``#/fleet[/<section>|/a/<automation>]``  ``#/docs[/<DOC>]``  ``?key=value``
+Fleet is ONE page: ``#/fleet/runs`` scrolls to its Runs section, ``#/fleet/a/<name>`` opens that automation's row. Install is one page:
+``#/install/<name>`` opens that automation's details. Docs has one view per document. Every OLD route and page URL (jobs, machines, catalog,
+dashboard, admin ...) is mapped to its place in these four by ``route_of`` / ``OLD_TABS`` (redirect stubs for pages, a router alias for hashes).
 """
 from __future__ import annotations
 
@@ -20,43 +23,63 @@ import re
 from pathlib import Path
 
 import site_common as sc
+import site_simple
 from site_common import SiteConfig, esc, write
 
-TABS = [("home", "Home"), ("install", "Install"), ("docs", "Docs"), ("catalog", "Catalog"), ("dashboard", "Dashboard"), ("program", "Program"),
-        ("jobs", "Jobs"), ("machines", "Machines"), ("reliability", "Reliability"), ("errors", "Errors"), ("queues", "Queues"),
-        ("schedules", "Schedules"), ("audit", "Audit"), ("admin", "Admin")]
+TABS = [("home", "Home"), ("install", "Install"), ("fleet", "Fleet"), ("docs", "Docs")]
 TAB_NAMES = [t for t, _ in TABS]
-SIMPLE = {"dashboard", "program", "jobs", "machines", "reliability", "errors", "queues", "schedules", "audit"}
+SINGLE = ("fleet", "install")            # one scrolling view each; the route's second part only focuses something inside it
+LAZY_VIEWS = ("runs",)                    # views/<name>.json fetched when its host scrolls into view (the Runs table can be 2000 rows)
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 KEEP_PAGES = {"404.html", "docs/assessment.html"}          # real pages that remain (the 404 page, the hand-authored assessment document)
-SUBTABS = [("", "Automations"), ("overview", "Overview"), ("health", "Health"), ("fleet", "Fleet"), ("compatibility", "Compatibility"),
-           ("governance", "Governance"), ("audit", "Audit log")]
+# the pages the builders still produce in the staging area, and the Fleet section each one belongs to
+FLEET_OF = {"dashboard": "problems", "program": "value", "jobs": "runs", "machines": "machines", "reliability": "problems", "errors": "problems",
+            "queues": "problems", "schedules": "schedules", "audit": "releases"}
+PORTAL_OF = {"index": "automations", "admin": "admin", "overview": "", "health": "problems", "fleet": "machines", "audit": "releases",
+             "compatibility": "automations"}
+# old hash routes (#/jobs, #/catalog/a/x ...) -> the new route; the router applies the same table (see OLD_TABS in app.js)
+OLD_TABS = {"jobs": "fleet/runs", "machines": "fleet/machines", "catalog": "fleet/automations", "dashboard": "fleet/problems", "program": "fleet/value",
+            "reliability": "fleet/problems", "errors": "fleet/problems", "queues": "fleet/problems", "schedules": "fleet/schedules",
+            "audit": "fleet/releases", "admin": "fleet/admin"}
 
 
 # ---------------------------------------------------------------------------------------------------------------------- routes
-def route_of(rel: str):
-    """(tab, sub) for a generated page path (posix, relative to the site root), or None."""
+def page_key(rel: str):
+    """Identity of a staged page (what it is, not where it lands), or None for a path that is not a generated page."""
     p = rel.strip("/")
     if p in ("", "index.html"):
-        return ("home", "")
+        return "home"
     parts = p.split("/")
-    if len(parts) == 2 and parts[1] == "index.html" and (parts[0] in SIMPLE or parts[0] in ("install", "docs")):
-        return (parts[0], "")
-    if p == "portal/index.html":
-        return ("catalog", "")
-    if p == "portal/admin.html":
-        return ("admin", "")
-    if p in ("portal/overview.html", "portal/health.html", "portal/fleet.html", "portal/audit.html"):
-        return ("catalog", p.split("/")[1][:-5])                 # the registry portal's own views are sub-views of the Catalog tab
-    if p == "portal/compatibility.html":
-        return ("catalog", "compatibility")
-    if p == "portal/governance.html":
-        return ("catalog", "governance")
+    if len(parts) == 2 and parts[1] == "index.html" and (parts[0] in FLEET_OF or parts[0] in ("install", "docs")):
+        return parts[0]
+    if len(parts) == 2 and parts[0] == "portal" and parts[1].endswith(".html") and parts[1][:-5] in PORTAL_OF | {"governance": ""}:
+        return "portal-" + parts[1][:-5]
     if len(parts) == 3 and parts[0] == "portal" and parts[1] == "automation" and parts[2].endswith(".html") and NAME_RE.match(parts[2][:-5]):
-        return ("catalog", "a/" + parts[2][:-5])
+        return "portal-auto:" + parts[2][:-5]
     if len(parts) == 2 and parts[0] in ("install", "docs") and parts[1].endswith(".html") and NAME_RE.match(parts[1][:-5]):
-        return (parts[0], parts[1][:-5])
+        return parts[0] + ":" + parts[1][:-5]
     return None
+
+
+def route_of(rel: str):
+    """(tab, sub) an old generated page path (posix, relative to the site root) lands on in the app, or None."""
+    key = page_key(rel)
+    if key is None:
+        return None
+    if key == "home":
+        return ("home", "")
+    if key in FLEET_OF:
+        return ("fleet", FLEET_OF[key])
+    if key in ("install", "docs"):
+        return (key, "")
+    if key.startswith("portal-auto:"):
+        return ("fleet", "a/" + key.split(":", 1)[1])
+    if key == "portal-governance":
+        return ("docs", "GOVERNANCE")
+    if key.startswith("portal-"):
+        return ("fleet", PORTAL_OF.get(key[7:], ""))
+    tab, _, name = key.partition(":")
+    return (tab, name)
 
 
 def route_str(tab: str, sub: str = "") -> str:
@@ -108,6 +131,7 @@ def esc_attr(v: str) -> str:
 _BODY = re.compile(r"<body[^>]*>(.*)</body>", re.S | re.I)
 _SCRIPT = re.compile(r"<script(?P<attrs>[^>]*)>(?P<body>.*?)</script>", re.S | re.I)
 _BANNER = re.compile(r'<div class="banner" role="note">.*?</div>|<div class="ok-note" role="note" style="margin-bottom:1rem">.*?</div>|<div class="demo-banner">.*?</div>', re.S)
+_PORTAL_STRIP = re.compile(r'<div class="status-strip">.*?<div class="fleet-badge[^>]*>.*?</div></div>', re.S)
 _THEME_BTN = re.compile(r'<button[^>]*id="theme-toggle"[^>]*>.*?</button>', re.S)
 _THEME_HANDLER = re.compile(r"document\.getElementById\('theme-toggle'\)\.addEventListener\('click',\(\)=>\{.*?\n\}\);\n?", re.S)
 _STYLE = re.compile(r"<style>(.*?)</style>", re.S)
@@ -222,6 +246,7 @@ def _scope_selector(sel: str, scope: str) -> str:
 
 def scope_css(css: str, scope: str = ".dash") -> str:
     """Prefix every rule of ``css`` with ``scope`` so a page's own stylesheet cannot leak into the shell (and the shell's cannot be overridden)."""
+    css = re.sub(r"/\*.*?\*/", "", css, flags=re.S)           # comments: one in front of a selector would otherwise become part of it
     out, i, n = [], 0, len(css)
     while i < n:
         j = css.find("{", i)
@@ -248,14 +273,6 @@ def scope_css(css: str, scope: str = ".dash") -> str:
 
 
 # ------------------------------------------------------------------------------------------------------------------ pieces
-def _subtabs(sub: str) -> str:
-    items = []
-    for key, label in SUBTABS:
-        on = (sub == key) or (key == "" and sub.startswith("a/"))
-        items.append(f'<a href="#/catalog{("/" + key) if key else ""}"{" aria-current=page class=on" if on else ""}>{esc(label)}</a>')
-    return f'<nav class="subtabs" aria-label="Catalog sections">{"".join(items)}</nav>'
-
-
 def _redirect_stub(rel: str, tab: str, sub: str) -> str:
     depth = rel.count("/")
     up = "../" * depth
@@ -282,48 +299,82 @@ REDIRECT_JS = r"""/* Old page URL -> the same view inside the single-page app. K
 """
 
 APP_CSS = r"""
-.tabs { display:flex; gap:.15rem; overflow-x:auto; position:sticky; top:0; z-index:10; background:var(--bg); border-bottom:1px solid var(--border); margin:-.4rem 0 1rem; padding-top:.3rem; scrollbar-width:thin; }
-.tabs a { padding:.5rem .8rem; white-space:nowrap; color:var(--fg-muted); border-bottom:2px solid transparent; font-size:13px; }
+:root { --tabs-h:2.9rem; }
+.tabs { display:flex; gap:.2rem; overflow-x:auto; position:sticky; top:0; z-index:10; background:var(--bg); border-bottom:1px solid var(--border); margin:-.4rem 0 1.2rem; padding-top:.3rem; scrollbar-width:thin; }
+.tabs a { padding:.7rem 1.2rem; white-space:nowrap; color:var(--fg-muted); border-bottom:2px solid transparent; font-size:15px; }
 .tabs a:hover { color:var(--fg); text-decoration:none; background:var(--surface); }
 .tabs a[aria-selected="true"] { color:var(--accent); border-bottom-color:var(--accent); font-weight:600; }
-.tabs a:focus-visible, .subtabs a:focus-visible { outline:2px solid var(--accent); outline-offset:-2px; }
+.tabs a:focus-visible, .jump a:focus-visible { outline:2px solid var(--accent); outline-offset:-2px; }
 header.top .tools { margin-left:auto; display:flex; align-items:center; gap:.4rem; flex-wrap:wrap; }
 #view { outline:none; min-height:50vh; }
 #view[aria-busy="true"] { opacity:.6; }
-.subtabs { display:flex; gap:.3rem; margin:0 0 1rem; flex-wrap:wrap; }
-.subtabs a { padding:.25rem .7rem; border:1px solid var(--border); border-radius:999px; font-size:12px; color:var(--fg-muted); }
-.subtabs a.on { background:var(--accent-dim); color:var(--accent); border-color:var(--accent); }
 .embed { width:100%; height:80vh; border:1px solid var(--border); border-radius:8px; background:var(--surface); }
 .dash { padding:0; }
-/* the fleet dashboard brings its own sub-tab strip and status strip, built to be fixed to the viewport: in the app they sit in the flow under the shell's tab bar, full width */
-#view .dash { --nh:44px; --sh:34px; }
-#view .dash nav.dash-nav { position:static; top:auto; left:auto; right:auto; height:var(--nh); padding-inline:.5rem; border:1px solid var(--bd); border-radius:8px 8px 0 0; z-index:1; }
-#view .dash .sstrip { position:static; top:auto; left:auto; right:auto; height:auto; min-height:var(--sh); padding:.3rem .75rem; margin:0 0 1rem; border:1px solid var(--bd); border-top:0; border-radius:0 0 8px 8px; }
-#view .dash .main { padding:0 0 2rem; max-width:none; margin:0; }
-#view .dash .status-strip { position:static; top:auto; left:auto; right:auto; height:auto; min-height:34px; padding:.3rem .75rem; margin:0 0 1rem; border:1px solid var(--bd, var(--border)); border-radius:8px; }
-.status-banner { display:flex; align-items:center; gap:.7rem; padding:.7rem 1rem; border-radius:8px; border:1px solid var(--border); border-left-width:4px; margin:0 0 1rem; background:var(--surface); }
+.status-banner { display:flex; align-items:center; gap:.7rem; padding:.9rem 1.1rem; border-radius:8px; border:1px solid var(--border); border-left-width:5px; margin:0 0 1rem; background:var(--surface); }
 .status-banner.green { border-left-color:var(--green); } .status-banner.amber { border-left-color:var(--yellow); } .status-banner.red { border-left-color:var(--red); } .status-banner.grey { border-left-color:var(--fg-dim); }
-.status-banner b { font-size:1rem; }
-.rowlink { display:grid; grid-template-columns:7rem 1fr auto; gap:.6rem; align-items:center; padding:.4rem .6rem; border:1px solid var(--border); border-radius:6px; margin:.3rem 0; background:var(--surface); color:var(--fg); }
+.status-banner b { font-size:1.25rem; }
+.lead { color:var(--fg-muted); font-size:15px; margin:.2rem 0 .8rem; }
+.advisory { font-size:12px; color:var(--fg-dim); margin:.4rem 0 1rem; }
 /* FULL WIDTH: the tab bar, header and every view span the viewport; long prose keeps a readable measure inside the wide container */
 body { padding-left:clamp(1rem,2.5vw,2.5rem); padding-right:clamp(1rem,2.5vw,2.5rem); }
-.page { max-width:none; margin:0; width:100%; }
-#view [id] { scroll-margin-top:3.6rem; }
+.page { max-width:none; margin:0; width:100%; padding:0 0 40px; }   /* the shared portal theme reserves room for a fixed top bar this app does not have */
+header.top { display:flex; align-items:center; gap:1rem; flex-wrap:wrap; padding:.9rem 0 .7rem; }
+header.top .brand { display:flex; align-items:center; gap:.7rem; min-width:0; }
+header.top .brand svg { width:2.3rem; height:auto; flex:none; }
+header.top .eyebrow { font:600 10px var(--mono); letter-spacing:.12em; text-transform:uppercase; color:var(--accent); }
+#view [id], #view tr[data-auto] { scroll-margin-top:7rem; }
 .tw { overflow-x:auto; max-width:100%; }
-.md p, .md li, .md blockquote, .hero p, .summary, .panel > p, .warnbox, .steps li > div, .panel li, p.sub, .banner { max-width:90ch; }
+.md p, .md li, .md blockquote, .panel > p, .warnbox, .steps li > div, .panel li, p.sub { max-width:90ch; }
+/* Home */
+.home h1, .install h1 { font-size:1.9rem; margin:.2rem 0 .4rem; }
+.quick { display:flex; gap:.7rem; flex-wrap:wrap; margin:1.2rem 0; }
+.quick .btn { padding:.7rem 1.4rem; font-size:15px; }
+.fleet-now .tiles { margin:.6rem 0 1rem; }
+.attn { list-style:none; margin:.4rem 0 0; padding:0; }
+.attn li { display:flex; gap:.6rem; align-items:baseline; padding:.45rem .6rem; border:1px solid var(--border); border-radius:6px; margin:.3rem 0; background:var(--surface); }
+/* Install */
+.iitem { border:1px solid var(--border); border-radius:10px; background:var(--surface); padding:1rem 1.2rem; margin:.9rem 0; }
+.irow { display:flex; gap:1rem; align-items:center; justify-content:space-between; flex-wrap:wrap; }
+.iname { font:600 1.1rem var(--mono); } .isum { color:var(--fg-muted); margin:.2rem 0 .4rem; max-width:80ch; } .irings .pill { margin-right:.25rem; }
+.btn.big { padding:.75rem 1.5rem; font-size:15px; }
+details.idetails, details.more, details.hint { margin:.7rem 0 0; }
+details > summary { cursor:pointer; color:var(--accent); font-size:13.5px; }
+details.idetails > summary:focus-visible, details.more > summary:focus-visible, details.hint > summary:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+.ibody { margin-top:.8rem; }
+/* Fleet */
+.jump { position:sticky; top:var(--tabs-h); z-index:9; display:flex; gap:.3rem; overflow-x:auto; background:var(--bg); border-bottom:1px solid var(--border); padding:.4rem 0; margin:0 0 1rem; scrollbar-width:thin; }
+.jump a { padding:.3rem .8rem; border-radius:999px; font-size:13px; color:var(--fg-muted); white-space:nowrap; border:1px solid transparent; }
+.jump a:hover { text-decoration:none; color:var(--fg); background:var(--surface); }
+.jump a.on { background:var(--accent-dim); color:var(--accent); border-color:var(--accent); }
+.fsec { margin:0 0 2.2rem; scroll-margin-top:7rem; }
+.fsec > h2 { margin:.2rem 0 .1rem; font-size:1.25rem; }
+details.coll > summary { list-style:none; display:flex; align-items:baseline; gap:.8rem; cursor:pointer; }
+details.coll > summary::-webkit-details-marker { display:none; }
+details.coll > summary h2 { display:inline; margin:0; font-size:1.25rem; color:var(--fg); }
+details.coll > summary::before { content:"+"; color:var(--accent); font-weight:700; width:1rem; }
+details.coll[open] > summary::before { content:"-"; }
+.problems .p { display:grid; grid-template-columns:auto 1fr auto; gap:.2rem .8rem; align-items:baseline; padding:.6rem .8rem; border:1px solid var(--border); border-left-width:4px; border-radius:6px; margin:.4rem 0; background:var(--surface); }
+.problems .p.critical, .problems .p.high { border-left-color:var(--red); } .problems .p.medium { border-left-color:var(--yellow); } .problems .p.low { border-left-color:var(--fg-dim); }
+.problems .p .t { font-weight:600; } .problems .p .d { grid-column:2 / 4; color:var(--fg-muted); font-size:13px; }
+.rowbtn { background:none; border:0; color:var(--accent); font:600 13.5px var(--mono); cursor:pointer; padding:0; text-align:left; }
+.rowbtn::before { content:"+ "; } .rowbtn[aria-expanded="true"]::before { content:"- "; }
+tr.detail > td { background:var(--surface2); padding:1rem 1.2rem; }
+.acts { display:flex; gap:.5rem; flex-wrap:wrap; margin:.8rem 0 0; }
+h3.grp { margin:1.2rem 0 .3rem; font-size:1rem; color:var(--fg-muted); }
 .docs-layout { grid-template-columns:minmax(210px,270px) minmax(0,1fr); gap:clamp(1rem,2vw,2.5rem); }
-.docs-nav { top:3.6rem; }
+.docs-nav { top:6.5rem; }
 .md pre, .md table { max-width:100%; }
 .grid { grid-template-columns:repeat(auto-fill,minmax(min(100%,340px),1fr)); }
 .split > #drawer { margin:1rem 0 0; }
 @media (min-width:1100px) {
   .split:has(> #drawer:not([hidden])) { display:grid; grid-template-columns:minmax(0,1fr) minmax(22rem,30rem); gap:1rem; align-items:start; }
-  .split > #drawer { position:sticky; top:3.6rem; max-height:calc(100vh - 4.6rem); overflow:auto; margin:0; }
+  .split > #drawer { position:sticky; top:7rem; max-height:calc(100vh - 8rem); overflow:auto; margin:0; }
 }
 @media (min-width:1800px) { .tiles { grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); } }
 #view :not(pre) > code { overflow-wrap:anywhere; }
-#view .md p, #view .md li, #view .md blockquote, #view .panel > p, #view .panel li, #view .summary { overflow-wrap:break-word; }   /* slash- or dash-joined lists with no spaces break too */   /* a long command or path in running text wraps instead of widening the page */
-@media (max-width:760px) { .docs-layout { grid-template-columns:minmax(0,1fr); } .docs-nav { position:static; max-height:none; } .tbl-wrap, .md table { max-width:100%; overflow-x:auto; display:block; } }
+#view .md p, #view .md li, #view .md blockquote, #view .panel > p, #view .panel li, #view .summary, #view .isum, #view .lead { overflow-wrap:break-word; }
+@media (max-width:760px) { .docs-layout { grid-template-columns:minmax(0,1fr); } .docs-nav { position:static; max-height:none; } .tbl-wrap, .md table { max-width:100%; overflow-x:auto; display:block; }
+  .tabs a { padding:.65rem .9rem; font-size:14px; } .problems .p { grid-template-columns:1fr; } .problems .p .d { grid-column:1; } .irow { align-items:flex-start; } }
 @media (max-width:760px) { header.top .tools { margin-left:0; width:100%; } .gs input { width:100%; max-width:none; } .gs { display:block; margin:0; width:100%; flex:1; } }
 """
 
@@ -357,7 +408,7 @@ def shell(cfg: SiteConfig, status: dict | None = None) -> str:
   <div class="tools"><form id="gs-form" class="gs" role="search"><input id="gsearch" type="search" maxlength="80" placeholder="Search automations, runs, errors, docs  ( / )" aria-label="Search automations, runs, errors and docs" autocomplete="off"><ul id="gs-results" hidden></ul></form><button id="theme-toggle" type="button" title="Toggle light/dark theme" aria-label="Toggle theme">Theme</button></div>
 </header>
 <nav id="tabs" class="tabs" role="tablist" aria-label="Sections">{links}</nav>
-{sc.TELEMETRY_BANNER}{banner}
+{banner}
 <main id="view" role="tabpanel" tabindex="-1"><noscript><p>AutoStation is a static single-page app and needs JavaScript. The registry and installers do not: <a href="registry/manifest.yaml">registry/manifest.yaml</a>.</p></noscript><p>Loading&hellip;</p></main>
 <footer class="foot">{esc(cfg.title)} &middot; built {esc(cfg.built_at)} {('&middot; commit ' + esc(cfg.commit)) if cfg.commit else ''} &middot;
 <a href="{esc(cfg.repo_url)}">{esc(cfg.repo)}</a> &middot; <a href="status.json">status.json</a> &middot; static site: no server, no tracking.</footer>
@@ -368,7 +419,7 @@ def shell(cfg: SiteConfig, status: dict | None = None) -> str:
 def page_404(cfg: SiteConfig) -> str:
     home = cfg.pages_url
     body = ('<h1>Page not found</h1><p>That page does not exist (or has not been built yet). Go to the '
-            f'<a href="{esc(home)}">AutoStation home</a> - the install center, docs, catalog and dashboards are all tabs on that one page.</p>')
+            f'<a href="{esc(home)}">AutoStation home</a> - Install, Fleet and Docs are the three places to go from there.</p>')
     return (f'<!doctype html><html lang="en"><head><meta charset="utf-8">{sc.csp_meta(sc.theme.THEME_HEAD_JS)}'
             f'<meta name="viewport" content="width=device-width,initial-scale=1"><title>Not found - AutoStation</title>'
             f'<script>{sc.theme.THEME_HEAD_JS}</script><link rel="stylesheet" href="{esc(home)}assets/site.css"></head>'
@@ -377,11 +428,14 @@ def page_404(cfg: SiteConfig) -> str:
 
 # ------------------------------------------------------------------------------------------------------------------ assemble
 def assemble(out: Path, cfg: SiteConfig, manifest: dict | None = None, docs_info: dict | None = None) -> dict:
+    """Compose the four views (home, install, fleet, docs) + the lazy Runs view from the staged pages, replace every old page with a redirect stub."""
     out = Path(out)
-    views: dict[str, dict[str, str]] = {t: {} for t in TAB_NAMES}
+    manifest = manifest or {}
+    staged: dict[str, str] = {}
     hooks: list[tuple[str, str]] = []
     stubs: list[tuple[str, str, str]] = []
     unknown: list[str] = []
+    script_keys = {"jobs": "lazy:runs", "portal-admin": "fleet"}          # whose page scripts the app still needs, and when they run
     for f in sorted(out.rglob("*.html")):
         rel = f.relative_to(out).as_posix()
         if rel in KEEP_PAGES or rel.startswith("registry/") or "/evidence/" in rel:
@@ -391,18 +445,32 @@ def assemble(out: Path, cfg: SiteConfig, manifest: dict | None = None, docs_info
         if not r:
             unknown.append(rel)
             continue
-        tab, sub = r
+        key = page_key(rel)
         ex = extract(text)
+        if key.startswith("portal-"):                                   # the portal's own status strip (fixed to its old top bar) has no place in the app
+            ex["html"] = _PORTAL_STRIP.sub("", ex["html"], count=1)
         html_text = rewrite_links(ex["html"], rel, r)
         if ex["css"]:
             html_text = f"<style>{scope_css(ex['css'])}</style><div class=\"dash\">{html_text}</div>"
-        if tab == "catalog":
-            html_text = _subtabs(sub) + html_text
-        views[tab][sub] = html_text
-        key = tab + ("/" + sub if sub else "/")
-        for code in ex["scripts"]:
-            hooks.append((key, code))
-        stubs.append((rel, tab, sub))
+        staged[key] = html_text
+        if key in script_keys:
+            hooks.extend((script_keys[key], code) for code in ex["scripts"])
+        elif key == "docs" or key.startswith("docs:"):
+            hooks.extend((f"docs/{r[1]}" if r[1] else "docs/", code) for code in ex["scripts"])
+        stubs.append((rel, r[0], r[1]))
+
+    views: dict[str, dict[str, str]] = {t: {} for t in TAB_NAMES}
+    views["home"][""] = site_simple.home_view(cfg, manifest)
+    views["install"][""] = site_simple.install_view(cfg, manifest, {k.split(":", 1)[1]: v for k, v in staged.items() if k.startswith("install:")})
+    views["fleet"][""] = site_simple.fleet_view(cfg, manifest, staged)
+    for k, v in staged.items():
+        if k == "docs":
+            views["docs"][""] = v
+        elif k.startswith("docs:"):
+            views["docs"][k.split(":", 1)[1]] = v
+    runs_body, runs_hint = site_simple.strip_chrome(staged.get("jobs", ""))
+    runs_view = (site_simple._hint(runs_hint) + runs_body) if runs_body else (
+        '<p class="sub">Nothing to show yet: runs appear after an installed automation reports. Install one from the Install tab and let it run once.</p>')
 
     # the hand-authored assessment document stays a real file and is shown inside the Docs tab
     if (out / "docs" / "assessment.html").is_file() and "" in views["docs"]:
@@ -422,6 +490,7 @@ def assemble(out: Path, cfg: SiteConfig, manifest: dict | None = None, docs_info
 
     for tab in TAB_NAMES:
         write(out, f"views/{tab}.json", json.dumps(views[tab], separators=(",", ":"), ensure_ascii=True, sort_keys=True))
+    write(out, "views/runs.json", json.dumps({"": runs_view}, separators=(",", ":"), ensure_ascii=True))
 
     # view scripts: each registers a hook that runs after its view is mounted
     parts = ["/* generated: scripts that belong to individual views (see tools/site/site_app.py). Each runs after its view is inserted. */"]
@@ -438,7 +507,7 @@ def assemble(out: Path, cfg: SiteConfig, manifest: dict | None = None, docs_info
     for old in ("assets/gsearch.js", "assets/site.js"):
         (out / old).unlink(missing_ok=True)
 
-    merge_search(out, manifest or {}, docs_info or {})
+    merge_search(out, manifest, docs_info or {})
     write(out, "index.html", shell(cfg))
     write(out, "404.html", page_404(cfg))
     return {"views": {t: sorted(v) for t, v in views.items()}, "stubs": [s[0] for s in stubs] + unknown}
@@ -464,7 +533,7 @@ def merge_search(out: Path, manifest: dict, docs_info: dict) -> None:
     seen = {it["u"] for it in fixed}
     for name, e in (manifest.get("automations") or {}).items():
         if NAME_RE.match(str(name)):
-            u = f"/catalog/a/{name}"
+            u = f"/fleet/a/{name}"
             if u not in seen:
                 fixed.append({"t": "catalog", "n": str(name), "s": sc_clean((e or {}).get("description") or "automation", 100), "u": u})
     sidx = out / "docs" / "search-index.json"
