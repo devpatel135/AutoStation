@@ -12,9 +12,9 @@ compatibility:
 components:
   wrapper-core:
     rings:
-      dev: "0.6.1"
-      pilot: "0.6.1"
-      broad: "0.6.1"
+      dev: "0.7.0"
+      pilot: "0.7.0"
+      broad: "0.7.0"
     versions:
       "0.2.0":
         url: artifacts/components/wrapper-core-0.2.0.zip
@@ -43,11 +43,14 @@ components:
       "0.6.1":
         url: artifacts/components/wrapper-core-0.6.1.zip
         sha256: "8401838d434def158c60c77e33854c35fb13f62343ea9faefb8f3fc906bff72a"
+      "0.7.0":
+        url: artifacts/components/wrapper-core-0.7.0.zip
+        sha256: "325e37a95ac589740675c1e3cab0f77c780c3d8fced9029dffc7842e4a7563fc"
   execution-framework:
     rings:
-      dev: "0.4.0"
-      pilot: "0.4.0"
-      broad: "0.4.0"
+      dev: "0.4.1"
+      pilot: "0.4.1"
+      broad: "0.4.1"
     versions:
       "0.2.0":
         url: artifacts/components/execution-framework-0.2.0.zip
@@ -58,6 +61,9 @@ components:
       "0.4.0":
         url: artifacts/components/execution-framework-0.4.0.zip
         sha256: a03b2d15be653dcd2e0242bc8cc58a6f814bac915a57f59d767eeed55696ac6b
+      "0.4.1":
+        url: artifacts/components/execution-framework-0.4.1.zip
+        sha256: b56ba5af7bea556d90eb5ac683ae09f556b46c8038818e2a01e5a777be5cca68
 assets:
   default:
     internal_api_url: "https://api.example.internal"
@@ -76,9 +82,9 @@ automations:
     paused_reason: ""
     llm_allowed_classification: internal
     rings:
-      dev: "1.1.0"
-      pilot: "1.1.0"
-      broad: "1.1.0"
+      dev: "1.1.1"
+      pilot: "1.1.1"
+      broad: "1.1.1"
     versions:
       "1.0.0":
         url: artifacts/automations/automation-certification-site-1.0.0.zip
@@ -89,6 +95,12 @@ automations:
       "1.1.0":
         url: artifacts/automations/automation-certification-site-1.1.0.zip
         sha256: "93d0828cdce6bd21e679d3e51bd364c9531c80e65a3407ef24b572d1404d3fa1"
+        requires:
+          wrapper_core: ">=0.1.0,<1.0.0"
+          execution_framework: ">=0.1.0,<1.0.0"
+      "1.1.1":
+        url: artifacts/automations/automation-certification-site-1.1.1.zip
+        sha256: "353ddc380dc74bf56281ea80a10cc0a03753682f4e4baadad8074cd44ce63da6"
         requires:
           wrapper_core: ">=0.1.0,<1.0.0"
           execution_framework: ">=0.1.0,<1.0.0"
