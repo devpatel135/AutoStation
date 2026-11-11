@@ -202,13 +202,15 @@ def build_jobs(out: Path, cfg: SiteConfig, data, now) -> list[str]:
 <label>Machine<br><select id="f-host"><option value="">any</option>{opt(hosts)}</select></label>
 <label>Ring<br><select id="f-ring"><option value="">any</option><option>dev</option><option>pilot</option><option>broad</option></select></label>
 <span id="job-count" class="sub" aria-live="polite"></span></form>
+<div class="split"><div class="split-main">
 <div class="tw"><table id="jobs"><thead><tr>
 <th data-sort="status">Status</th><th data-sort="auto">Automation</th><th data-sort="host">Machine</th><th data-sort="ring">Ring</th><th>Version</th>
 <th data-sort="ts">Started (UTC)</th><th data-sort="dur">Duration</th><th>Items ok/failed/skipped</th><th>Synopsis</th><th></th></tr></thead>
 <tbody>{"".join(rows)}</tbody></table></div>
 <div id="pager" class="sub" style="margin:.6rem 0"><button type="button" id="prev">Previous</button> <span id="pageinfo"></span> <button type="button" id="next">Next</button></div>
+</div>
 <aside id="drawer" class="panel" role="dialog" aria-label="Run details" hidden>
-<button type="button" id="drawer-close" style="float:right">Close</button><h2 id="drawer-title">Run</h2><div id="drawer-body"></div></aside>
+<button type="button" id="drawer-close" style="float:right">Close</button><h2 id="drawer-title">Run</h2><div id="drawer-body"></div></aside></div>
 <noscript><p class="warnbox">Filtering, sorting and the details drawer need JavaScript; the table above is complete without it.</p></noscript>
 """
     write(out, "jobs/runs-detail.json", json.dumps(detail, sort_keys=True, separators=(",", ":")))
@@ -338,9 +340,29 @@ def queue_and_approval_state(data, now) -> dict:
             "approvals_breached": breached}
 
 
+def _queues_reference() -> str:
+    """Always shown: how a person decides an approval and how an automation reports queue health (works before any data exists)."""
+    cmds = ("python -m wrapper_core approvals list\n"
+            "python -m wrapper_core approvals show &lt;task-id&gt;\n"
+            "python -m wrapper_core approvals approve &lt;task-id&gt; --note &quot;checked invoice 1042&quot;\n"
+            "python -m wrapper_core approvals reject &lt;task-id&gt;\n"
+            "python -m wrapper_core approvals ui")
+    return (
+        '<h2>Deciding an approval</h2><div class="two"><div class="panel"><h3>On the machine that asked</h3>'
+        '<p class="sub">An automation that needs a human creates a task; the person on that machine is notified. Decide it with:</p>'
+        f"<pre><code>{cmds}</code></pre>"
+        '<p class="sub"><code>ui</code> opens a local page (127.0.0.1, one-time token) with the task details and Approve / Reject buttons. '
+        "An undecided task is rejected when it expires (default-deny); every decision is audited.</p></div>"
+        '<div class="panel"><h3>How queues and approvals show up here</h3>'
+        '<p class="sub">Automations report <code>queue_stats</code> (queue, pending, in_progress, done, failed, dead_letter, sla_breached, oldest_age_s), '
+        "<code>approval_requested</code> and <code>approval_decided</code> events in their run record; this tab shows the latest report per automation and queue, "
+        "approvals that are waiting (with SLA breaches) and recent decisions. Queues are per machine: the durable queue is local, so each machine reports its own.</p>"
+        '<p class="sub">Data here is telemetry from installed machines: treat it as advisory and confirm on the machine before acting.</p></div></div>')
+
+
 def build_queues(out: Path, cfg: SiteConfig, data, now) -> list[str]:
     if data is None or not (getattr(data, "runs", None) or getattr(data, "lifecycle", None)):
-        return [_page("Queues & approvals", "queues", _waiting("Queue and approval activity"), cfg, out, "queues/index.html")]
+        return [_page("Queues & approvals", "queues", _waiting("Queue and approval activity") + _queues_reference(), cfg, out, "queues/index.html")]
     st = queue_and_approval_state(data, now)
     qrows = [[esc(q["automation"]), esc(q["queue"]), str(q["pending"]), str(q["in_progress"]), str(q["done"]), str(q["failed"]),
               (_pill(str(q["dead_letter"]), "failing") if q["dead_letter"] else "0"),
@@ -362,7 +384,8 @@ def build_queues(out: Path, cfg: SiteConfig, data, now) -> list[str]:
             "<h2>Queues</h2>" + _table(["Automation", "Queue", "Pending", "In progress", "Done", "Failed", "Dead letter", "SLA breached", "Oldest item", "Reported"], qrows,
                                       "No queue statistics reported yet.") +
             "<h2>Approvals waiting</h2>" + _table(["Automation", "Task", "Title", "Requested", "Waiting", "State"], orows, "No approvals are waiting.") +
-            "<h2>Recent decisions</h2>" + _table(["Automation", "Task", "Title", "Decision", "By", "Decided", "Time to decide"], drows, "No decisions recorded yet."))
+            "<h2>Recent decisions</h2>" + _table(["Automation", "Task", "Title", "Decision", "By", "Decided", "Time to decide"], drows, "No decisions recorded yet.") +
+            _queues_reference())
     return [_page("Queues & approvals", "queues", body, cfg, out, "queues/index.html")]
 
 
@@ -491,6 +514,22 @@ def _in_maintenance(t: datetime, windows, tz_name) -> bool:
     return False
 
 
+SAFE_TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,60}$")
+
+
+def _run_now(cfg: SiteConfig, name: str, slot_id: str) -> str:
+    """A prefilled 'run this slot now' recipe: the ops-action workflow (trigger-add) or the Admin tab, which writes the exact shell command."""
+    if not (SAFE_TOKEN.match(str(name)) and SAFE_TOKEN.match(str(slot_id))):
+        return "-"
+    params = '{"slot":"%s","params":{}}' % slot_id
+    cmd = f"gh workflow run ops-action.yml --repo {cfg.repo} -f action=trigger-add -f target={name} -f reason='run now' -f params='{params}'"
+    return ('<details><summary>Run now</summary><div class="sub">'
+            f'Open the <a href="{esc(cfg.repo_url)}/actions/workflows/ops-action.yml" rel="noopener">ops-action workflow</a> &rarr; Run workflow: '
+            f'action <code>trigger-add</code>, target <code>{esc(name)}</code>, params <code>{esc(params)}</code>. '
+            f'Or use the <a href="../portal/admin.html#{esc(name)}">Admin tab</a> (it writes the exact command for bash and PowerShell). '
+            f'Bash: <code>{esc(cmd)}</code><br>The machine picks the trigger up at its next poll (minutes), not instantly.</div></details>')
+
+
 def build_schedules(out: Path, cfg: SiteConfig, manifest: dict, now) -> list[str]:
     rows = []
     for name, entry in sorted((manifest.get("automations") or {}).items()):
@@ -510,15 +549,15 @@ def build_schedules(out: Path, cfg: SiteConfig, manifest: dict, now) -> list[str
                          esc(_s(slot.get("time") or slot.get("cron") or slot.get("every_minutes") or slot.get("every") or "", 40)),
                          esc(_s(tz_name, 40) or "UTC"),
                          (_pill("paused", "paused") + " " if paused else "") + ("<br>".join(cells) if cells else esc(note or "no upcoming runs in the next 62 days")),
-                         esc(note if cells and note else "")])
+                         esc(note if cells and note else ""), _run_now(cfg, _s(name, 100), _s(slot.get("id"), 60))])
     body = ('<p class="sub">Next fire times computed from the manifest (UTC). Machines run a slot via Windows Task Scheduler at the slot time in the schedule timezone; '
             "a machine that was off runs it at the next start (StartWhenAvailable). Paused automations and maintenance windows do not run.</p>" +
-            _table(["Automation", "Slot", "Type", "When", "Timezone", "Next runs (UTC)", "Note"], rows, "No schedules are defined in the manifest."))
+            _table(["Automation", "Slot", "Type", "When", "Timezone", "Next runs (UTC)", "Note", "Run now"], rows, "No schedules are defined in the manifest."))
     return [_page("Schedules", "schedules", body, cfg, out, "schedules/index.html")]
 
 
 # ------------------------------------------------------------------------------------------------------------------ AUDIT
-def signing_status(manifest_bytes: bytes | None, sig_text: str | None) -> dict:
+def signing_status(manifest_bytes: bytes | None, sig_text: str | None, triggers_bytes: bytes | None = None) -> dict:
     if sig_text is None:
         return {"state": "unsigned", "detail": "No manifest.yaml.sig is published: endpoints cannot verify who published this registry. "
                                                 "Set REGISTRY_SIGNING_SEED (tools/setup_live.py) to sign it."}
@@ -529,6 +568,15 @@ def signing_status(manifest_bytes: bytes | None, sig_text: str | None) -> dict:
     if not isinstance(doc, dict):
         return {"state": "invalid", "detail": "manifest.yaml.sig is not an object."}
     info = {"key_id": _s(doc.get("key_id"), 16), "signed_at": _s(doc.get("signed_at"), 40)}
+    seq = doc.get("seq")
+    if isinstance(seq, int) and not isinstance(seq, bool) and 0 <= seq < 10 ** 12:
+        info["seq"] = seq
+    extras = doc.get("extras") if isinstance(doc.get("extras"), dict) else {}
+    tdig = extras.get("triggers.json")
+    if isinstance(tdig, str) and re.fullmatch(r"[0-9a-f]{64}", tdig):
+        info["triggers_sha256"] = tdig
+        if triggers_bytes is not None:
+            info["triggers_match"] = hashlib.sha256(triggers_bytes).hexdigest() == tdig
     try:
         from wrapper_core import trust
         keys = trust.configured_keys(None)
@@ -545,6 +593,22 @@ def signing_status(manifest_bytes: bytes | None, sig_text: str | None) -> dict:
         return {"state": "invalid", "detail": _s(exc, 200), **info}
 
 
+def _signing_kv(sig: dict) -> str:
+    rows = []
+    if sig.get("key_id"):
+        rows.append(("Key id", esc(sig["key_id"])))
+    if sig.get("signed_at"):
+        rows.append(("Signed at", esc(sig["signed_at"])))
+    if "seq" in sig:
+        rows.append(("Sequence", f'{esc(sig["seq"])} <span class="sub">(anti-rollback: machines with a pinned key refuse a validly signed manifest with a lower sequence)</span>'))
+    if sig.get("triggers_sha256"):
+        state = ("" if "triggers_match" not in sig else (" " + _pill("matches the published file", "ok") if sig["triggers_match"] else " " + _pill("does NOT match the published file", "failing")))
+        rows.append(("triggers.json digest", f'<span class="sha">{esc(sig["triggers_sha256"])}</span>{state}'))
+    if not rows:
+        return ""
+    return '<div class="kv">' + "".join(f"<b>{esc(k)}</b><span>{v}</span>" for k, v in rows) + "</div>"
+
+
 def build_audit(out: Path, cfg: SiteConfig, manifest: dict, data, repo: Path, registry_dir: Path | None, now) -> list[str]:
     parts = []
     # signing
@@ -553,11 +617,14 @@ def build_audit(out: Path, cfg: SiteConfig, manifest: dict, data, repo: Path, re
         mp, sp = Path(registry_dir) / "manifest.yaml", Path(registry_dir) / "manifest.yaml.sig"
         mbytes = mp.read_bytes() if mp.is_file() else None
         sig_text = sp.read_text(encoding="utf-8", errors="replace") if sp.is_file() else None
-    sig = signing_status(mbytes, sig_text)
+        tp = Path(registry_dir) / "triggers.json"
+        tbytes = tp.read_bytes() if tp.is_file() else None
+    else:
+        tbytes = None
+    sig = signing_status(mbytes, sig_text, tbytes)
     kind = {"valid": "ok", "present": "medium", "unsigned": "medium", "invalid": "failing"}[sig["state"]]
     parts.append("<h2>Registry signing</h2><div class=\"panel\">" + _pill(sig["state"], kind) +
-                 f' {esc(sig["detail"])}' + (f'<div class="kv"><b>Key id</b><span>{esc(sig["key_id"])}</span><b>Signed at</b><span>{esc(sig["signed_at"])}</span></div>'
-                                              if sig.get("key_id") or sig.get("signed_at") else "") + "</div>")
+                 f' {esc(sig["detail"])}' + _signing_kv(sig) + "</div>")
     # operator actions
     hist = []
     hp = Path(repo) / "components" / "automation-registry" / "history" / "CHANGELOG.md"

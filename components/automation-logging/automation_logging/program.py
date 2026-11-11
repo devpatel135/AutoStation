@@ -188,7 +188,6 @@ def render(p: dict) -> str:
     ap = A.append
     ap('<!doctype html><html lang="en"><head><meta charset="utf-8">' + CSP_META + '<meta name="viewport" content="width=device-width,initial-scale=1">'
        "<title>AUTOSTATION Program dashboard</title>"
-       '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&family=IBM+Plex+Mono:wght@400;700&display=swap">'
        f"<style>{DASH_CSS}</style></head><body><div class=\"page\">")
     ap(TELEMETRY_BANNER)
     ap(f'<header><div><div class="eyebrow">AUTOSTATION &middot; Program</div><h1>Automation programme: value &amp; health</h1>'

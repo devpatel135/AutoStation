@@ -46,8 +46,8 @@ CSS = """\
   --warn:#f59e0b;--warn-lo:rgba(245,158,11,.13);
   --crit:#ef4444;--crit-lo:rgba(239,68,68,.13);
   --mute:#64748b;--mute-lo:rgba(100,116,139,.13);
-  --mono:'JetBrains Mono',ui-monospace,Consolas,monospace;
-  --sans:'Inter',system-ui,-apple-system,sans-serif;
+  --mono:ui-monospace,SFMono-Regular,Consolas,Menlo,monospace;
+  --sans:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;
   --nh:52px;--sh:38px;
   color-scheme:dark;
 }
@@ -176,10 +176,8 @@ code{font-family:var(--mono);font-size:11px;background:var(--sf2);padding:1px 5p
 @media(max-width:640px){.kpi-v{font-size:18px;}.agrid{grid-template-columns:1fr;}}
 """
 
-_FONT_LINK = (
-    '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?'
-    'family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap">'
-)
+# No web fonts: the site loads nothing from outside its own origin (privacy + the strict CSP below). System font stacks are used.
+_FONT_LINK = ""
 
 _NAV_SVG = """\
 <nav role="navigation">
@@ -460,8 +458,7 @@ _THEME_SCRIPT_HASH = _csp_hash(THEME_JS)
 
 CSP_META = (
     "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; img-src data:; "
-    "style-src 'unsafe-inline'; font-src https://fonts.gstatic.com; "
-    "style-src-elem 'unsafe-inline' https://fonts.googleapis.com; "
+    "style-src 'unsafe-inline'; "
     f"script-src {_RENDER_SCRIPT_HASH} {_THEME_SCRIPT_HASH}; base-uri 'none'; form-action 'none'\">"
 )
 

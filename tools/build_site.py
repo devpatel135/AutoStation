@@ -31,7 +31,7 @@ sys.path.insert(0, str(HERE / "site"))
 
 import site_common as sc  # noqa: E402
 from site_common import ROOT, SiteConfig, esc, now_iso, write  # noqa: E402
-import site_docs, site_install, site_landing, site_obs, site_ops  # noqa: E402
+import site_app, site_docs, site_install, site_landing, site_obs, site_ops  # noqa: E402
 
 from registry import store as reg_store  # noqa: E402
 from registry.portal import build as portal_build  # noqa: E402
@@ -44,24 +44,6 @@ hourly_cost: 55
 uipath: {license_cost_per_robot_per_year: 12000, robots_retired: 4, orchestrator_cost_per_year: 30000}
 llm_cost_per_1k_calls: 0
 """
-
-
-def _inject(html_path: Path, snippet: str) -> None:
-    if not html_path.is_file():
-        return
-    text = html_path.read_text(encoding="utf-8")
-    for marker in ('<div class="page">', '<main class="main">'):
-        if marker in text and snippet not in text:
-            html_path.write_text(text.replace(marker, marker + snippet, 1), encoding="utf-8")
-            return
-
-
-def decorate_dashboard_pages(out: Path, cfg: SiteConfig) -> None:
-    back = '<p style="margin:.2rem 0 .8rem"><a href="../index.html">&larr; AutoStation home</a> &middot; <a href="../program/index.html">Program</a> &middot; <a href="../dashboard/index.html">Fleet dashboard</a> &middot; <a href="../portal/index.html">Catalog</a></p>'
-    demo = ('<div style="border:1px dashed #fbbf24;border-radius:6px;padding:.5rem .9rem;margin-bottom:1rem;font-size:12.5px">'
-            "<strong>DEMO DATA.</strong> Synthetic fleet history for illustration - not your fleet. See docs/PIPELINES.md to enable live analytics.</div>") if cfg.demo else ""
-    for rel in ("dashboard/index.html", "program/index.html"):
-        _inject(out / rel, back + demo)
 
 
 def sha256_of(p: Path) -> str:
@@ -160,7 +142,6 @@ def build(out: Path, repo: Path = ROOT, *, registry: Path | None = None, manifes
     dash_info: dict = {}
     if archive:
         dash_info = build_dashboards(out, archive, data_manifest or manifest_path, cfg, program_cfg, now)
-        decorate_dashboard_pages(out, cfg)
         pages += ["dashboard/index.html", "program/index.html"]
         for e in dash_info.get("errors", []):
             cfg.notes.append(f"dashboard stage {e.get('stage')}: {e.get('error')}")
@@ -176,7 +157,8 @@ def build(out: Path, repo: Path = ROOT, *, registry: Path | None = None, manifes
 
     # ---- registry portal --------------------------------------------------------------------------------------
     pcfg = dict(portal_cfg)
-    pcfg.update({"home_url": "../index.html", "github_repo": cfg.repo, "platform": "github", "installer_url_template": cfg.installer_url_template})
+    pcfg.update({"home_url": "../index.html", "github_repo": cfg.repo, "platform": "github", "installer_url_template": cfg.installer_url_template,
+                 "install_page_template": "../install/{name}.html"})
     pcfg_file = tmp_root / "portal.config.json"
     pcfg_file.write_text(json.dumps(pcfg), encoding="utf-8")
     sig = out / "dashboard" / "signals.json"
@@ -229,8 +211,10 @@ def build(out: Path, repo: Path = ROOT, *, registry: Path | None = None, manifes
     if (out / "registry" / "manifest.yaml").is_file():
         have["registry"] = True
     site_landing.build_landing(out, m, cfg, set(docs_info["docs"]), have)
-    nf = ('<h1>Page not found</h1><p>That page does not exist (or has not been built yet). Try the <a href="/">home page</a>, the install center, or search the docs.</p>')
-    write(out, "404.html", sc.layout("Not found", nf.replace('href="/"', f'href="{esc(cfg.pages_url)}"'), cfg=cfg, depth=0))
+    # ---- single-page app: every page above becomes a view of ONE shell with ONE tab bar; old URLs become redirect stubs ---------
+    app = site_app.assemble(out, cfg, m, docs_info)
+    pages = ["index.html", "404.html", "docs/assessment.html"] + [f"views/{t}.json" for t in site_app.TAB_NAMES] + app["stubs"] + [
+        p for p in pages if p.startswith("registry/") or p.endswith((".json", ".ps1"))]
     status = {"schema_version": 1, "built_at": cfg.built_at, "build_warnings": list(sc.BUILD_WARNINGS), "commit": cfg.commit, "repo": cfg.repo, "pages_url": cfg.pages_url,
               "mode": "demo" if cfg.demo else ("live" if archive else "no-fleet-data"),
               "registry": {"manifest_sha256": sha256_of(manifest_path), "automations": len(m.get("automations") or {}),

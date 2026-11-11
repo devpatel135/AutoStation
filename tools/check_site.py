@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Check a generated site directory: required files, every relative link/src resolves (incl. #anchors), install pages are complete.
+"""Check a generated site directory (the single-page app): required files, one shell with one tab bar, every view's links resolve to a view or a file,
+nothing executable or external inside views, every other HTML file is a redirect stub, install views are complete, observability files are sane.
 
     python tools/check_site.py site            # exit 1 on any problem
 """
@@ -12,10 +13,13 @@ from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
-REQUIRED = ["index.html", "404.html", ".nojekyll", "status.json", "assets/site.css", "assets/site.js", "install/index.html", "install/catalog.json",
-            "install/bootstrap.ps1", "docs/index.html", "docs/search-index.json", "portal/index.html", "portal/admin.html", "dashboard/index.html",
-            "program/index.html", "jobs/index.html", "machines/index.html", "queues/index.html", "schedules/index.html", "audit/index.html",
-            "reliability/index.html", "errors/index.html", "metrics.json", "metrics.prom", "fleet-status.json", "search-ops.json", "assets/gsearch.js", "badges/fleet.svg"]
+TABS = ["home", "install", "docs", "catalog", "dashboard", "program", "jobs", "machines", "reliability", "errors", "queues", "schedules", "audit", "admin"]
+REQUIRED = (["index.html", "404.html", ".nojekyll", "status.json", "assets/site.css", "assets/app.js", "assets/views.js", "assets/jobs.js", "assets/redirect.js",
+             "install/catalog.json", "install/bootstrap.ps1", "docs/search-index.json", "docs/assessment.html", "metrics.json", "metrics.prom",
+             "fleet-status.json", "search-ops.json", "badges/fleet.svg"] + [f"views/{t}.json" for t in TABS])
+REAL_PAGES = {"index.html", "404.html", "docs/assessment.html"}      # every other .html must be a tiny redirect stub into the app
+ROUTE_RE = re.compile(r"^/(" + "|".join(TABS) + r")(/[A-Za-z0-9_.\-/]+)?(\?[A-Za-z0-9_.\-=&%~]*)?$")
+TAB_LINK = re.compile(r'<a id="tab-([a-z-]+)" role="tab" data-tab="([a-z-]+)" href="#/([a-z-]+)"')
 
 
 class _Page(HTMLParser):
@@ -80,47 +84,117 @@ def _check_inline_scripts(rel: str, info: "_Page") -> list[str]:
     return out
 
 
+def _load_views(site: Path, problems: list[str]) -> dict:
+    views: dict = {}
+    for t in TABS:
+        f = site / "views" / f"{t}.json"
+        if not f.is_file():
+            continue
+        try:
+            v = json.loads(f.read_text(encoding="utf-8"))
+        except ValueError:
+            problems.append(f"views/{t}.json is not valid JSON")
+            continue
+        if not isinstance(v, dict) or not all(isinstance(k, str) and isinstance(x, str) for k, x in v.items()):
+            problems.append(f"views/{t}.json is not a map of strings")
+            continue
+        if not v.get("", "").strip():
+            problems.append(f"views/{t}.json has no main view")
+        views[t] = v
+    return views
+
+
+def _route_exists(route: str, views: dict) -> bool:
+    if not ROUTE_RE.match(route):
+        return False
+    path = route.split("?")[0].strip("/").split("/")
+    tab, sub = path[0], "/".join(path[1:])
+    return tab in views and sub in views[tab]
+
+
+def _check_view(tab: str, sub: str, html_text: str, site: Path, views: dict) -> list[str]:
+    name = f"views/{tab}.json[{sub or 'main'}]"
+    info = _Page()
+    info.feed(html_text)
+    out: list[str] = []
+    if info.inline_scripts:
+        out.append(f"{name}: executable inline <script> in a view (scripts belong in assets/views.js)")
+    if info.handlers:
+        out.append(f"{name}: inline event handler {info.handlers[0]}")
+    for tag, attr, val in info.links:
+        v = val.strip()
+        if not v or v.startswith(("mailto:", "tel:")):
+            continue
+        if v.startswith("http://"):
+            out.append(f"{name}: insecure http:// link {v[:60]}")
+        elif v.startswith("https://"):
+            if tag != "a":
+                out.append(f"{name}: external {tag} {v[:60]} (the app loads nothing from outside its own origin)")
+        elif v.lower().startswith(("javascript:", "data:")):
+            out.append(f"{name}: {v.split(':')[0]}: URL")
+        elif v.startswith("#"):
+            if not v.startswith("#/") or not _route_exists(v[1:], views):
+                out.append(f"{name}: link to a route that does not exist: {v[:80]}")
+        else:
+            path = unquote(urlsplit(v).path)
+            tgt = (site / path).resolve()
+            if site.resolve() not in tgt.parents and tgt != site.resolve():
+                out.append(f"{name}: link escapes the site: {v[:80]}")
+            elif not tgt.exists() and not path.startswith(("registry/", "dashboard/evidence/")):
+                out.append(f"{name}: broken link {v[:80]}")
+    return out
+
+
+def _check_stub(rel: str, text: str, views: dict) -> list[str]:
+    m = re.search(r'data-route="([^"]*)"', text)
+    out = []
+    route = unquote(m.group(1)).replace("&amp;", "&") if m else ""
+    if not m or not _route_exists(route, views):
+        out.append(f"{rel}: redirect stub points at a route that does not exist ({m.group(1) if m else 'no data-route'})")
+    if len(text) > 2500 or "<nav" in text or "<header" in text:
+        out.append(f"{rel}: not a tiny redirect stub - every page except index/404/assessment must redirect into the app")
+    return out
+
+
 def check_site(site: Path) -> list[str]:
     site = Path(site)
     problems: list[str] = []
     for rel in REQUIRED:
         if not (site / rel).exists():
             problems.append(f"missing required file: {rel}")
-    pages = {p: parse(p) for p in sorted(site.rglob("*.html"))}
-    for page, info in pages.items():
-        rel = page.relative_to(site).as_posix()
-        problems += _check_inline_scripts(rel, info)
+    views = _load_views(site, problems)
+    # ---- the shell: one header, one tab bar with exactly the tabs of the route table, hash-only CSP -------------------------------
+    shell = site / "index.html"
+    if shell.is_file():
+        info = parse(shell)
+        problems += _check_inline_scripts("index.html", info)
+        if not info.csp:
+            problems.append("index.html: no Content-Security-Policy")
+        text = shell.read_text(encoding="utf-8")
+        found = [t[0] for t in TAB_LINK.findall(text) if t[0] == t[1] == t[2]]
+        if found != TABS:
+            problems.append(f"index.html: tab bar {found} does not match the route table {TABS}")
+        if text.count('id="tabs"') != 1 or text.count('<header class="top">') != 1:
+            problems.append("index.html: the app must have exactly one header and one tab bar")
         for tag, attr, val in info.links:
-            v = val.strip()
-            if not v or v.startswith(("http://", "https://", "mailto:", "data:", "tel:")):
-                if v.startswith("http://"):
-                    problems.append(f"{rel}: insecure http:// link {v[:60]}")
-                if tag in ("script",) and v.startswith(("http://", "https://")):
-                    problems.append(f"{rel}: external script {v[:60]} (the site must not load third-party scripts)")
-                continue
-            if v.lower().startswith("javascript:"):
-                problems.append(f"{rel}: javascript: URL")
-                continue
-            parts = urlsplit(v)
-            path_part = unquote(parts.path)
-            target = page if not path_part else (page.parent / path_part).resolve()
-            if path_part.endswith("/") or (target.is_dir() if path_part else False):
-                target = target / "index.html"
-            try:
-                inside = site.resolve() in target.resolve().parents or target.resolve() == site.resolve()
-            except OSError:
-                inside = False
-            if not inside:
-                problems.append(f"{rel}: link escapes the site: {v}")
-                continue
-            if not target.exists():
-                problems.append(f"{rel}: broken link {v}")
-                continue
-            if parts.fragment and target.suffix == ".html":
-                tinfo = pages.get(target) or parse(target)
-                if "=" not in parts.fragment and parts.fragment not in tinfo.ids:   # "#run=<id>" style fragments are client-side view state
-                    problems.append(f"{rel}: anchor #{parts.fragment} not found in {target.relative_to(site).as_posix()}")
-    # install pages
+            if val.startswith(("http://", "https://")) and tag in ("script", "link", "iframe", "img"):
+                problems.append(f"index.html: external {tag} {val[:60]}")
+    # ---- views ----------------------------------------------------------------------------------------------------------------------
+    for tab, v in views.items():
+        for sub, html_text in v.items():
+            problems += _check_view(tab, sub, html_text, site, views)
+    # ---- every other HTML file is a redirect stub (or the 404 / the assessment document) ----------------------------------------------
+    for page in sorted(site.rglob("*.html")):
+        rel = page.relative_to(site).as_posix()
+        if rel in REAL_PAGES or rel.startswith("registry/") or "/evidence/" in rel:
+            continue
+        problems += _check_stub(rel, page.read_text(encoding="utf-8", errors="replace"), views)
+    ass = site / "docs" / "assessment.html"
+    if ass.is_file():
+        problems += _check_inline_scripts("docs/assessment.html", parse(ass))
+        if re.search(r"https?://(fonts\.|cdn|unpkg)", ass.read_text(encoding="utf-8", errors="replace")):
+            problems.append("docs/assessment.html loads something from outside the site (fonts/CDN)")
+    # ---- install views ---------------------------------------------------------------------------------------------------------------
     cat_path = site / "install" / "catalog.json"
     if cat_path.exists():
         try:
@@ -129,33 +203,32 @@ def check_site(site: Path) -> list[str]:
             cat = {}
             problems.append("install/catalog.json is not valid JSON")
         for name, entry in (cat.get("automations") or {}).items():
-            page = site / "install" / f"{name}.html"
-            if not page.exists():
-                problems.append(f"install page missing for {name}")
+            text = (views.get("install") or {}).get(name)
+            if text is None:
+                problems.append(f"install view missing for {name}")
                 continue
-            text = page.read_text(encoding="utf-8")
             url = (entry.get("installer") or {}).get("url", "")
             if not url or url not in text:
-                problems.append(f"install/{name}.html has no download link to {url or '(no installer url)'}")
+                problems.append(f"install view for {name} has no download link to {url or '(no installer url)'}")
             if "SHA-256" not in text:
-                problems.append(f"install/{name}.html has no SHA-256 block")
+                problems.append(f"install view for {name} has no SHA-256 block")
             if "Get-FileHash" not in text:
-                problems.append(f"install/{name}.html has no verify instructions")
+                problems.append(f"install view for {name} has no verify instructions")
     status = site / "status.json"
     if status.exists():
         try:
             json.loads(status.read_text(encoding="utf-8"))
         except ValueError:
             problems.append("status.json is not valid JSON")
-    problems += check_observability(site)
+    problems += check_observability(site, views)
     return problems
 
 
 _PROM_LINE = re.compile(r'^(#( HELP| TYPE) [a-z_:][a-z0-9_:]* .+|[a-z_:][a-z0-9_:]*(\{([a-z_][a-z0-9_]*="([^"\\]|\\.)*"(,|(?=\})))*\})? -?[0-9.eE+-]+)$')
-_SAFE_REL = re.compile(r"^[A-Za-z0-9_\-/.#=&%]+$")
+_SAFE_REL = re.compile(r"^[A-Za-z0-9_\-/.#=&%?~]+$")
 
 
-def check_observability(site: Path) -> list[str]:
+def check_observability(site: Path, views: dict | None = None) -> list[str]:
     """metrics.json / metrics.prom / fleet-status.json / badges / search-ops.json: well-formed, bounded, nothing executable."""
     out: list[str] = []
     for name in ("metrics.json", "fleet-status.json"):
@@ -176,18 +249,23 @@ def check_observability(site: Path) -> list[str]:
             items = json.loads(idx.read_text(encoding="utf-8"))
         except ValueError:
             items, _ = [], out.append("search-ops.json is not valid JSON")
-        if not isinstance(items, list) or len(items) > 1000 or idx.stat().st_size > 400_000:
+        if not isinstance(items, list) or len(items) > 2000 or idx.stat().st_size > 800_000:
             out.append("search-ops.json is not a bounded list")
         else:
             for it in items:
                 u = it.get("u") if isinstance(it, dict) else None
-                if not isinstance(u, str) or not _SAFE_REL.match(u) or u.startswith("/") or ".." in u or ":" in u:
+                if not isinstance(u, str) or not _SAFE_REL.match(u) or ".." in u or ":" in u or u.startswith("//"):
                     out.append(f"search-ops.json: unsafe or malformed link {str(u)[:60]!r}")
                     break
-                tgt = u.split("#")[0]
-                if tgt and not (site / tgt).exists():
-                    out.append(f"search-ops.json: link target does not exist: {tgt}")
-                    break
+                if u.startswith("/"):                      # an in-app route (the published form): it must exist
+                    if views and not _route_exists(u, views):
+                        out.append(f"search-ops.json: link target is not a route of the app: {u[:80]}")
+                        break
+                else:                                      # a staged page path (before the app is assembled): the page must exist
+                    tgt = u.split("#")[0]
+                    if tgt and not (site / tgt).exists():
+                        out.append(f"search-ops.json: link target does not exist: {tgt}")
+                        break
     for svg in sorted((site / "badges").glob("*.svg")) if (site / "badges").is_dir() else []:
         t = svg.read_text(encoding="utf-8").lower()
         if "<script" in t or "javascript:" in t or re.search(r"\son[a-z]+=", t):
@@ -202,7 +280,7 @@ def main(argv: list[str] | None = None) -> int:
     for p in probs:
         print("PROBLEM", p)
     n = len(list(site.rglob("*.html"))) if site.exists() else 0
-    print(f"checked {n} html page(s) in {site}: {len(probs)} problem(s)")
+    print(f"checked {n} html file(s) in {site}: {len(probs)} problem(s)")
     return 1 if probs else 0
 
 

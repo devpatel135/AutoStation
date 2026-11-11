@@ -182,7 +182,7 @@ def write_assets(out: Path) -> None:
 
 # Pages load only same-origin CSS/JS (plus the small inline theme bootstrap) and fetch only the same-origin search index.
 CSP = ("default-src 'none'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'{hashes}; "
-       "connect-src 'self'; base-uri 'none'; form-action 'none'")
+       "connect-src 'self'; frame-src 'self'; base-uri 'none'; form-action 'none'")
 # Scripts: same-origin files plus EXACTLY the inline blocks this generator authored (allowed by SHA-256), never 'unsafe-inline' - so markup
 # injected through a forged telemetry value cannot execute even if escaping failed somewhere. style-src keeps 'unsafe-inline' (the pages use style
 # attributes; CSS cannot run script). A <meta> CSP cannot carry frame-ancestors (GitHub Pages sets no headers): clickjacking is out of scope here.
@@ -205,8 +205,8 @@ TELEMETRY_BANNER = f'<div class="banner" role="note"><strong>Advisory data.</str
 
 
 # Hand-authored standalone pages copied into the site (docs/assessment.html): inline style/script and Google Fonts, nothing else.
-CSP_STANDALONE = ("default-src 'none'; img-src data:; style-src 'unsafe-inline'; font-src https://fonts.gstatic.com; "
-                  "style-src-elem 'unsafe-inline' https://fonts.googleapis.com; script-src{hashes}; base-uri 'none'; form-action 'none'")
+CSP_STANDALONE = ("default-src 'none'; img-src data:; style-src 'unsafe-inline'; script-src{hashes}; base-uri 'none'; form-action 'none'")
+_FONT_LINK = re.compile(r"<link[^>]*(?:fonts\.googleapis\.com|fonts\.gstatic\.com)[^>]*>", re.I)
 # The hand-authored page wires its tabs with inline onclick="show('x')" handlers, which a hash-based CSP would block: they become
 # data-show attributes and one extra, hashed script binds them.
 _SHOW_HANDLER = re.compile(r"""\sonclick="show\('([A-Za-z0-9_-]+)'\)\"""")
@@ -227,6 +227,7 @@ def harden_html(text: str) -> str:
     inline event-handler attributes after the rewrite is refused (it would silently stop working under this CSP)."""
     if "Content-Security-Policy" in text:
         return text
+    text = _FONT_LINK.sub("", text)      # the site loads nothing from outside its own origin: the page falls back to system fonts
     text = _SHOW_HANDLER.sub(lambda m: f' data-show="{m.group(1)}"', text)
     if _ANY_HANDLER.search(_ANY_INLINE_SCRIPT.sub("", text)):
         raise ValueError("standalone page has inline event handlers that the hash-based CSP would block; use addEventListener")

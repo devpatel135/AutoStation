@@ -36,6 +36,15 @@ def build_landing(out, m: dict, cfg: SiteConfig, doc_stems: set[str], have: dict
 <h1>Unattended automation that anyone can install and everyone can operate</h1>
 <p>Scripted automations (Python, Node, PowerShell) run under Windows Task Scheduler as the signed-in user, heal and update themselves from a git-governed registry,
 log every item they process, and fall back to an LLM only where fixed logic cannot decide. No Orchestrator server, no per-robot licence.</p></section>
+<div class="quick">
+<a class="btn primary" href="install/index.html">Install an automation</a>
+<a class="btn" href="dashboard/index.html">Fleet dashboard</a>
+<a class="btn" href="jobs/index.html">Recent jobs</a>
+<a class="btn" href="{esc(cfg.issue_url('bug-automation-failure.yml'))}" rel="noopener">Report a problem</a>
+<a class="btn" href="{esc(cfg.issue_url('new-automation-request.yml'))}" rel="noopener">Request an automation</a>
+<a class="btn" href="{esc(cfg.repo_url)}/actions" rel="noopener">Pipelines</a>
+</div>
+<section id="fleet-now" aria-live="polite" aria-label="Fleet right now"><p class="sub">Loading fleet status&hellip;</p></section>
 {stats}
 <h2>Start here</h2>
 <div class="roles">{roles}</div>

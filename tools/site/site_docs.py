@@ -66,7 +66,7 @@ def collect(repo: Path) -> list[Doc]:
             docs.append(Doc(f.stem, _title(md, f.stem), "More", "", f"docs/{f.name}", md))
     comp = repo / "components"
     if comp.is_dir():
-        for d in sorted(p for p in comp.iterdir() if p.is_dir()):
+        for d in sorted(p for p in comp.iterdir() if p.is_dir() and not p.name.startswith((".", "_")) and p.name != "node_modules"):
             r = d / "README.md"
             if r.is_file():
                 md = r.read_text(encoding="utf-8")
@@ -148,7 +148,7 @@ SEARCH_JS = r"""
   var box = document.getElementById('docsearch'), res = document.getElementById('docresults'); if (!box || !res) return;
   var index = null, loading = false;
   function load(cb) { if (index) return cb(); if (loading) return; loading = true;
-    fetch('search-index.json').then(function (r) { return r.json(); }).then(function (j) { index = j; cb(); })
+    fetch('docs/search-index.json').then(function (r) { return r.json(); }).then(function (j) { index = j; cb(); })
       .catch(function () { res.textContent = 'Search needs the site to be served over http(s).'; }); }
   function run() {
     var q = box.value.trim().toLowerCase(); res.textContent = ''; if (q.length < 2) return;
@@ -159,7 +159,7 @@ SEARCH_JS = r"""
       hits.push([score, e]); });
     hits.sort(function (a, b) { return b[0] - a[0]; });
     hits.slice(0, 12).forEach(function (h) { var e = h[1], a = document.createElement('a'), s = document.createElement('small');
-      a.setAttribute('href', e.doc + '#' + e.anchor); a.textContent = e.title + ' - ' + e.heading; s.textContent = e.text.slice(0, 140); a.appendChild(s); res.appendChild(a); });
+      a.setAttribute('href', '#/docs/' + String(e.doc).replace(/\.html$/, '') + '?a=' + e.anchor); a.textContent = e.title + ' - ' + e.heading; s.textContent = e.text.slice(0, 140); a.appendChild(s); res.appendChild(a); });
     if (!hits.length) res.textContent = 'No matches.';
   }
   box.addEventListener('input', function () { load(run); });

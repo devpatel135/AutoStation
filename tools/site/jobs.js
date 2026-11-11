@@ -3,6 +3,7 @@
    Safety: every value that came from telemetry is put on the page with textContent / setAttribute only (no HTML parsing, no dynamic code). */
 (function () {
   'use strict';
+  function jobsView() {
   var table = document.getElementById('jobs');
   if (!table) return;
   var tbody = table.tBodies[0];
@@ -17,7 +18,7 @@
   document.getElementById('jobfilter').addEventListener('submit', function (e) { e.preventDefault(); });
 
   function readHash() {
-    var p = new URLSearchParams((location.hash || '').replace(/^#/, ''));
+    var p = window.AS ? AS.params() : new URLSearchParams((location.hash || '').replace(/^#/, ''));
     ['q', 'status', 'auto', 'host', 'ring'].forEach(function (k) {
       var el = F[k], v = (p.get(k) || '').slice(0, 100);
       if (!el) return;
@@ -37,6 +38,7 @@
     if (state.sort !== 'ts' || state.dir !== 'desc') p.set('sort', state.sort + ':' + state.dir);
     if (state.page > 1) p.set('page', String(state.page));
     if (state.run) p.set('run', state.run);
+    if (window.AS) { var o = {}; p.forEach(function (v, k) { o[k] = v; }); AS.setParams(o); return; }
     var h = p.toString();
     try { history.replaceState(null, '', location.pathname + location.search + (h ? '#' + h : '')); } catch (e) { /* file:// */ }
   }
@@ -94,7 +96,7 @@
   function section(title) { dbody.appendChild(el('h3', title)); }
 
   function loadDetail() {
-    if (!detailPromise) detailPromise = fetch('runs-detail.json', { credentials: 'same-origin' }).then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+    if (!detailPromise) detailPromise = fetch(window.AS ? AS.url('jobs/runs-detail.json') : 'jobs/runs-detail.json', { credentials: 'same-origin' }).then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
       .then(function (j) { detail = j; return j; });
     return detailPromise;
   }
@@ -131,7 +133,9 @@
       section('Failure evidence');
       if (!(d.evidence || []).length) dbody.appendChild(el('p', 'None captured for this run.', 'sub'));
       (d.evidence || []).forEach(function (u) {
-        if (typeof u !== 'string' || !/^\.\.\/dashboard\/evidence\/[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/.test(u)) return;
+        if (typeof u !== 'string') return;
+        u = u.replace(/^\.\.\//, '');                            /* the detail file is relative to jobs/, the app lives at the site root */
+        if (!/^dashboard\/evidence\/[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/.test(u)) return;
         var a = el('a', u.split('/').pop()); a.setAttribute('href', u); a.setAttribute('rel', 'noopener'); dbody.appendChild(a); dbody.appendChild(document.createElement('br'));
       });
     }).catch(function () { dbody.textContent = 'Could not load run details (runs-detail.json).'; });
@@ -144,8 +148,11 @@
     var b = e.target.closest && e.target.closest('button.openrun');
     if (b) show(b.getAttribute('data-run'));
   });
-  window.addEventListener('hashchange', function () { readHash(); render(); if (state.run) show(state.run); else drawer.hidden = true; });
+  var onNav = function () { readHash(); render(); if (state.run) show(state.run); else drawer.hidden = true; };
+  if (window.AS) AS.onParams(onNav); else window.addEventListener('hashchange', onNav);
 
   readHash(); render();
   if (state.run) show(state.run);
+  }
+  if (window.AS) { AS.hook('jobs', jobsView); } else { jobsView(); }
 })();

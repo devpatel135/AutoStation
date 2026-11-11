@@ -16,6 +16,7 @@ sys.path.insert(0, str(ROOT / "tools"))
 import build_registry  # noqa: E402
 import build_site  # noqa: E402
 import check_site  # noqa: E402
+import site_app  # noqa: E402
 import site_docs  # noqa: E402
 import site_install  # noqa: E402
 from wrapper_core import miniyaml  # noqa: E402
@@ -55,31 +56,48 @@ def html_files(site: Path):
     return sorted(site.rglob("*.html"))
 
 
+def views(site: Path, tab: str) -> dict:
+    return json.loads((site / "views" / f"{tab}.json").read_text(encoding="utf-8"))
+
+
+def view(site: Path, tab: str, sub: str = "") -> str:
+    return views(site, tab)[sub]
+
+
+def all_view_text(site: Path) -> str:
+    return "\n".join(h for tab in check_site.TABS for h in views(site, tab).values())
+
+
 # ---- whole-site smoke ---------------------------------------------------------------------------------------------
-def test_demo_site_has_every_section_and_a_clean_link_check(demo_site):
+def test_demo_site_is_one_app_with_every_tab_and_a_clean_check(demo_site):
     site, status = demo_site
     assert status["mode"] == "demo" and status["registry"]["automations"] >= 1
     problems = check_site.check_site(site)
     assert problems == [], "\n".join(problems)
-    for rel in ("index.html", "install/index.html", "docs/index.html", "portal/index.html", "portal/admin.html", "dashboard/index.html",
-                "program/index.html", "jobs/index.html", "machines/index.html", "queues/index.html", "schedules/index.html", "audit/index.html", "404.html", ".nojekyll", "status.json", "install/bootstrap.ps1", "install/catalog.json"):
+    for rel in check_site.REQUIRED:
         assert (site / rel).exists(), rel
-    assert len(html_files(site)) >= 30
+    for tab in check_site.TABS:
+        assert view(site, tab).strip(), tab
+    # one real page (the app), the 404, the hand-authored assessment document - everything else is a tiny redirect stub
+    real = [p for p in html_files(site) if p.stat().st_size > 2500]
+    assert {p.relative_to(site).as_posix() for p in real} <= {"index.html", "404.html", "docs/assessment.html"}
 
 
-def test_landing_has_role_based_entry_points(demo_site):
-    page = (demo_site[0] / "index.html").read_text(encoding="utf-8")
+def test_landing_has_role_based_entry_points_and_a_live_fleet_panel(demo_site):
+    page = view(demo_site[0], "home")
     for needle in ("I need to install an automation", "I build automations", "I operate the fleet", "I approve changes",
-                   "I run the automations day to day", "I need to show the value", "install/index.html", "portal/admin.html", "docs/GETTING_STARTED.html"):
+                   "I run the automations day to day", "I need to show the value", 'href="#/install"', 'href="#/admin"', 'href="#/docs/GETTING_STARTED"',
+                   'id="fleet-now"', "Report a problem", "Request an automation"):
         assert needle in page, needle
+    assert ".html" not in re.sub(r"https?://[^\"' ]+", "", re.sub(r'href="#[^"]*"', "", page)).replace("status.json", "")   # no link leaves the app
 
 
-def test_every_install_page_has_download_sha_and_verify_steps(demo_site):
+def test_every_install_view_has_download_sha_and_verify_steps(demo_site):
     site, status = demo_site
     cat = json.loads((site / "install" / "catalog.json").read_text(encoding="utf-8"))
     assert set(cat["automations"]) >= set(AUTOMATIONS)
     for name in AUTOMATIONS:
-        text = (site / "install" / f"{name}.html").read_text(encoding="utf-8")
+        text = view(site, "install", name)
         url = f"https://github.com/devpatel135/AutoStation/releases/download/installers-latest/{name}-setup.exe"
         assert url in text and cat["automations"][name]["installer"]["url"] == url
         for needle in ("SHA-256", "Get-FileHash", "/S /RING=", "HKCU\\Software\\AUTOMAGIX", "Intune", "SCCM", "Troubleshooting",
@@ -88,45 +106,54 @@ def test_every_install_page_has_download_sha_and_verify_steps(demo_site):
     assert "https://devpatel135.github.io/AutoStation/install/catalog.json" in (site / "install" / "bootstrap.ps1").read_text(encoding="utf-8")
 
 
-def test_portal_in_the_site_links_to_release_assets_and_home(demo_site):
+def test_catalog_admin_and_detail_views_inside_the_app(demo_site):
     site = demo_site[0]
-    idx = (site / "portal" / "index.html").read_text(encoding="utf-8")
+    idx = view(site, "catalog")
     assert "releases/download/installers-latest/automation-certification-site-setup.exe" in idx and 'href="installers/' not in idx
-    assert "Site home" in idx
-    adm = (site / "portal" / "admin.html").read_text(encoding="utf-8")
-    assert "gh workflow run" in adm and "actions/workflows" in adm
+    assert "Site home" not in idx and 'class="subtabs"' in idx                                   # one app: no second nav, sub-tabs instead
+    assert {"", "compatibility", "governance", "a/automation-certification-site"} <= set(views(site, "catalog"))
+    detail = view(site, "catalog", "a/automation-certification-site")
+    assert 'id="live-runs"' in detail and 'href="#/install/automation-certification-site"' in detail and 'href="#/admin?a=automation-certification-site"' in detail
+    adm = view(site, "admin")
+    js = (site / "assets" / "views.js").read_text(encoding="utf-8")
+    assert 'id="admin-data"' in adm and "gh workflow run" in js and "actions/workflows" in adm + js      # the panel's script lives in views.js now
+    assert 'AS.hook("admin/"' in js
 
 
-def test_demo_banner_on_dashboards_but_not_on_live_data(demo_site, tmp_path):
+def test_demo_banner_is_in_the_shell_for_demo_data_only(demo_site, tmp_path):
     site = demo_site[0]
-    for rel in ("dashboard/index.html", "program/index.html"):
-        assert "DEMO DATA" in (site / rel).read_text(encoding="utf-8")
+    assert "DEMO DATA" in (site / "index.html").read_text(encoding="utf-8")
+    non_docs = "\n".join(h for t in check_site.TABS if t != "docs" for h in views(site, t).values())      # the docs themselves mention the flag
+    assert "DEMO DATA" not in non_docs                                                           # one banner in the shell, not one per view
     from automation_logging import sample
     data = tmp_path / "live"
     sample.write(data, None, 3, 7)
     live = tmp_path / "live-site"
     build_site.build(live, ROOT, live_data=data)
-    for rel in ("dashboard/index.html", "program/index.html"):
-        assert "DEMO DATA" not in (live / rel).read_text(encoding="utf-8")
+    assert "DEMO DATA" not in (live / "index.html").read_text(encoding="utf-8")
     assert json.loads((live / "status.json").read_text(encoding="utf-8"))["mode"] == "live"
     assert check_site.check_site(live) == []
 
 
 def test_program_dashboard_is_part_of_the_site(demo_site):
-    page = (demo_site[0] / "program" / "index.html").read_text(encoding="utf-8")
+    page = view(demo_site[0], "program")
     for needle in ("Headline", "Hours saved", "UiPath licences avoided", "Top failure causes", "Fleet versions"):
         assert needle in page
     prog = json.loads((demo_site[0] / "program" / "program.json").read_text(encoding="utf-8"))
     assert prog["headline"]["hours_saved_30d"] > 0 and prog["money"]["configured"]
+    assert 'class="dash"' in page and "<style>" in page and ".dash " in page          # page CSS is scoped, it cannot restyle the shell
 
 
 def test_no_fleet_data_gives_honest_placeholders(tmp_path):
     out = tmp_path / "site"
     st = build_site.build(out, ROOT)
     assert st["mode"] == "no-fleet-data"
-    page = (out / "dashboard" / "index.html").read_text(encoding="utf-8")
+    page = view(out, "dashboard")
     assert "Waiting for the first run" in page and "LIVE_LOGGING" in page
-    assert "Waiting for the first run" in (out / "program" / "index.html").read_text(encoding="utf-8")
+    assert "Waiting for the first run" in view(out, "program")
+    for tab in ("jobs", "machines", "reliability", "errors", "queues"):
+        assert "Waiting for the first run" in view(out, tab), tab
+    assert "approvals approve" in view(out, "queues")                              # the how-to is useful before any data exists
     assert check_site.check_site(out) == []
 
 
@@ -140,11 +167,11 @@ def test_site_with_a_real_registry_publishes_it_and_shows_real_hashes(tmp_path):
     assert (site / "registry" / "manifest.yaml").read_text(encoding="utf-8") == (reg / "manifest.yaml").read_text(encoding="utf-8")
     assert list((site / "registry" / "artifacts" / "automations").glob("automation-certification-site-*.zip"))
     assert not (site / "registry" / "build-summary.json").exists()
-    text = (site / "install" / "automation-certification-site.html").read_text(encoding="utf-8")
+    text = view(site, "install", "automation-certification-site")
     assert "PLACEHOLDER" not in text
     m = miniyaml.loads((reg / "manifest.yaml").read_text(encoding="utf-8"))
     assert all(v["sha256"] in text for v in m["automations"]["automation-certification-site"]["versions"].values())
-    assert "registry manifest" in (site / "index.html").read_text(encoding="utf-8")
+    assert "registry manifest" in view(site, "home")
     assert check_site.check_site(site) == []
 
 
@@ -154,7 +181,7 @@ def test_installer_sha_from_file_and_from_the_release(tmp_path, monkeypatch):
     shafile.write_text(json.dumps({"automation-certification-site": sha}), encoding="utf-8")
     site = tmp_path / "site"
     build_site.build(site, ROOT, installer_sha_file=shafile)
-    assert sha in (site / "install" / "automation-certification-site.html").read_text(encoding="utf-8")
+    assert sha in view(site, "install", "automation-certification-site")
     cat = json.loads((site / "install" / "catalog.json").read_text(encoding="utf-8"))
     assert cat["automations"]["automation-certification-site"]["installer"]["sha256"] == sha
 
@@ -189,21 +216,25 @@ def test_installer_sha_from_file_and_from_the_release(tmp_path, monkeypatch):
 
 
 # ---- docs ---------------------------------------------------------------------------------------------------------------------
-def test_docs_site_renders_every_doc_with_nav_search_and_rewritten_links(demo_site):
+def test_docs_tab_has_every_doc_with_nav_search_and_rewritten_links(demo_site):
     site = demo_site[0]
     stems = {p.stem for p in (ROOT / "docs").glob("*.md")} - {"UIPATH_MIGRATION", "UIPATH_PARITY"}   # the UiPath docs are not published on the site
+    docs = views(site, "docs")
     for stem in stems:
-        assert (site / "docs" / f"{stem}.html").exists(), stem
-    assert not (site / "docs" / "UIPATH_MIGRATION.html").exists() and not (site / "migration").exists()
-    assert (site / "docs" / "assessment.html").exists()
-    gs = (site / "docs" / "GETTING_STARTED.html").read_text(encoding="utf-8")
-    assert 'href="WRAPPER_CORE_API.html"' in gs and 'href="AUTOMATION_STANDARD.html"' in gs         # .md links became site pages
+        assert stem in docs, stem
+        assert (site / "docs" / f"{stem}.html").exists(), f"old URL docs/{stem}.html must still redirect"
+    assert "UIPATH_MIGRATION" not in docs and not (site / "migration").exists()
+    assert not [k for k in docs if k.startswith(("components-.", "components-_"))], "cache folders must not become docs"
+    assert (site / "docs" / "assessment.html").exists() and "assessment" in docs and "<iframe" in docs["assessment"]
+    gs = docs["GETTING_STARTED"]
+    assert 'href="#/docs/WRAPPER_CORE_API"' in gs and 'href="#/docs/AUTOMATION_STANDARD"' in gs        # .md links became in-app routes
     assert ".md)" not in gs and 'href="WRAPPER_CORE_API.md"' not in gs
     assert 'id="' in gs and "Edit this page on GitHub" in gs and 'aria-label="Documentation"' in gs
     idx = json.loads((site / "docs" / "search-index.json").read_text(encoding="utf-8"))
     assert any(e["doc"] == "RUNBOOKS.html" and "kill-switch" in (e["heading"] + e["text"]).lower() for e in idx)
     assert all({"doc", "title", "heading", "anchor", "text"} <= set(e) for e in idx)
-    assert "docsearch" in (site / "docs" / "index.html").read_text(encoding="utf-8")
+    assert "docsearch" in docs[""]
+    assert "AS.hook(\"docs/\"" in (site / "assets" / "views.js").read_text(encoding="utf-8")         # the search box script is wired
 
 
 def test_rewrite_links_known_unknown_and_external():
@@ -239,13 +270,14 @@ def test_manifest_text_is_escaped_everywhere(tmp_path, repo_manifest):
     mp.write_text(miniyaml.dumps(m), encoding="utf-8")
     site = tmp_path / "site"
     build_site.build(site, ROOT, manifest=mp)
-    for page in site.rglob("*"):
-        if page.suffix == ".html" and page.is_file():   # JSON files are data (served as application/json), only pages can execute
-            text = page.read_text(encoding="utf-8", errors="replace")
-            assert "<script>alert(" not in text, f"raw script payload in {page}"
-            assert "<img src=x onerror" not in text, f"raw tag payload in {page}"
-            assert 'href="javascript:' not in text.lower(), f"javascript: link in {page}"
-    install = (site / "install" / "automation-certification-site.html").read_text(encoding="utf-8")
+    texts = {"views": all_view_text(site)}
+    for page in html_files(site):
+        texts[page.relative_to(site).as_posix()] = page.read_text(encoding="utf-8", errors="replace")
+    for name, decoded in texts.items():
+        assert "<script>alert(" not in decoded, f"raw script payload in {name}"
+        assert "<img src=x onerror" not in decoded, f"raw tag payload in {name}"
+        assert 'href="javascript:' not in decoded.lower(), f"javascript: link in {name}"
+    install = view(site, "install", "automation-certification-site")
     assert "&lt;img src=x onerror=alert(1)&gt;" in install and 'href="https://example.com/ok"' in install
     assert check_site.check_site(site) == []
 
@@ -255,21 +287,143 @@ def test_status_json_records_the_build(demo_site):
     assert st["schema_version"] == 1 and st["repo"] == "devpatel135/AutoStation" and "index.html" in st["pages"]
     assert re.fullmatch(r"[0-9a-f]{64}", st["registry"]["manifest_sha256"])
     assert st["installers"]["automation-certification-site"]["url"].endswith("/installers-latest/automation-certification-site-setup.exe")
+    assert all((demo_site[0] / p).exists() for p in st["pages"] if not p.startswith("registry/")), "status.json lists a file that does not exist"
+
+
+# ---- the single-page app: routes, redirects, one nav, nothing external ----------------------------------------------------------
+def test_shell_has_one_header_one_tab_bar_and_build_id(demo_site):
+    text = (demo_site[0] / "index.html").read_text(encoding="utf-8")
+    assert text.count('<header class="top">') == 1 and text.count('id="tabs"') == 1 and text.count("<nav") == 1
+    tabs = re.findall(r'data-tab="([a-z-]+)"', text)
+    assert tabs == check_site.TABS == [t for t, _ in site_app.TABS]
+    assert 'role="tablist"' in text and text.count('role="tab"') == len(tabs) and 'role="tabpanel"' in text and 'data-skip' in text
+    m = re.search(r'<meta name="build" content="([a-f0-9]{12})">', text)
+    assert m and f"assets/app.js?v={m.group(1)}" in text and f"assets/site.css?v={m.group(1)}" in text   # a new deploy never mixes with cached old views
+    assert "frame-src 'self'" in text and "script-src 'self'" in text and "'unsafe-inline'" not in re.search(r"script-src[^;]*", text).group(0)
+    css = (demo_site[0] / "assets" / "site.css").read_text(encoding="utf-8")
+    assert ".tabs" in css and "overflow-x:auto" in css and "@media (max-width:760px)" in css           # the tab bar scrolls on a phone
+    assert 'name="viewport"' in text
+
+
+def test_old_urls_redirect_into_the_app_and_have_no_nav_of_their_own(demo_site):
+    site = demo_site[0]
+    expect = {"jobs/index.html": "/jobs", "dashboard/index.html": "/dashboard", "portal/index.html": "/catalog", "portal/admin.html": "/admin",
+              "portal/compatibility.html": "/catalog/compatibility", "portal/governance.html": "/catalog/governance",
+              "portal/automation/automation-certification-site.html": "/catalog/a/automation-certification-site",
+              "install/automation-certification-site.html": "/install/automation-certification-site", "docs/RUNBOOKS.html": "/docs/RUNBOOKS",
+              "docs/index.html": "/docs", "install/index.html": "/install"}
+    for rel, route in expect.items():
+        text = (site / rel).read_text(encoding="utf-8")
+        assert f'data-route="{route}"' in text, rel
+        depth = rel.count("/")
+        assert f'data-to="{"../" * depth}index.html"' in text and "<noscript><meta http-equiv=\"refresh\"" in text, rel
+        assert "<nav" not in text and "<header" not in text and len(text) < 2500, rel
+        assert "script-src 'self'" in text and "unsafe-inline" not in text, rel
+    for page in html_files(site):
+        rel = page.relative_to(site).as_posix()
+        if rel not in ("index.html", "404.html", "docs/assessment.html") and not rel.startswith("registry/"):
+            assert "data-route=" in page.read_text(encoding="utf-8"), f"{rel} is neither the app nor a redirect stub"
+    js = (site / "assets" / "redirect.js").read_text(encoding="utf-8")
+    assert "location.replace" in js and "^(\\.\\.\\/)*index\\.html$" in js
+
+
+def test_nothing_in_the_site_loads_from_outside_its_own_origin(demo_site):
+    site = demo_site[0]
+    ext = re.compile(r"""(?:src|href)=["']https?://(?!github\.com|devpatel135\.github\.io|www\.w3\.org)[^"']+""", re.I)
+    for f in list(html_files(site)) + [site / "assets" / n for n in ("site.css", "app.js", "views.js", "jobs.js", "redirect.js")]:
+        text = f.read_text(encoding="utf-8")
+        assert "fonts.googleapis.com" not in text and "fonts.gstatic.com" not in text and "cdn." not in text.lower().replace("cdn-", ""), f"{f.name}: third-party host"
+        for m in ext.finditer(text):
+            assert re.match(r'(?:href)=', m.group(0)) and "<link" not in text[max(0, m.start() - 6):m.start()], f"{f.name}: external load {m.group(0)[:80]}"
+    csp = re.search(r'Content-Security-Policy" content="([^"]*)"', (site / "docs" / "assessment.html").read_text(encoding="utf-8")).group(1)
+    assert "font-src" not in csp and "googleapis" not in csp
+
+
+def test_every_tab_view_is_reachable_and_every_in_app_link_resolves(demo_site):
+    site = demo_site[0]
+    vs = {t: views(site, t) for t in check_site.TABS}
+    routes = {f"/{t}" + (f"/{s}" if s else "") for t, v in vs.items() for s in v}
+    assert {"/home", "/install", "/docs", "/catalog", "/dashboard", "/program", "/jobs", "/machines", "/reliability", "/errors", "/queues", "/schedules", "/audit", "/admin"} <= routes
+    for text in all_view_text(site).split("href=\"#")[1:]:
+        route = text.split('"')[0].split("?")[0]
+        assert route in routes, route
+    idx = json.loads((site / "search-ops.json").read_text(encoding="utf-8"))
+    assert idx and all(it["u"].startswith("/") and it["u"].split("?")[0] in routes for it in idx)
+    assert {"doc", "catalog", "page"} <= {it["t"] for it in idx}
+
+
+def test_route_of_and_link_rewriting():
+    r = site_app.route_of
+    assert r("index.html") == ("home", "") and r("jobs/index.html") == ("jobs", "") and r("portal/index.html") == ("catalog", "")
+    assert r("portal/automation/a-b.html") == ("catalog", "a/a-b") and r("docs/RUNBOOKS.html") == ("docs", "RUNBOOKS")
+    assert r("install/x.html") == ("install", "x") and r("portal/admin.html") == ("admin", "") and r("registry/manifest.yaml") is None
+    assert r("portal/automation/..%2f.html") is None and r("nope/index.html") is None
+    rs = site_app.resolve
+    assert rs("../jobs/index.html#run=abc&status=failed", "dashboard/index.html", ("dashboard", "")) == "#/jobs?run=abc&status=failed"
+    assert rs("../docs/RUNBOOKS.html#section-1", "install/x.html", ("install", "x")) == "#/docs/RUNBOOKS?a=section-1"
+    assert rs("#top", "docs/SPEC.html", ("docs", "SPEC")) == "#/docs/SPEC?a=top"
+    assert rs("../registry/manifest.yaml", "portal/index.html", ("catalog", "")) == "registry/manifest.yaml"
+    assert rs("https://example.com/x", "index.html", ("home", "")) == "https://example.com/x" and rs("mailto:a@b.c", "index.html", None) == "mailto:a@b.c"
+    assert rs("../../../../etc/passwd", "portal/automation/a.html", None) == "../../../../etc/passwd"      # never turned into a route; check_site rejects it
+    out = site_app.rewrite_links('<a href="../jobs/index.html?x=1&amp;y=2">j</a><img src="data:image/png;base64,AAAA">', "dashboard/index.html", ("dashboard", ""))
+    assert 'href="#/jobs?x=1&amp;y=2"' in out and 'src="data:image/png;base64,AAAA"' in out
+
+
+def test_extract_collects_scripts_that_sit_after_the_footer_and_drops_chrome():
+    page = ('<!doctype html><html><head><style>.x{}</style></head><body><div class="page"><header class="top"><nav>NAV</nav>'
+            '<button id="theme-toggle">Theme</button></header><div class="banner" role="note">advisory</div><h1>Hello</h1><p><a href="a.html">a</a></p>'
+            '<script type="application/json" id="d">{"k":1}</script><footer class="foot">foot</footer></div>'
+            '<script>(function(){ document.title = "x"; })();</script><script src="app.js"></script></body></html>')
+    ex = site_app.extract(page)
+    assert "<h1>Hello</h1>" in ex["html"] and "NAV" not in ex["html"] and "advisory" not in ex["html"] and "foot" not in ex["html"]
+    assert 'id="d"' in ex["html"] and "<script>" not in ex["html"]                      # the JSON data block stays, executable scripts leave
+    assert ex["scripts"] == ['(function(){ document.title = "x"; })();']
+    assert "theme-toggle" not in ex["html"]
+
+
+def test_scope_css_cannot_leak_into_the_shell():
+    css = ":root{--bg:#000}:root:not([data-theme=\"dark\"]) .pill{color:red}body{padding:1rem;color:var(--fg)}*{margin:0}h1,.card{x:1}@media (max-width:640px){h1{y:2}}@keyframes k{from{a:1}}"
+    out = site_app.scope_css(css, ".dash")
+    assert out.startswith(".dash{--bg:#000}") and ":root:not([data-theme=\"dark\"]) .dash .pill{color:red}" in out
+    assert ".dash{color:var(--fg)}" in out and "padding" not in out and ".dash *{margin:0}" in out
+    assert ".dash h1, .dash .card{x:1}" in out and "@media (max-width:640px){.dash h1{y:2}}" in out and "@keyframes k{from{a:1}}" in out
+    assert not re.search(r"(^|})\s*(body|h1|\.card|table)\s*\{", out)
+
+
+def test_hostile_values_cannot_become_routes_or_executable_view_content():
+    assert site_app.resolve("javascript:alert(1)", "index.html", None) == "javascript:alert(1)"      # left as-is; check_site fails the build on it
+    bad = ('<a href="javascript:alert(1)">x</a><button onclick="x()">b</button><script>steal()</script>')
+    ex = site_app.extract(f"<body><main id=\"main\">{bad}</main></body>")
+    assert "<script>" not in ex["html"] and ex["scripts"] == ["steal()"]                              # a script in a view is hoisted out, never inline
+    assert check_site._check_view("home", "", ex["html"], Path("."), {"home": {"": ex["html"]}}) != []
+
+
+def test_no_second_navigation_bar_anywhere_in_the_views(demo_site):
+    text = all_view_text(demo_site[0])
+    assert '<header class="top"' not in text and '<nav class="main"' not in text and "Site home" not in text
+    for tag in re.findall(r"<nav[^>]*>", text):
+        assert re.search(r'class="(subtabs|docs-nav)"', tag), f"unexpected navigation element inside a view: {tag}"
 
 
 # ---- the checker itself -----------------------------------------------------------------------------------------------------
-def test_checker_catches_broken_links_anchors_and_incomplete_install_pages(tmp_path):
+def test_checker_catches_broken_routes_scripts_external_loads_and_incomplete_install_views(tmp_path):
     site = tmp_path / "s"
     for rel in check_site.REQUIRED:
         (site / rel).parent.mkdir(parents=True, exist_ok=True)
-        (site / rel).write_text("<html></html>" if rel.endswith(".html") else ("{}" if rel.endswith(".json") else ""), encoding="utf-8")
-    (site / "index.html").write_text('<a href="nope.html">x</a><a href="docs/index.html#missing">y</a><a href="javascript:alert(1)">z</a>'
-                                     '<script src="https://cdn.example.com/x.js"></script><a href="../outside.html">o</a>', encoding="utf-8")
+        (site / rel).write_text("{}" if rel.endswith(".json") else ("<html></html>" if rel.endswith(".html") else ""), encoding="utf-8")
+    bad_views = {"": '<a href="#/nowhere">x</a><a href="nope.html">y</a><a href="javascript:alert(1)">z</a><script>steal()</script>'
+                     '<img src="https://cdn.example.com/x.png"><button onclick="x()">b</button><a href="../outside.html">o</a>'}
+    for tab in check_site.TABS:
+        (site / "views" / f"{tab}.json").write_text(json.dumps(bad_views if tab == "home" else {"": "<p>ok</p>"}), encoding="utf-8")
+    (site / "index.html").write_text("<html><nav id=\"tabs\"></nav></html>", encoding="utf-8")
+    (site / "old" / "x.html").parent.mkdir(parents=True, exist_ok=True)
+    (site / "old" / "x.html").write_text("<nav>another bar</nav>" + "x" * 3000, encoding="utf-8")
     (site / "install" / "catalog.json").write_text(json.dumps({"automations": {"auto-a": {"installer": {"url": "https://x/auto-a-setup.exe"}}}}), encoding="utf-8")
     probs = "\n".join(check_site.check_site(site))
-    for needle in ("broken link nope.html", "anchor #missing", "javascript: URL", "external script", "escapes the site", "install page missing for auto-a"):
+    for needle in ("route that does not exist: #/nowhere", "broken link nope.html", "javascript: URL", "executable inline <script>", "external img",
+                   "inline event handler", "escapes the site", "tab bar", "redirect stub", "install view missing for auto-a"):
         assert needle in probs, needle
-    (site / "install" / "auto-a.html").write_text("<html>no download here</html>", encoding="utf-8")
+    (site / "views" / "install.json").write_text(json.dumps({"": "<p>ok</p>", "auto-a": "<p>no download here</p>"}), encoding="utf-8")
     probs = "\n".join(check_site.check_site(site))
     assert "no download link" in probs and "no SHA-256 block" in probs and "no verify instructions" in probs
 
@@ -348,7 +502,7 @@ def test_bootstrap_verifies_hash_and_refuses_everything_else(boot, tmp_path):
 BANNER = "Telemetry is submitted by installed clients and is not authenticated; treat numbers as advisory"
 
 
-def test_every_generated_page_has_a_csp_and_the_advisory_banner(demo_site):
+def test_every_html_file_has_a_csp_and_the_shell_and_assessment_carry_the_advisory_banner(demo_site):
     site = demo_site[0]
     pages = html_files(site)
     assert len(pages) > 20
@@ -360,14 +514,14 @@ def test_every_generated_page_has_a_csp_and_the_advisory_banner(demo_site):
         csp = m.group(1)
         assert "default-src 'none'" in csp and "base-uri 'none'" in csp and "form-action 'none'" in csp, rel
         assert "script-src" in csp and "*" not in csp and "http:" not in csp, rel
-        assert BANNER in text, f"no advisory banner on {rel}"
+        if rel in ("index.html", "docs/assessment.html"):
+            assert BANNER in text, f"no advisory banner on {rel}"
 
 
-def test_dashboard_csp_only_allows_the_font_hosts_it_needs(demo_site):
-    text = (demo_site[0] / "dashboard" / "index.html").read_text(encoding="utf-8")
-    csp = re.search(r'http-equiv="Content-Security-Policy" content="([^"]*)"', text).group(1)
-    assert "font-src https://fonts.gstatic.com" in csp and "style-src-elem 'unsafe-inline' https://fonts.googleapis.com" in csp
-    assert "connect-src" not in csp and "frame-src" not in csp
+def test_dashboards_load_no_fonts_or_anything_else_from_outside(demo_site):
+    from automation_logging import dashboard
+    assert "fonts.g" not in dashboard.CSP_META and "font-src" not in dashboard.CSP_META
+    assert "fonts.g" not in all_view_text(demo_site[0]) and "fonts.g" not in (demo_site[0] / "docs" / "assessment.html").read_text(encoding="utf-8")
 
 
 def test_unsafe_automation_names_get_no_install_page_catalog_entry_or_command(tmp_path, repo_manifest):
@@ -393,14 +547,14 @@ def test_only_a_real_sha256_is_ever_embedded_in_a_page_or_command(tmp_path, repo
     shas.write_text(json.dumps({"automation-certification-site": '0"; Start-Process calc; "'}), encoding="utf-8")
     site = tmp_path / "site"
     build_site.build(site, ROOT, installer_sha_file=shas, manifest=repo_manifest)
-    text = (site / "install" / "automation-certification-site.html").read_text(encoding="utf-8")
+    text = view(site, "install", "automation-certification-site")
     assert "Start-Process" not in text and "paste the SHA-256 from the release page" in text
     cat = json.loads((site / "install" / "catalog.json").read_text(encoding="utf-8"))
     assert cat["automations"]["automation-certification-site"]["installer"]["sha256"] is None
     good = "ab" * 32
     shas.write_text(json.dumps({"automation-certification-site": good.upper()}), encoding="utf-8")
     build_site.build(site, ROOT, installer_sha_file=shas, manifest=repo_manifest)
-    assert f'$expected = &quot;{good}&quot;' in (site / "install" / "automation-certification-site.html").read_text(encoding="utf-8")
+    assert f'$expected = &quot;{good}&quot;' in view(site, "install", "automation-certification-site")
 
 
 def test_bad_repo_or_http_installer_template_is_refused(tmp_path, repo_manifest):
@@ -417,7 +571,7 @@ def test_verification_wording_is_honest_and_attestation_is_documented(demo_site)
     assert "gh attestation verify <file> --repo <owner>/<repo>" in boot_text and "-AllowUnsigned" in boot_text and "-RequireAttestation" in boot_text
     assert "@@REPO@@" not in boot_text and "devpatel135/AutoStation" in boot_text
     assert "independent origin" not in (ROOT / "tools" / "site" / "site_install.py").read_text(encoding="utf-8")
-    page = (site / "install" / "automation-certification-site.html").read_text(encoding="utf-8")
+    page = view(site, "install", "automation-certification-site")
     assert "gh attestation verify .\\automation-certification-site-setup.exe --repo devpatel135/AutoStation" in page
     assert "does <em>not</em> prove who built" in page
 
@@ -436,3 +590,18 @@ def test_bootstrap_fails_closed_on_an_unsigned_installer_for_broad_only(boot, tm
         assert r.returncode == 0 and "Signature status" in (r.stdout + r.stderr), (ring, r.stdout + r.stderr)
     hostile = run_ps(script, "-Automation", "x; calc", "-CatalogUrl", catalog(), "-InstallerPath", str(exe), "-NoRun", tmp=tmp_path)
     assert hostile.returncode != 0 and "does not match" in (hostile.stdout + hostile.stderr)
+
+
+# ---- full width ------------------------------------------------------------------------------------------------------------------
+def test_app_is_full_width_with_a_readable_measure_and_a_jobs_table_drawer_split(demo_site):
+    site = demo_site[0]
+    css = (site / "assets" / "site.css").read_text(encoding="utf-8")
+    tail = css[css.index("FULL WIDTH"):]
+    assert ".page { max-width:none" in tail and "clamp(1rem,2.5vw,2.5rem)" in tail                    # no narrow column; sensible side padding
+    assert "max-width:90ch" in tail and ".md p" in tail                                                # long prose keeps a readable measure
+    assert ".split:has(> #drawer:not([hidden]))" in tail and "grid-template-columns:minmax(0,1fr) minmax(22rem,30rem)" in tail
+    assert ".tw { overflow-x:auto" in tail                                                              # wide tables scroll inside their box, never the page
+    for tab in ("dashboard", "program"):
+        assert not re.search(r"max-width:\s*1100px", view(site, tab)), f"{tab}: the standalone page's 1100px column leaked into the app"
+    assert 'class="split"' in view(site, "jobs") and 'id="drawer"' in view(site, "jobs")
+    assert re.search(r"\.page\s*\{[^}]*max-width:\s*1100px", css) and css.index(".page { max-width:none") > css.index("max-width:1100px")   # base rule exists but is overridden last

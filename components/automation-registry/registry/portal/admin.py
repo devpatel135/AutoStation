@@ -269,7 +269,8 @@ ADMIN_JS = r"""
       if (sel) pick(t, parseInt(sel.value, 10)); });
   });
   ['reason', 'shell', 'slot', 'params'].forEach(function (id) { $(id).addEventListener('input', render); $(id).addEventListener('change', render); });
-  if (location.hash.length > 1) { var row = document.getElementById(decodeURIComponent(location.hash.slice(1))); if (row) row.style.outline = '2px solid var(--accent)'; }
+  var focusId = window.AS ? AS.anchor() : (location.hash.length > 1 ? decodeURIComponent(location.hash.slice(1)) : '');   /* inside the site app the route owns the hash: ?a=<row id> */
+  if (focusId && /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,120}$/.test(focusId)) { var row = document.getElementById(focusId); if (row) row.style.outline = '2px solid var(--accent)'; }
 })();
 """
 

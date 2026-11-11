@@ -248,11 +248,14 @@ def build_detail(name: str, entry: dict, m: dict, config: dict, health: dict | N
     dv = (entry.get("rings") or {}).get(dr) if dr else None
     dl = (f'<a class="btn primary" href="{esc(rel_href(config, installer_rel(config, name, dv), "../"))}" download>Download installer v{esc(dv)} ({esc(dr)})</a> '
           f'<a class="btn" href="{esc(rel_href(config, installer_rel(config, name, dv), "../"))}.sha256">sha256 file</a>') if dv else ""
+    tpl = str(config.get("install_page_template") or "")
+    install_link = f' <a class="btn" href="{esc(rel_href(config, tpl.format(name=name), "../"))}">Install page</a>' if tpl and "{name}" in tpl and "/" not in name else ""
     body = f"""<p><a href="../index.html">&larr; Catalog</a></p>
 <div class="row" style="display:flex;gap:.8rem;align-items:center;flex-wrap:wrap"><h1 style="font-family:var(--mono)">{esc(name)}</h1>{status_pill(entry)} {health_pill(health)}</div>
 <p class="summary" style="margin-top:.4rem">{esc(cat.get('summary') or entry.get('description'))}</p>
 {paused}
-<div class="actions" style="margin:.8rem 0">{dl} <a class="btn" href="../admin.html#{esc(name)}">Operator actions</a></div>
+<div class="actions" style="margin:.8rem 0">{dl} <a class="btn" href="../admin.html#{esc(name)}">Operator actions</a>{install_link}</div>
+<div id="live-runs" data-automation="{esc(name)}"></div>
 <h2>Overview</h2>
 <dl class="kv">
 <dt>Owner</dt><dd>{esc(entry.get('owner'))}</dd><dt>Team</dt><dd>{esc(entry.get('owner_team') or cat.get('owner_team') or '-')}</dd>
