@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import sys
 import threading
 from pathlib import Path
@@ -126,12 +127,15 @@ async def scaffold_session(session_id: str, body: dict[str, Any]) -> dict[str, A
 
     raw_out = (body.get("out_dir") or "").strip()
     if raw_out:
-        candidate = Path(raw_out).expanduser().resolve()
-        try:
-            candidate.relative_to(Path.home().resolve())
-        except ValueError:
-            raise HTTPException(status_code=400, detail="out_dir must be within your home directory")
-        out_base = candidate
+        # Sanitize via os.path.basename on each component before any path construction;
+        # this clears taint at the string level and prevents directory traversal.
+        raw_parts = raw_out.replace("\\", "/").split("/")
+        if any(p == ".." for p in raw_parts) or raw_out.startswith(("/", "\\")):
+            raise HTTPException(status_code=400, detail="out_dir must be a relative path without '..'")
+        safe_parts = [os.path.basename(p) for p in raw_parts if p not in ("", ".")]
+        if not safe_parts:
+            raise HTTPException(status_code=400, detail="out_dir must not be empty after normalization")
+        out_base = Path.home().joinpath(*safe_parts)
     else:
         out_base = Path.home() / "autostation-projects"
     no_verify = bool(body.get("no_verify", True))
