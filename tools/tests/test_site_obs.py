@@ -200,7 +200,8 @@ def test_layout_has_the_global_search_box_and_nav_links(tmp_path):
     site_obs.build_obs(tmp_path, CFG, MANIFEST, data(*scenario()), NOW)
     page = read(tmp_path, "errors/index.html")
     assert 'id="gsearch"' in page and 'src="../assets/gsearch.js"' in page and 'data-base="../"' in page
-    assert "reliability/index.html" in page and "errors/index.html" in page and "Content-Security-Policy" in page
+    assert "install/index.html" in page and "docs/index.html" in page and "Content-Security-Policy" in page         # the staging chrome lists the four tabs
+    assert page.count('<a href="../') <= 12 and ">Reliability<" not in page and ">Catalog<" not in page            # no old tab names survive
 
 
 def test_a_forged_automation_named_fleet_cannot_overwrite_the_fleet_badge(tmp_path):
