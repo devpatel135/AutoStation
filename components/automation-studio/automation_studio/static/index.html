@@ -629,16 +629,29 @@ function renderContract(c) {
   (c.developer_tasks || []).forEach((t, i) => {
     const item = document.createElement('div');
     item.className = 'task-item';
-    item.innerHTML = `<span class="task-num">${i + 1}.</span><span>${t}</span>`;
+    const num = document.createElement('span');
+    num.className = 'task-num';
+    num.textContent = `${i + 1}.`;
+    const txt = document.createElement('span');
+    txt.textContent = t;
+    item.appendChild(num);
+    item.appendChild(txt);
     taskList.appendChild(item);
   });
 
   // Render project.yaml as syntax-highlighted-ish text
   const yaml = c.project_yaml || {};
-  const yamlLines = Object.entries(yaml).map(([k, v]) =>
-    `<span class="yaml-key">${k}</span>: ${JSON.stringify(v)}`
-  ).join('\n');
-  $('contract-yaml').innerHTML = `# project.yaml\n${yamlLines}`;
+  const pre = $('contract-yaml');
+  pre.textContent = '';
+  const header = document.createTextNode('# project.yaml\n');
+  pre.appendChild(header);
+  Object.entries(yaml).forEach(([k, v]) => {
+    const keySpan = document.createElement('span');
+    keySpan.className = 'yaml-key';
+    keySpan.textContent = k;
+    pre.appendChild(keySpan);
+    pre.appendChild(document.createTextNode(': ' + JSON.stringify(v) + '\n'));
+  });
 }
 
 // ── Session lifecycle ────────────────────────────────────────────────────────

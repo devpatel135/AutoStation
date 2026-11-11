@@ -7,6 +7,7 @@ the JS side uses its own ``e()`` escaper for client-rendered content.
 from __future__ import annotations
 
 import base64
+import hashlib
 import html
 import json
 import re
@@ -229,12 +230,8 @@ document.getElementById('theme-toggle').addEventListener('click',()=>{
   else{delete r.dataset.theme;try{localStorage.removeItem('amx-theme');}catch{}}
 });"""
 
-CSP_META = (
-    "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; img-src data:; "
-    "style-src 'unsafe-inline'; font-src https://fonts.gstatic.com; "
-    "style-src-elem 'unsafe-inline' https://fonts.googleapis.com; "
-    "script-src 'unsafe-inline'; base-uri 'none'; form-action 'none'\">"
-)
+def _csp_hash(text: str) -> str:
+    return "'sha256-" + base64.b64encode(hashlib.sha256(text.encode("utf-8")).digest()).decode() + "'"
 
 _RENDER_JS = """\
 const D = JSON.parse(document.getElementById('__dash_data__').textContent);
@@ -456,6 +453,17 @@ document.getElementById('theme-toggle').addEventListener('click',()=>{
   switchTab(tab);
 })();
 """
+
+# dashboard/index.html wraps _RENDER_JS as <script>\n{body}\n</script>; program/index.html appends THEME_SCRIPT as <script>{body}</script>
+_RENDER_SCRIPT_HASH = _csp_hash("\n" + _RENDER_JS + "\n")
+_THEME_SCRIPT_HASH = _csp_hash(THEME_JS)
+
+CSP_META = (
+    "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; img-src data:; "
+    "style-src 'unsafe-inline'; font-src https://fonts.gstatic.com; "
+    "style-src-elem 'unsafe-inline' https://fonts.googleapis.com; "
+    f"script-src {_RENDER_SCRIPT_HASH} {_THEME_SCRIPT_HASH}; base-uri 'none'; form-action 'none'\">"
+)
 
 _PAGE_TEMPLATE = """\
 <!doctype html>

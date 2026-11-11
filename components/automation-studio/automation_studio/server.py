@@ -125,7 +125,15 @@ async def scaffold_session(session_id: str, body: dict[str, Any]) -> dict[str, A
         raise HTTPException(status_code=422, detail="contract has no project_yaml")
 
     raw_out = (body.get("out_dir") or "").strip()
-    out_base = Path(raw_out).expanduser().resolve() if raw_out else Path.home() / "autostation-projects"
+    if raw_out:
+        candidate = Path(raw_out).expanduser().resolve()
+        try:
+            candidate.relative_to(Path.home().resolve())
+        except ValueError:
+            raise HTTPException(status_code=400, detail="out_dir must be within your home directory")
+        out_base = candidate
+    else:
+        out_base = Path.home() / "autostation-projects"
     no_verify = bool(body.get("no_verify", True))
 
     result: ScaffoldResult = await asyncio.to_thread(

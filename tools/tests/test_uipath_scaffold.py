@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import importlib.util
 import json
 import os
 import subprocess
@@ -18,7 +19,12 @@ sys.path.insert(0, str(UIPATH))
 sys.path.insert(0, str(WRAPPER_CORE))
 
 import inventory as inv  # noqa: E402
-import scaffold as sc  # noqa: E402
+
+# Load tools/uipath/scaffold.py by path to avoid colliding with tools/scaffold.py which may be
+# cached under the name 'scaffold' in sys.modules when both test files run in the same pytest session.
+_sc_spec = importlib.util.spec_from_file_location("uipath_scaffold", UIPATH / "scaffold.py")
+sc = importlib.util.module_from_spec(_sc_spec)
+_sc_spec.loader.exec_module(sc)
 from wrapper_core import manifest as mf, miniyaml  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
