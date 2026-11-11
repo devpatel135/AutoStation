@@ -12,9 +12,25 @@ from __future__ import annotations
 
 import os
 import shutil
+import stat
+import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+
+
+def _rmtree(path: Path) -> None:
+    """shutil.rmtree with a chmod retry for Windows read-only / handle-held files."""
+    def _handler(func, p, exc):
+        try:
+            os.chmod(p, stat.S_IWRITE)
+            func(p)
+        except Exception:
+            pass
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(path, onexc=_handler)
+    else:
+        shutil.rmtree(path, onerror=_handler)
 
 from . import miniyaml, runctx
 from .paths import Paths
@@ -73,7 +89,7 @@ def run_payload(payload_dir: str | Path, params: dict | None = None, *, env: dic
         paths = Paths().ensure()
         dest = paths.automation_dir(name)
         if dest.exists():
-            shutil.rmtree(dest)
+            _rmtree(dest)
         shutil.copytree(src, dest, ignore=shutil.ignore_patterns("__pycache__", "tests", ".pytest_cache", "node_modules"))
         (dest / "VERSION").write_text("dev\n", encoding="utf-8")
         slot = {"id": "dev", "type": slot_type, "params": dict(params or {})}

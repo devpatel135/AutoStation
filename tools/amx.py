@@ -41,6 +41,10 @@ def run(argv: list[str], cwd: Path | None = None) -> int:
     env["PYTHONPATH"] = os.pathsep.join(filter(None, [
         str(C / "wrapper-core"), str(STUDIO), env.get("PYTHONPATH", ""),
     ]))
+    # Node automations resolve the execution-framework via this env var; set it
+    # from the repo when not already in the environment (dev / CI only).
+    if "AUTOMAGIX_FRAMEWORK_DIR" not in env and (C / "execution-framework").exists():
+        env["AUTOMAGIX_FRAMEWORK_DIR"] = str(C / "execution-framework")
     return subprocess.call([str(a) for a in argv], cwd=str(cwd or ROOT), env=env)
 
 

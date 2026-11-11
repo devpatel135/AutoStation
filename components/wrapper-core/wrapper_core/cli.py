@@ -71,6 +71,7 @@ def main(argv: list[str] | None = None) -> int:
     d.add_argument("payload_dir")
     d.add_argument("--param", action="append", default=[], metavar="K=V")
     d.add_argument("--keep", action="store_true", help="keep the temp AUTOMAGIX_HOME")
+    d.add_argument("--dry-run", action="store_true", help="execute but do not send logs or touch state")
 
     sub.add_parser("test-schedule", help="print the Task Scheduler XML for each slot of --manifest")
 
@@ -119,7 +120,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.cmd == "dev":
         from .dev import run_dev
-        return run_dev(args.payload_dir, dict(kv.split("=", 1) for kv in args.param), args.keep)
+        return run_dev(args.payload_dir, dict(kv.split("=", 1) for kv in args.param), args.keep, dry_run=args.dry_run)
     return 2
 
 

@@ -9,13 +9,13 @@ import shutil
 from pathlib import Path
 
 
-def run_dev(payload_dir: str, params: dict[str, str], keep: bool = False) -> int:
+def run_dev(payload_dir: str, params: dict[str, str], keep: bool = False, dry_run: bool = False) -> int:
     src = Path(payload_dir).resolve()
     if not (src / "automation.yaml").exists():
         print(f"error: {src} has no automation.yaml")
         return 2
     from .testing import run_payload
-    res = run_payload(src, params, keep=keep)
+    res = run_payload(src, params, keep=keep, dry_run=dry_run)
     rec = res.record
     print(json.dumps({k: v for k, v in rec.items() if k != "events"}, indent=2, default=str))
     print(f"\n{len(rec.get('events', []))} event(s). Raw artefacts: {res.logs_dir}")
