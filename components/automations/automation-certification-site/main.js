@@ -107,11 +107,15 @@ fw.wrapper.entrypoint(async (framework) => {
     let kind = 'other';
     let clicked = false;
     let untrusted = '';
+    let llmFiredThisIteration = false;
     while (Date.now() < deadline) {
       const state = await pageState(page, selectors);
       kind = classifyPage(state, portalUrl, { pickerHost });
-      // Pattern 1: LLM fallback for unknown page states — deterministic path has first priority
-      if (kind === 'other') {
+      // Pattern 1: LLM fallback for unknown page states — deterministic path has first priority.
+      // Once per loop iteration only: if the LLM fired this pass, skip on the next to avoid burning
+      // quota when the page stays in 'other' across multiple polling cycles.
+      if (kind === 'other' && !llmFiredThisIteration) {
+        llmFiredThisIteration = true;
         const llmResult = await fw.llm.llmCall({
           prompt: 'Classify the state of this browser page navigating to a corporate certification portal.',
           context: `URL: ${state.url}\nTitle: ${state.title}\nPage text:\n${state.text.slice(0, 1200)}`,

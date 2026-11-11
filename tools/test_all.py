@@ -23,6 +23,7 @@ SUITES: list[tuple[str, Path, list[str], str]] = [
     ("automation-logging", C / "automation-logging", [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider"], "py"),
     ("automation-registry", C / "automation-registry", [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider"], "py"),
     ("automation-builder", C / "automation-builder", [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider"], "py"),
+    ("automation-studio", C / "automation-studio", [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider"], "py"),
     ("execution-framework", C / "execution-framework", ["node", "--test"], "node"),
     ("automation-hello-world", C / "examples" / "automation-hello-world", [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider"], "py"),
     ("automation-invoice-router", C / "examples" / "automation-invoice-router", [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider"], "py"),

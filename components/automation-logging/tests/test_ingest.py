@@ -142,5 +142,5 @@ def test_repo_alerting_yaml_loads():
     from pathlib import Path
     from automation_logging import alerting
     cfg = alerting.load_config(Path(__file__).resolve().parent.parent / "alerting.yaml")
-    assert {c["type"] for c in cfg["channels"]} == {"file", "webhook", "jira", "email"} and cfg["routing"]["critical"] == ["outbox"]
+    assert {c["type"] for c in cfg["channels"]} == {"file", "webhook", "jira", "email"} and cfg["routing"]["critical"] == ["outbox", "teams", "mail"]
     assert cfg["quiet_hours"]["window"] == "22:00-06:00" and cfg["owners"] == {}
