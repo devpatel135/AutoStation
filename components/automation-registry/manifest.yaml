@@ -82,9 +82,9 @@ automations:
     paused_reason: ""
     llm_allowed_classification: internal
     rings:
-      dev: "1.1.1"
-      pilot: "1.1.1"
-      broad: "1.1.1"
+      dev: "1.1.2"
+      pilot: "1.1.2"
+      broad: "1.1.2"
     versions:
       "1.0.0":
         url: artifacts/automations/automation-certification-site-1.0.0.zip
@@ -101,6 +101,12 @@ automations:
       "1.1.1":
         url: artifacts/automations/automation-certification-site-1.1.1.zip
         sha256: "353ddc380dc74bf56281ea80a10cc0a03753682f4e4baadad8074cd44ce63da6"
+        requires:
+          wrapper_core: ">=0.1.0,<1.0.0"
+          execution_framework: ">=0.1.0,<1.0.0"
+      "1.1.2":
+        url: artifacts/automations/automation-certification-site-1.1.2.zip
+        sha256: "4e247cf4952f52a3660143bf7066714123bb745c7df59bd773f24cee66f69b86"
         requires:
           wrapper_core: ">=0.1.0,<1.0.0"
           execution_framework: ">=0.1.0,<1.0.0"
