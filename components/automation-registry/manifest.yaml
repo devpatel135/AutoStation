@@ -116,7 +116,7 @@ automations:
       slots:
         - id: daily
           type: daily
-          time: "09:00"
+          time: "14:00"
           params: {}
     error_handling:
       max_retries: 3

@@ -77,7 +77,7 @@ def build(now: datetime | None = None, seed: int = 7, days: int = 14) -> tuple[l
             by_key.setdefault(("automation-invoice-router", host), []).append(r)
         for hi, host in enumerate(hosts_for["automation-certification-site"]):
             start = at(d, 7, 30)
-            if start > now - timedelta(minutes=30) or d == 2:   # nobody ran on day -2: MISSED
+            if start > now - timedelta(minutes=30) or d == 2:   # nobody ran on day -2: MISSED (nothing within 24h after it either, so it is not a late catch-up)
                 continue
             items = [(f"RPT-{d}-{i}", "success", rnd.randint(8000, 15000), None) for i in range(rnd.randint(4, 8))]
             r = make("automation-certification-site", host, start, version="2.0.1", duration_ms=rnd.randint(240000, 310000), items=items,
@@ -122,8 +122,8 @@ def build(now: datetime | None = None, seed: int = 7, days: int = 14) -> tuple[l
     r["automation_version"] = "2.0.0"
     r["self_heal"] = {"installed": [], "offline": False, "errors": ["automation-certification-site 2.0.1: sha256 mismatch (staged download corrupt)"]}
     r["synopsis"] = "automation-certification-site finished slowly (15m) on version 2.0.0; self-heal could not install 2.0.1."
-    # UNEXPECTED: ran inside the 02:00-04:00 maintenance window yesterday
-    make("automation-certification-site", HOSTS[4], at(1, 2, 30), version="2.0.1", duration_ms=250000, items=[("RPT-X", "success", 9000, None)])
+    # UNEXPECTED: ran inside the 02:00-04:00 maintenance window (the night before the missed run, so it is not a late catch-up for it)
+    make("automation-certification-site", HOSTS[4], at(2, 2, 30), version="2.0.1", duration_ms=250000, items=[("RPT-X", "success", 9000, None)])
 
     # heartbeats: daily login pings; VDI-0306 stops 3 days ago
     ver = {"automation-certification-site": "2.0.1", "automation-invoice-router": "1.2.0"}

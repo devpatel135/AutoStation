@@ -22,6 +22,8 @@ DEFAULTS = {
     "drift_grace_h": 6,       # VERSION_DRIFT: a run this long after a target change must be on the new version
     "trend_days": 14,
     "min_grace_min": 15,      # MISSED grace = max(min_grace_min, 0.25 * baseline)
+    "late_window_h": 24,      # a run this long after the expected time still counts as that slot's run (Task Scheduler runs a missed
+                              # slot as soon as the machine is back on: a laptop that was off at the time is late, not 'missed')
 }
 _UNCOUNTED = ("halted_paused", "skipped_maintenance")
 _FAILED = ("failed", "self_heal_failed")
@@ -413,7 +415,9 @@ def compute_signals(data: Data, manifest: dict, now: datetime, cfg: dict, state:
                 if wc_manifest.in_maintenance(entry.get("schedule"), e):
                     continue
                 nxt = next((t for s, t in exp[i + 1:] if s == slot_id), e + timedelta(days=366))
-                end = min(nxt, e + max(grace * 4, timedelta(hours=6)))  # a very late run is not 'this' expected run
+                # catch-up runs count; but a run that starts inside the NEXT slot's own on-time window (10 minutes early or later) is that
+                # slot's run, not a late one for this slot
+                end = min(nxt - timedelta(minutes=10), e + max(grace * 4, timedelta(hours=cfg.get("late_window_h", 24))))
                 lo = e - timedelta(minutes=10)
                 ran = any(lo <= t < end and (slot == slot_id or slot not in slot_ids) for t, slot in run_times)
                 if not ran:

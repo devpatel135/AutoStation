@@ -252,3 +252,15 @@ def test_missed_id_is_stable_as_more_runs_are_missed():
     first = by_type(signals_of(d, manifest(), now=T(0, 10))[0], "MISSED")
     later = by_type(signals_of(d, manifest(), now=T(-1, 10))[0], "MISSED")
     assert len(first) == len(later) == 1 and first[0]["id"] == later[0]["id"]
+
+
+def test_a_catch_up_run_hours_late_counts_as_that_slots_run_but_a_day_late_is_still_missed():
+    # a laptop that was off at 09:00 and ran the slot at 19:30 (Task Scheduler's catch-up): late, not missed
+    runs = daily_runs([4, 3, 2, 1]) + [run_record("auto-a", T(0, 19, 30))]
+    d = data_of(*runs, lifecycle_record("installed", "auto-a", "VDI-1", T(5)))
+    sigs, _, _ = signals_of(d, manifest(), now=T(0, 20))
+    assert not by_type(sigs, "MISSED")
+    # ...but nothing within 24h of the expected time is still a missed run
+    d2 = data_of(*daily_runs([4, 3, 2, 1]), lifecycle_record("installed", "auto-a", "VDI-1", T(5)))
+    sigs, _, _ = signals_of(d2, manifest(), now=T(0, 20))
+    assert len(by_type(sigs, "MISSED")) == 1

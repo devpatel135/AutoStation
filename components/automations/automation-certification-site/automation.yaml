@@ -1,5 +1,5 @@
 name: automation-certification-site
-version: 1.1.1
+version: 1.1.2
 runtime: node
 entrypoint: main.js
 args: []
@@ -9,7 +9,7 @@ timeout_s: 900
 # Runs at 09:00 daily and once right after install. Headed on purpose: the first sign-in to the browser profile is interactive.
 schedule:
   slots:
-    - {id: daily, type: daily, time: "09:00", params: {}}
+    - {id: daily, type: daily, time: "14:00", params: {}}
   expected_duration_ms: {baseline: 30000, warn_threshold: 4.0}
 error_handling: {max_retries: 2, network_retry_wait_s: 30, backoff_multiplier: 2.0, skip_on_data_error: true}
 data_classification: internal
