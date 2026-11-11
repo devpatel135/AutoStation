@@ -111,7 +111,7 @@ def test_catalog_admin_and_detail_views_inside_the_app(demo_site):
     idx = view(site, "catalog")
     assert "releases/download/installers-latest/automation-certification-site-setup.exe" in idx and 'href="installers/' not in idx
     assert "Site home" not in idx and 'class="subtabs"' in idx                                   # one app: no second nav, sub-tabs instead
-    assert {"", "compatibility", "governance", "a/automation-certification-site"} <= set(views(site, "catalog"))
+    assert {"", "overview", "health", "fleet", "compatibility", "governance", "audit", "a/automation-certification-site"} <= set(views(site, "catalog"))
     detail = view(site, "catalog", "a/automation-certification-site")
     assert 'id="live-runs"' in detail and 'href="#/install/automation-certification-site"' in detail and 'href="#/admin?a=automation-certification-site"' in detail
     adm = view(site, "admin")
@@ -309,6 +309,8 @@ def test_old_urls_redirect_into_the_app_and_have_no_nav_of_their_own(demo_site):
     site = demo_site[0]
     expect = {"jobs/index.html": "/jobs", "dashboard/index.html": "/dashboard", "portal/index.html": "/catalog", "portal/admin.html": "/admin",
               "portal/compatibility.html": "/catalog/compatibility", "portal/governance.html": "/catalog/governance",
+              "portal/overview.html": "/catalog/overview", "portal/health.html": "/catalog/health", "portal/fleet.html": "/catalog/fleet",
+              "portal/audit.html": "/catalog/audit",
               "portal/automation/automation-certification-site.html": "/catalog/a/automation-certification-site",
               "install/automation-certification-site.html": "/install/automation-certification-site", "docs/RUNBOOKS.html": "/docs/RUNBOOKS",
               "docs/index.html": "/docs", "install/index.html": "/install"}
@@ -402,7 +404,7 @@ def test_no_second_navigation_bar_anywhere_in_the_views(demo_site):
     text = all_view_text(demo_site[0])
     assert '<header class="top"' not in text and '<nav class="main"' not in text and "Site home" not in text
     for tag in re.findall(r"<nav[^>]*>", text):
-        assert re.search(r'class="(subtabs|docs-nav)"', tag), f"unexpected navigation element inside a view: {tag}"
+        assert re.search(r'class="(subtabs|docs-nav|dash-nav)"', tag), f"unexpected navigation element inside a view: {tag}"   # in-view sub-tabs only, never a second site bar
 
 
 # ---- the checker itself -----------------------------------------------------------------------------------------------------
@@ -605,3 +607,25 @@ def test_app_is_full_width_with_a_readable_measure_and_a_jobs_table_drawer_split
         assert not re.search(r"max-width:\s*1100px", view(site, tab)), f"{tab}: the standalone page's 1100px column leaked into the app"
     assert 'class="split"' in view(site, "jobs") and 'id="drawer"' in view(site, "jobs")
     assert re.search(r"\.page\s*\{[^}]*max-width:\s*1100px", css) and css.index(".page { max-width:none") > css.index("max-width:1100px")   # base rule exists but is overridden last
+
+
+def test_dashboard_view_carries_the_client_rendered_dashboard_without_a_second_site_bar_or_external_fonts(demo_site):
+    site = demo_site[0]
+    dash = view(site, "dashboard")
+    for needle in ('id="__dash_data__"', 'class="tab-btn', 'id="panel-overview"', 'class="dash-nav"', 'id="kpi-row"'):
+        assert needle in dash, needle
+    assert "nav-brand" not in re.sub(r"<style>.*?</style>", "", dash, flags=re.S)          # the dashboard's own brand header is not repeated inside the app
+    assert "fonts.googleapis" not in dash and "fonts.gstatic" not in dash
+    js = (site / "assets" / "views.js").read_text(encoding="utf-8")
+    assert js.count("getElementById('theme-toggle')") == 0                                   # one theme handler (the shell's), not two that cancel out
+    assert "fonts.googleapis" not in js
+
+
+def test_portal_views_are_catalog_sub_views_not_pages_with_their_own_bar(demo_site):
+    site = demo_site[0]
+    cat = views(site, "catalog")
+    for sub in ("overview", "health", "fleet", "audit", "compatibility", "governance"):
+        body = cat[sub]
+        assert len(re.sub(r"<style>.*?</style>", "", body, flags=re.S).strip()) > 200, sub
+        assert '<nav class="site-nav"' not in body and "Site home" not in body, sub
+        assert 'class="subtabs"' in body, sub                                                # the Catalog sub-tab strip leads every one of them

@@ -29,7 +29,8 @@ TAB_NAMES = [t for t, _ in TABS]
 SIMPLE = {"dashboard", "program", "jobs", "machines", "reliability", "errors", "queues", "schedules", "audit"}
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 KEEP_PAGES = {"404.html", "docs/assessment.html"}          # real pages that remain (the 404 page, the hand-authored assessment document)
-SUBTABS = [("", "Automations"), ("compatibility", "Compatibility"), ("governance", "Governance")]
+SUBTABS = [("", "Automations"), ("overview", "Overview"), ("health", "Health"), ("fleet", "Fleet"), ("compatibility", "Compatibility"),
+           ("governance", "Governance"), ("audit", "Audit log")]
 
 
 # ---------------------------------------------------------------------------------------------------------------------- routes
@@ -45,6 +46,8 @@ def route_of(rel: str):
         return ("catalog", "")
     if p == "portal/admin.html":
         return ("admin", "")
+    if p in ("portal/overview.html", "portal/health.html", "portal/fleet.html", "portal/audit.html"):
+        return ("catalog", p.split("/")[1][:-5])                 # the registry portal's own views are sub-views of the Catalog tab
     if p == "portal/compatibility.html":
         return ("catalog", "compatibility")
     if p == "portal/governance.html":
@@ -135,6 +138,15 @@ def extract(page_html: str) -> dict:
         data = re.search(r'<script type="application/json" id="__dash_data__">.*?</script>', body, re.S)
         content = ('<nav class="dash-nav" aria-label="Dashboard sections">' + (tabs.group(0) if tabs else "") + (gen.group(0) if gen else "") + "</nav>"
                    + (strip.group(0) if strip else "") + (data.group(0) if data else "") + '<div class="main">' + panels + "</div>")
+        kind = "dash"
+        if head:
+            css = "".join(_STYLE.findall(head.group(1)))
+    elif '<nav class="site-nav"' in body and '<div class="page">' in body:   # the registry portal's own pages (own top bar + status strip): keep strip and body, drop the bar
+        a = body.index(">", body.index('<div class="page">')) + 1
+        b = body.index('<footer class="foot">', a) if '<footer class="foot">' in body[a:] else body.rindex("</div>")
+        inner = body[a:b]
+        strip = re.search(r'<div class="status-strip">.*?<div class="fleet-badge[^>]*>.*?</div></div>', body, re.S)
+        content = (strip.group(0) if strip else "") + inner
         kind = "dash"
         if head:
             css = "".join(_STYLE.findall(head.group(1)))
@@ -288,6 +300,7 @@ header.top .tools { margin-left:auto; display:flex; align-items:center; gap:.4re
 #view .dash nav.dash-nav { position:static; top:auto; left:auto; right:auto; height:var(--nh); padding-inline:.5rem; border:1px solid var(--bd); border-radius:8px 8px 0 0; z-index:1; }
 #view .dash .sstrip { position:static; top:auto; left:auto; right:auto; height:auto; min-height:var(--sh); padding:.3rem .75rem; margin:0 0 1rem; border:1px solid var(--bd); border-top:0; border-radius:0 0 8px 8px; }
 #view .dash .main { padding:0 0 2rem; max-width:none; margin:0; }
+#view .dash .status-strip { position:static; top:auto; left:auto; right:auto; height:auto; min-height:34px; padding:.3rem .75rem; margin:0 0 1rem; border:1px solid var(--bd, var(--border)); border-radius:8px; }
 .status-banner { display:flex; align-items:center; gap:.7rem; padding:.7rem 1rem; border-radius:8px; border:1px solid var(--border); border-left-width:4px; margin:0 0 1rem; background:var(--surface); }
 .status-banner.green { border-left-color:var(--green); } .status-banner.amber { border-left-color:var(--yellow); } .status-banner.red { border-left-color:var(--red); } .status-banner.grey { border-left-color:var(--fg-dim); }
 .status-banner b { font-size:1rem; }
@@ -308,6 +321,9 @@ body { padding-left:clamp(1rem,2.5vw,2.5rem); padding-right:clamp(1rem,2.5vw,2.5
   .split > #drawer { position:sticky; top:3.6rem; max-height:calc(100vh - 4.6rem); overflow:auto; margin:0; }
 }
 @media (min-width:1800px) { .tiles { grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); } }
+#view :not(pre) > code { overflow-wrap:anywhere; }
+#view .md p, #view .md li, #view .md blockquote, #view .panel > p, #view .panel li, #view .summary { overflow-wrap:break-word; }   /* slash- or dash-joined lists with no spaces break too */   /* a long command or path in running text wraps instead of widening the page */
+@media (max-width:760px) { .docs-layout { grid-template-columns:minmax(0,1fr); } .docs-nav { position:static; max-height:none; } .tbl-wrap, .md table { max-width:100%; overflow-x:auto; display:block; } }
 @media (max-width:760px) { header.top .tools { margin-left:0; width:100%; } .gs input { width:100%; max-width:none; } .gs { display:block; margin:0; width:100%; flex:1; } }
 """
 
