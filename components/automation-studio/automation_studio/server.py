@@ -22,10 +22,17 @@ import argparse
 import asyncio
 import json
 import os
+import shutil
+import subprocess
 import sys
 import threading
 from pathlib import Path
 from typing import Any
+
+# Repo root derived from this file's location (components/automation-studio/automation_studio/server.py)
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+# Per-session scaffold output paths, stored after a successful scaffold so run/test/submit can use them.
+_scaffold_paths: dict[str, str] = {}
 
 try:
     from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
@@ -143,12 +150,160 @@ async def scaffold_session(session_id: str, body: dict[str, Any]) -> dict[str, A
     result: ScaffoldResult = await asyncio.to_thread(
         scaffold_from_contract, project_yaml, out_base, no_verify=no_verify
     )
+    if result.success:
+        _scaffold_paths[session_id] = str(result.out_path)
     return {
         "success": result.success,
         "out_path": str(result.out_path),
         "output": result.output,
         "error": result.error,
     }
+
+
+# ── Repo info ─────────────────────────────────────────────────────────────────
+
+@app.get("/api/repo")
+async def repo_info() -> dict[str, Any]:
+    """Return context the UI needs to show the submit panel."""
+    has_gh = shutil.which("gh") is not None
+    try:
+        r = subprocess.run(["git", "remote", "get-url", "origin"], cwd=str(_REPO_ROOT),
+                           capture_output=True, text=True, timeout=5)
+        remote = r.stdout.strip() if r.returncode == 0 else ""
+    except Exception:
+        remote = ""
+    return {"repo_root": str(_REPO_ROOT), "has_gh": has_gh, "remote": remote}
+
+
+# ── Submit (scaffold → branch → PR) ──────────────────────────────────────────
+
+@app.post("/api/sessions/{session_id}/submit")
+async def submit_session(session_id: str, body: dict[str, Any]) -> dict[str, Any]:
+    out_path_str = _scaffold_paths.get(session_id, "").strip()
+    if not out_path_str:
+        raise HTTPException(status_code=422, detail="scaffold not yet completed for this session")
+    out_path = Path(out_path_str)
+    if not out_path.is_dir():
+        raise HTTPException(status_code=422, detail=f"scaffold output not found: {out_path}")
+
+    automation_name = out_path.name
+    branch = f"automation/{automation_name}"
+    pr_title = (body.get("pr_title") or f"feat: add {automation_name}").strip()
+    pr_body = (body.get("pr_body") or (
+        f"Scaffolded via AUTOSTATION Studio.\n\nAutomation: `{automation_name}`\n\n"
+        "## Checklist\n- [ ] Review `automation.yaml` schedule and classification\n"
+        "- [ ] Run `amx dev .` locally\n- [ ] All tests pass"
+    )).strip()
+
+    dest = _REPO_ROOT / "components" / "automations" / automation_name
+    if dest.exists() and not body.get("force"):
+        raise HTTPException(status_code=409, detail=f"{automation_name} already exists in repo; pass force=true to overwrite")
+
+    def _do_submit() -> dict[str, Any]:
+        if dest.exists():
+            shutil.rmtree(dest)
+        shutil.copytree(str(out_path), str(dest))
+
+        def git(*args: str) -> subprocess.CompletedProcess:
+            return subprocess.run(["git", *args], cwd=str(_REPO_ROOT),
+                                  capture_output=True, text=True, check=True, timeout=30)
+
+        git("checkout", "-b", branch)
+        git("add", str(dest.relative_to(_REPO_ROOT)))
+        git("commit", "-m", pr_title,
+            "--trailer", "Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>")
+        git("push", "origin", branch)
+
+        pr_url: str | None = None
+        gh_note = ""
+        if shutil.which("gh"):
+            r = subprocess.run(
+                ["gh", "pr", "create", "--title", pr_title, "--body", pr_body, "--head", branch],
+                cwd=str(_REPO_ROOT), capture_output=True, text=True, timeout=30,
+            )
+            if r.returncode == 0:
+                pr_url = r.stdout.strip()
+            else:
+                gh_note = r.stderr.strip()[:300]
+        else:
+            gh_note = "gh CLI not found — push complete; open a PR manually."
+
+        return {"branch": branch, "pr_url": pr_url, "automation_name": automation_name,
+                "dest": str(dest), "gh_note": gh_note}
+
+    try:
+        return await asyncio.to_thread(_do_submit)
+    except subprocess.CalledProcessError as exc:
+        raise HTTPException(status_code=500,
+                            detail=f"git error: {(exc.stderr or '').strip()[:400]}")
+
+
+# ── Dev: stream subprocess output via WebSocket ───────────────────────────────
+
+async def _stream_subprocess(websocket: WebSocket, cmd: list[str], cwd: str) -> None:
+    """Run cmd, stream each stdout/stderr line as {type:'line',text:'...'}, finish with {type:'done',exit_code:N}."""
+    env = dict(os.environ)
+    env.setdefault("AUTOMAGIX_FRAMEWORK_DIR", str(_REPO_ROOT / "components" / "execution-framework"))
+    env["PYTHONPATH"] = os.pathsep.join(filter(None, [
+        str(_REPO_ROOT / "components" / "wrapper-core"), env.get("PYTHONPATH", ""),
+    ]))
+    proc = await asyncio.create_subprocess_exec(
+        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+        cwd=cwd, env=env,
+    )
+    assert proc.stdout is not None
+    async for raw in proc.stdout:
+        try:
+            await websocket.send_text(json.dumps({"type": "line", "text": raw.decode("utf-8", errors="replace")}))
+        except Exception:
+            break
+    await proc.wait()
+    await websocket.send_text(json.dumps({"type": "done", "exit_code": proc.returncode}))
+
+
+@app.websocket("/ws/{session_id}/run")
+async def run_ws(websocket: WebSocket, session_id: str) -> None:
+    await websocket.accept()
+    out_path = _scaffold_paths.get(session_id, "")
+    if not out_path or not Path(out_path).is_dir():
+        await websocket.send_text(json.dumps({"type": "error", "message": "scaffold output not found"}))
+        await websocket.close()
+        return
+    await websocket.send_text(json.dumps({"type": "start", "step": "run"}))
+    try:
+        amx = str(_REPO_ROOT / "tools" / "amx.py")
+        await _stream_subprocess(websocket, [sys.executable, amx, "dev", out_path], str(_REPO_ROOT))
+    except Exception as exc:
+        await websocket.send_text(json.dumps({"type": "error", "message": str(exc)}))
+    finally:
+        try:
+            await websocket.close()
+        except Exception:
+            pass
+
+
+@app.websocket("/ws/{session_id}/test")
+async def test_ws(websocket: WebSocket, session_id: str) -> None:
+    await websocket.accept()
+    out_path = _scaffold_paths.get(session_id, "")
+    if not out_path or not Path(out_path).is_dir():
+        await websocket.send_text(json.dumps({"type": "error", "message": "scaffold output not found"}))
+        await websocket.close()
+        return
+    await websocket.send_text(json.dumps({"type": "start", "step": "test"}))
+    try:
+        await _stream_subprocess(
+            websocket,
+            [sys.executable, "-m", "pytest", "-v", "--tb=short", "-p", "no:cacheprovider", "."],
+            out_path,
+        )
+    except Exception as exc:
+        await websocket.send_text(json.dumps({"type": "error", "message": str(exc)}))
+    finally:
+        try:
+            await websocket.close()
+        except Exception:
+            pass
 
 
 # ── WebSocket step runner ─────────────────────────────────────────────────────

@@ -341,14 +341,63 @@ button:disabled { opacity: .4; cursor: default }
     </div>
   </div>
 
-  <!-- Done -->
+  <!-- Dev panel (shown after scaffold succeeds) -->
   <div id="view-done" hidden>
-    <div class="sh">Complete</div>
-    <div class="card" style="text-align:center;padding:36px 24px">
-      <div style="font-size:28px;margin-bottom:12px">✓</div>
-      <div style="font-size:16px;font-weight:600;margin-bottom:6px">Project scaffolded</div>
-      <div id="done-path" style="font-family:var(--mono);font-size:12px;color:var(--ac-txt);margin:8px 0 16px"></div>
-      <div id="done-next" style="color:var(--fg2);font-size:13px;margin-bottom:20px"></div>
+    <div class="sh">Dev Tools</div>
+
+    <!-- Path card -->
+    <div class="card" style="margin-bottom:12px">
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <span style="font-size:18px">✓</span>
+        <div>
+          <div style="font-weight:600;margin-bottom:2px">Project scaffolded</div>
+          <div id="done-path" style="font-family:var(--mono);font-size:12px;color:var(--ac-txt)"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Run / Test -->
+    <div class="card" style="margin-bottom:12px">
+      <div style="font-weight:600;margin-bottom:12px">Run &amp; Test</div>
+      <div style="display:flex;gap:8px;margin-bottom:12px">
+        <button class="btn-primary" id="btn-run">▶ Run</button>
+        <button class="btn-primary" id="btn-test">⬡ Test</button>
+        <button class="btn-ghost" id="btn-clear-term" style="margin-left:auto">Clear</button>
+      </div>
+      <div id="dev-terminal" class="terminal" hidden></div>
+    </div>
+
+    <!-- Submit to GitHub -->
+    <div class="card" style="margin-bottom:12px" id="submit-card">
+      <div style="font-weight:600;margin-bottom:12px">Submit to GitHub</div>
+      <div id="submit-no-gh" class="err-banner" hidden>
+        gh CLI not found — push manually or install gh from cli.github.com.
+      </div>
+      <div id="submit-form">
+        <div class="goal-label" style="margin-bottom:4px">Branch name</div>
+        <input id="branch-name" type="text" spellcheck="false"
+               style="width:100%;padding:8px 10px;background:var(--sf2);border:1px solid var(--bd);border-radius:6px;color:var(--fg);font-family:var(--mono);font-size:12px;margin-bottom:10px">
+        <div class="goal-label" style="margin-bottom:4px">PR title</div>
+        <input id="pr-title" type="text" spellcheck="false"
+               style="width:100%;padding:8px 10px;background:var(--sf2);border:1px solid var(--bd);border-radius:6px;color:var(--fg);font-size:13px;margin-bottom:10px">
+        <div class="goal-label" style="margin-bottom:4px">PR description</div>
+        <textarea id="pr-body" rows="4" spellcheck="false"
+               style="width:100%;padding:8px 10px;background:var(--sf2);border:1px solid var(--bd);border-radius:6px;color:var(--fg);font-size:13px;resize:vertical;margin-bottom:12px"></textarea>
+        <div style="display:flex;gap:8px;align-items:center">
+          <button class="btn-primary" id="btn-submit">↑ Create branch &amp; PR</button>
+          <span id="submit-spinner" hidden><span class="spinner"></span></span>
+        </div>
+        <div class="err-banner" id="submit-err" style="margin-top:10px"></div>
+        <div id="submit-ok" hidden
+             style="margin-top:10px;padding:10px 12px;background:var(--ac-lo);border-radius:6px;border:1px solid var(--ac)">
+          <div style="font-weight:600;color:var(--ac-txt);margin-bottom:4px">PR created ✓</div>
+          <a id="pr-link" href="#" target="_blank" rel="noopener"
+             style="color:var(--ac-txt);font-size:13px;word-break:break-all"></a>
+        </div>
+      </div>
+    </div>
+
+    <div style="text-align:center;padding:8px 0 24px">
       <button class="btn-ghost" id="btn-new">Design another automation</button>
     </div>
   </div>
@@ -730,10 +779,21 @@ $('btn-scaffold').addEventListener('click', async () => {
     });
     if (r.success) {
       term.textContent = r.output;
+      // Populate dev panel
       $('done-path').textContent = r.out_path;
-      $('done-next').innerHTML =
-        `<code style="font-family:var(--mono);font-size:12px">cd ${r.out_path} && python -m wrapper_core dev .</code>`;
-      await new Promise(res => setTimeout(res, 800));
+      const name = r.out_path.split(/[/\\]/).pop();
+      $('branch-name').value = `automation/${name}`;
+      $('pr-title').value = `feat: add ${name}`;
+      $('pr-body').value =
+        `Scaffolded via AUTOSTATION Studio.\n\nAutomation: \`${name}\`\n\n` +
+        `## Checklist\n- [ ] Review \`automation.yaml\` schedule and classification\n` +
+        `- [ ] \`amx dev .\` passes locally\n- [ ] All tests pass`;
+      // Check repo context (gh available?)
+      try {
+        const repo = await api('GET', '/api/repo');
+        if (!repo.has_gh) $('submit-no-gh').hidden = false;
+      } catch (_) {}
+      await new Promise(res => setTimeout(res, 600));
       hide('view-chain');
       show('view-done');
     } else {
@@ -748,6 +808,83 @@ $('btn-scaffold').addEventListener('click', async () => {
     errEl.classList.add('visible');
     btn.disabled = false;
     btn.textContent = 'Retry scaffold';
+  }
+});
+
+// ── Dev panel: Run / Test (streaming WebSocket) ──────────────────────────────
+
+function streamWS(step) {
+  const term = $('dev-terminal');
+  const runBtn = $('btn-run');
+  const testBtn = $('btn-test');
+  term.textContent = '';
+  term.hidden = false;
+  runBtn.disabled = true;
+  testBtn.disabled = true;
+
+  const ws = new WebSocket(`${WS_BASE}/ws/${sessionId}/${step}`);
+  ws.onmessage = (e) => {
+    const msg = JSON.parse(e.data);
+    if (msg.type === 'line') {
+      term.textContent += msg.text;
+      term.scrollTop = term.scrollHeight;
+    } else if (msg.type === 'done') {
+      const badge = msg.exit_code === 0 ? '✓ Passed' : `✗ Exit ${msg.exit_code}`;
+      term.textContent += `\n${badge}\n`;
+      term.scrollTop = term.scrollHeight;
+      runBtn.disabled = false;
+      testBtn.disabled = false;
+    } else if (msg.type === 'error') {
+      term.textContent += `\nError: ${msg.message}\n`;
+      runBtn.disabled = false;
+      testBtn.disabled = false;
+    }
+  };
+  ws.onerror = () => {
+    term.textContent += '\nWebSocket error\n';
+    runBtn.disabled = false;
+    testBtn.disabled = false;
+  };
+}
+
+$('btn-run').addEventListener('click', () => streamWS('run'));
+$('btn-test').addEventListener('click', () => streamWS('test'));
+$('btn-clear-term').addEventListener('click', () => {
+  $('dev-terminal').textContent = '';
+  $('dev-terminal').hidden = true;
+});
+
+// ── Dev panel: Submit ────────────────────────────────────────────────────────
+
+$('btn-submit').addEventListener('click', async () => {
+  const btn = $('btn-submit');
+  const errEl = $('submit-err');
+  const spinner = $('submit-spinner');
+  errEl.classList.remove('visible');
+  $('submit-ok').hidden = true;
+  btn.disabled = true;
+  spinner.hidden = false;
+
+  try {
+    const r = await api('POST', `/api/sessions/${sessionId}/submit`, {
+      pr_title: $('pr-title').value.trim(),
+      pr_body:  $('pr-body').value.trim(),
+    });
+    if (r.pr_url) {
+      $('pr-link').href = r.pr_url;
+      $('pr-link').textContent = r.pr_url;
+      $('submit-ok').hidden = false;
+    } else {
+      $('pr-link').href = '#';
+      $('pr-link').textContent = `Branch pushed: ${r.branch}${r.gh_note ? ' — ' + r.gh_note : ''}`;
+      $('submit-ok').hidden = false;
+    }
+  } catch (e) {
+    errEl.textContent = e.message;
+    errEl.classList.add('visible');
+  } finally {
+    btn.disabled = false;
+    spinner.hidden = true;
   }
 });
 
