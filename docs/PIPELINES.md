@@ -8,22 +8,24 @@ the enterprise option if you later move the control plane to GitLab; the manifes
 
 ```
  push / PR ──▶ ci ───────────▶ hygiene (pinned actions, workflow rules, secrets scan, py3.9 syntax) + tests (Python 3.9/3.12 on Windows+Linux, Node, end-to-end demo)
+        PR ──▶ ci / version-gate ─▶ build_registry.py --check: a changed component whose version was not bumped fails the PR, naming the file to bump
         PR ──▶ pr ───────────▶ path + size labels, one sticky triage comment (promotion checklist when the manifest changes)
         PR ──▶ security ─────▶ dependency-review (GitHub-owned) + audits
 
  push to main
    ├─▶ release ──▶ tests ─▶ build_registry.py ─▶ NEW immutable zips ─▶ branch `registry-artifacts` (append-only)
    │                              └────▶ manifest (all rings follow main) ─▶ committed to main [skip ci]
-   ├─▶ installers ──▶ NSIS installer (bundled Python, Node + Playwright, MinGit) ─▶ smoke: silent install, real headless-Edge run, uninstall
+   ├─▶ installers (after a successful `release`, or when the builder/bundling code changed) ──▶ NSIS installer (bundled Python, Node + Playwright, MinGit) ─▶ smoke: silent install, real headless-Edge run, uninstall
    │                              └────▶ attestation, SBOM, release notes ─▶ Release `installers-latest` (<automation>-setup.exe + .sha256)
-   └─▶ site ──▶ registry (signed when REGISTRY_SIGNING_SEED exists) + live logs ─▶ dashboards ─▶ GitHub Pages
+   └─▶ site ──▶ registry (`--publish-only`: what release produced; signed when REGISTRY_SIGNING_SEED exists) + live logs ─▶ dashboards ─▶ GitHub Pages
                    ├─ /registry/  manifest.yaml(.sig), triggers.json, artifacts/      ◀── endpoints self-heal from here
                    ├─ /install/   install center, catalog.json, bootstrap.ps1
                    └─ /docs/  /portal/  /dashboard/  /program/  /jobs/  /machines/  /queues/  /schedules/  /audit/
 
- every 30 min ──▶ health ──▶ live logs ─▶ fleet signals ─▶ `ops-signal` GitHub issues (opened, commented, reopened, auto-closed)
+ every ~30 min (best-effort) ──▶ health ──▶ live logs ─▶ fleet signals ─▶ `ops-signal` GitHub issues (opened, commented, reopened, auto-closed)
  daily + after every installer build ──▶ canary ──▶ download the PUBLISHED installer, verify sha256 + attestation, install, run, uninstall ─▶ issue on failure
  weekly ──▶ security ──▶ pip/npm audit, posture check, SBOM artifact          weekly ──▶ codeql
+any pipeline failing on main (and a site not refreshed for 12 h) ──▶ pipeline-alert ──▶ one `ops-signal` issue per workflow (`pipe-<workflow>`), closed by the next success
  operators ──▶ admin panel ──▶ ops-action ──▶ PR (pause, resume, promote, rollback, fleet-*)  or  `triggers` branch (run now)
  endpoints ──▶ push run logs (git over ssh with a deploy key, or the GitHub API) ──▶ private logs repo ──▶ health + site
 ```
@@ -32,17 +34,18 @@ the enterprise option if you later move the control plane to GitLab; the manifes
 
 | Workflow | Triggers | What it does | Needs |
 |---|---|---|---|
-| `ci.yml` | push to main, pull request | `hygiene` (tools/check_workflows.py with a real YAML parser, tools/pin_actions.py --check, tools/check_secrets.py, py3.9 syntax), every Python suite (3.9/3.12, Windows+Linux), Node syntax + tests, end-to-end walkthrough | nothing |
+| `ci.yml` | push to main, pull request | `hygiene` (tools/check_workflows.py with a real YAML parser, tools/pin_actions.py --check, tools/check_secrets.py, py3.9 syntax, `tools/bump_version.py --check`: VERSION, `_version.py` and package.json agree), `version-gate` (`tools/build_registry.py --check` against a clone of the public `registry-artifacts` branch: a changed component must carry a new version, and the failure names the files to bump; `python tools/bump_version.py <component>` does it), every Python suite (3.9/3.12, Windows+Linux; dependencies from `requirements-ci.txt`), Node syntax + tests, end-to-end walkthrough. Runs of the same ref cancel each other, except on `main` | nothing |
 | `pr.yml` | pull request | Path labels (`area:*`, `registry-change`, `security-sensitive`), a `size:*` label and one sticky comment (promotion checklist, risk notes). Reads changed files through the API, never runs PR code; labelling is skipped on fork PRs | `GITHUB_TOKEN` |
-| `release.yml` | push to `main` touching `components/**`, manual | Tests, `tools/build_registry.py` (immutability enforced), appends new zips to `registry-artifacts`, auto-promotes the new versions to every ring and commits the manifest to `main` | `contents: write` |
-| `installer-dev.yml` (`installers`) | push to builder/wrapper-core/automation paths, manual | Builds the NSIS installer on Windows, smoke-tests install/run/uninstall, writes the SBOM (`autostation-sbom.cdx.json`) and release notes (`tools/release_notes.py`), attests build provenance, publishes to the rolling `installers-latest` release | `contents: write`, `id-token: write`, `attestations: write`; `LOGGING_TOKEN` makes it a connected build; `AUTOSTATION_REGISTRY_PUBKEY` pins the signing key |
-| `site.yml` | push to `main`, every 30 min, after `release`/`installers`, manual | Builds registry + site (signs the manifest when `REGISTRY_SIGNING_SEED` exists), ingests the live logs, checks links, deploys to Pages | Pages source = GitHub Actions |
+| `release.yml` | push to `main` touching `components/**`, manual | Tests, `tools/build_registry.py` (immutability enforced; the one place a same-version/different-content change fails a deploy), appends new zips to `registry-artifacts`, auto-promotes the new versions to every ring and commits the manifest to `main` (retried on a concurrent push). `git ls-remote` is read by exit code: 0 exists, 2 absent (bootstrap, only here), anything else fails the run | `contents: write` |
+| `installer-dev.yml` (`installers`) | after a successful `release`, push to the builder / bundling / smoke-script paths, manual. One run at a time (`concurrency: installers`) | Builds the NSIS installer on Windows, smoke-tests install/run/uninstall through the shared `tools/ci/smoke-installer.ps1` (run with `--ignore-maintenance`, so a weekend maintenance window cannot fail it), writes the SBOM (`autostation-sbom.cdx.json`) and release notes (`tools/release_notes.py`), attests build provenance, publishes to the rolling `installers-latest` release, keeping the newest 5 versioned installers per automation (only older ones are pruned) | `contents: write`, `id-token: write`, `attestations: write`; `LOGGING_TOKEN` makes it a connected build; `AUTOSTATION_REGISTRY_PUBKEY` pins the signing key |
+| `site.yml` | push to `main`, about every 30 min (best-effort), after `release`/`installers`, manual | Publishes the registry that `release` produced (`build_registry.py --publish-only`: manifest from `main` plus the released zips, each verified against its recorded SHA-256; it never compares source, so an unbumped version cannot block a deploy), signs the manifest when `REGISTRY_SIGNING_SEED` exists, ingests the live logs, checks links, deploys to Pages. A missing `registry-artifacts` branch fails the run unless `AUTOSTATION_ALLOW_NO_REGISTRY` is `true` | Pages source = GitHub Actions |
 | `health.yml` | every 30 min, manual | Fetches the live logs, recomputes the fleet signals and keeps `ops-signal` issues in sync (see the operator guide below). Does nothing, and closes nothing, without live data | `LOGGING_TOKEN`; `issues: write` |
+| `pipeline-alert.yml` | after `release`, `site`, `installers`, `ci` or `canary` completes on `main`; every 6 h; manual | Raises (or refreshes) one `ops-signal` issue per failing pipeline (`pipe-<workflow>`, written through the sanitised `tools/ops_issues.py`) and closes it on that workflow's next success. The scheduled check raises `pipe-site-stale` when the last successful `site` deployment is older than 12 h. Never runs PR code | `issues: write`, `actions: read` |
 | `canary.yml` | daily, after `installers`, manual | Downloads the published installer, verifies SHA-256 and attestation, installs it silently, runs the automation against its local demo page, uninstalls. Opens/refreshes one `ops-signal` issue on failure, closes it when green. Never writes to the live logs | `issues: write` |
-| `security.yml` | weekly, manual, pull requests touching dependencies or workflows | `tools/check_posture.py` (policy files, pinned actions, rulesets, secret scanning), `pip-audit`, `npm audit --omit=dev`, SBOM artifact; `dependency-review` on pull requests | nothing (live settings checks need an admin token and are skipped otherwise) |
+| `security.yml` | weekly, manual, pull requests touching dependencies or workflows | `tools/check_posture.py` (policy files, pinned actions, rulesets, secret scanning), `pip-audit` (installed from `requirements-ci.txt`), `npm audit --omit=dev`, SBOM artifact; `dependency-review` on pull requests | nothing (live settings checks need an admin token and are skipped otherwise) |
 | `ops-action.yml` | manual (admin panel / `gh workflow run`) | Applies pause/resume/promote/rollback/fleet-pause/fleet-resume as a **pull request**; `trigger-add` to the `triggers` branch | `OPS_BOT_TOKEN` (optional), `Allow GitHub Actions to create pull requests` |
 | `codeql.yml` | push, PR, weekly | CodeQL for Python and JavaScript | nothing |
-| `dependabot.yml` | monthly | Updates for Actions, npm (framework, minor/patch only), pip (wrapper-core, builder image) | nothing |
+| `dependabot.yml` | monthly | Updates for Actions, npm (framework, minor/patch only), pip (CI constraints `requirements-ci.txt`, wrapper-core, builder image) | nothing |
 
 ### Rules every workflow obeys (enforced by `tools/check_workflows.py`, run in CI, tested)
 
@@ -52,6 +55,9 @@ the enterprise option if you later move the control plane to GitLab; the manifes
 * no `pull_request_target`; a `pull_request` workflow may not use secrets (fork PRs would not get them and must never be able to read them)
 * secret-bearing jobs run from `main` only; secrets are put in `env:` of the one step that needs them
 * no YAML plain scalar containing `: ` (it silently invalidates the file, so GitHub starts no jobs)
+* never `if git ls-remote ...` to test for a branch (every failure would read as "absent"); use the exit code: 0 exists, 2 absent, anything else fails
+* Python dependencies of CI/release/installers come from `requirements-ci.txt` (exact versions, `pip install -c`), pip is cached, and release/installers/site run on pinned runner images (`ubuntu-24.04`, `windows-2025`) so a runner or package update never changes a build by surprise. CI uses Node 22; the Node that is bundled into the framework package stays on 20 (the npm that builds `node_modules` is part of the released content)
+* a schedule never sits on `:00` or `:30` (GitHub's busiest minutes); schedules are best-effort and no correctness depends on them (see `pipeline-alert`)
 
 ### Secrets and variables
 
@@ -62,6 +68,7 @@ the enterprise option if you later move the control plane to GitLab; the manifes
 | `LOGS_READ_TOKEN` | secret (optional) | site, health | a SECOND fine-grained PAT, Contents: read only on the logs repo; the dashboards and the health workflow prefer it over `LOGGING_TOKEN`, so the read side no longer needs the write token that ships inside installers (see [LIVE_LOGGING](LIVE_LOGGING.md)) |
 | `AUTOSTATION_REGISTRY_PUBKEY` | variable (optional) | installers | public Ed25519 key(s) (hex, comma-separated) pinned into new installers so they only accept a manifest signed by `REGISTRY_SIGNING_SEED`; set it only after the secret exists (`tools/setup_live.py` does it in that order) |
 | `AUTOSTATION_LOG_REPO` | variable (optional) | installers, site, health | `owner/name` of the private logs repo (default `<owner>/AutoStation-logs`) |
+| `AUTOSTATION_ALLOW_NO_REGISTRY` | variable (optional) | site | set to `true` only to let `site` deploy before the first `release` has created the `registry-artifacts` branch; otherwise a missing branch fails the run instead of publishing an empty registry |
 | `OPS_BOT_TOKEN` | secret (optional) | release, ops-action | Fine-grained PAT (Contents RW, Pull requests RW, Actions RW). PRs opened with the default `GITHUB_TOKEN` do not trigger `ci`, so required status checks would never report |
 | `AUTOSTATION_EMERGENCY_PAUSE_USERS` | variable | ops-action | Comma-separated GitHub logins allowed to auto-merge an *emergency* pause PR |
 
@@ -150,7 +157,8 @@ installed machines is advisory: the credential ships inside the installer, so no
 |---|---|---|
 | A workflow shows as a file path and starts no jobs | The YAML is invalid for GitHub (often a `: ` inside a plain scalar) | `python tools/check_workflows.py` (uses PyYAML when installed) |
 | `site` fails at *configure-pages* | Pages source is not GitHub Actions | `python tools/harden_repo.py` or *Settings -> Pages -> Source: GitHub Actions* |
-| `release` fails: "already released with different content" | A released version was edited | Bump `version` (VERSION / automation.yaml) |
+| `release` or `ci` / `version-gate` fails: "already released with different content" | A released version was edited | Bump the files the message names, e.g. `python tools/bump_version.py wrapper-core` (VERSION and `_version.py` together); `automation.yaml` `version` for automations |
+| A `pipe-<workflow>` or `pipe-site-stale` issue is open | `pipeline-alert` saw that workflow fail, or no successful `site` run for 12 h | Open the linked run; it closes itself on the next success |
 | `release` or `ops-action` cannot open a PR | Actions may not create PRs | Settings step 1 |
 | PR checks never start on bot PRs | Created with `GITHUB_TOKEN` | Add `OPS_BOT_TOKEN` |
 | `health` says nothing to monitor | `LOGGING_TOKEN` missing or nothing has reported yet | Set the secret; install the connected installer and run it once |
@@ -164,10 +172,10 @@ installed machines is advisory: the credential ships inside the installer, so no
 
 * **`production` environment.** Jobs that read secrets (`site` build, `health`, `installers` build) declare `environment: production`, which `tools/setup_live.py` restricts to the default branch; store the secrets there with `--env-secrets` and a branch or re-run from elsewhere cannot read them.
 * **Fresh-tip signing.** When `REGISTRY_SIGNING_SEED` exists, `site` refuses to sign or deploy unless its commit is still the tip of `main`, so re-running an old run can never re-sign an older manifest with a fresh timestamp. A follow-up (needs endpoint work in wrapper-core) is a monotonic sequence number inside the signed document.
-* **The registry always deploys.** The live-data steps of `site` are `continue-on-error`; if they fail, the site is rebuilt without live data, so an emergency pause or a rollback still reaches the endpoints.
+* **The registry deploys what `release` produced, whatever else is wrong.** `site` runs `build_registry.py --publish-only`: it copies the manifest from `main` and the already-released zips, verifying each against its recorded SHA-256, and never packages or compares source, so an unbumped version or a broken source tree cannot block an emergency pause or a rollback from reaching the endpoints. What it does refuse: an artifact that is missing or whose hash differs, and a missing `registry-artifacts` branch (unless `AUTOSTATION_ALLOW_NO_REGISTRY=true`). The live-data steps of `site` are `continue-on-error`; if they fail, the site is rebuilt without live data.
 * **No all-clear from bad data.** `health` closes issues only when the report carries trustworthy `data_quality` (enough records, fresh, few rejects, no failed signal builder), only for signals the analytics can produce (never the canary), and only after **two** consecutive clean runs (label `signal-clearing`). A `wontfix` label stops reopening. At most 50 ops-signal issues are open at once; the overflow is one `[DIGEST]` issue. Signals for automations the manifest does not list never open issues.
 * **Release plumbing.** `release` checks out without credentials and hands the write token only to the steps that push; `ops-action` has `contents: read` at workflow level and its write scopes on the job only, and its summary output is allow-listed and fenced.
 * **Installers.** The SBOM is attested together with the installer; the stable exe is uploaded before its `.sha256` (a window of seconds in which they disagree is possible - the canary retries it); the canary pins `gh attestation verify` to the installers workflow and fails (never silently passes) if the demo portal is missing.
 
 
-> Scheduled runs (`site` every 30 minutes, `health` every 30 minutes, `canary` daily) are best-effort on GitHub: they can start several minutes late or be skipped under load. Every push to `main` also rebuilds the site, so a push is the quickest way to refresh the dashboards after new telemetry arrives.
+> Scheduled runs (`site` and `health` about every 30 minutes, `canary` daily, `pipeline-alert` every 6 hours) are best-effort on GitHub: they can start minutes (measured: hours) late or be skipped under load, so nothing depends on their timing and `pipeline-alert` raises `pipe-site-stale` when the site has not been refreshed for 12 hours. Every push to `main` also rebuilds the site, so a push is the quickest way to refresh the dashboards after new telemetry arrives.

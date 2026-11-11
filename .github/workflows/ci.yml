@@ -8,6 +8,11 @@ on:
 permissions:
   contents: read
 
+# a newer push to the same branch/PR supersedes the older run; runs on main are never cancelled (they gate the release)
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 jobs:
   hygiene:
     # supply-chain + secret hygiene gates: every action pinned to a commit SHA, no credentials committed, workflow rules enforced
@@ -20,11 +25,56 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
-      - run: python -m pip install pyyaml
+          cache: pip
+          cache-dependency-path: requirements-ci.txt
+      - run: python -m pip install -c requirements-ci.txt pyyaml
       - run: python tools/check_workflows.py
+      - run: python tools/bump_version.py --check
       - run: python tools/pin_actions.py --check
       - run: python tools/check_secrets.py
       - run: python tools/check_py39_syntax.py
+  version-gate:
+    # Released versions are immutable: a PR that changes the content of a released package without bumping its version would break the
+    # release and site builds after merge. This fails the PR instead, and names the file(s) to bump (python tools/bump_version.py <name>).
+    # No secrets: the artifacts branch is public. A transient network error fails the job (re-run it) rather than skipping the check.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-ci.txt
+      - run: python -m pip install -c requirements-ci.txt pydantic jinja2 pyyaml
+      - name: Fetch the released artifacts (public branch)
+        id: artifacts
+        run: |
+          URL="https://github.com/${GITHUB_REPOSITORY}.git"
+          rc=0
+          git ls-remote --exit-code --heads "$URL" registry-artifacts >/dev/null 2>&1 || rc=$?
+          case "$rc" in
+            0) git clone --quiet --depth 1 --branch registry-artifacts "$URL" ../ra; echo "exists=true" >> "$GITHUB_OUTPUT" ;;
+            2) echo "exists=false" >> "$GITHUB_OUTPUT"; echo "::notice::no registry-artifacts branch yet: nothing is released, nothing to protect" ;;
+            *) echo "::error title=cannot read the repository::git ls-remote failed (exit ${rc}); re-run this job"; exit 1 ;;
+          esac
+      - name: Released content must not change without a version bump
+        if: ${{ steps.artifacts.outputs.exists == 'true' }}
+        run: |
+          set +e
+          python tools/build_registry.py --check --artifacts-dir ../ra 2>&1 | tee version-gate.txt
+          status=${PIPESTATUS[0]}
+          {
+            echo "### Version gate"
+            echo
+            echo '```'
+            cat version-gate.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit $status
+
   python:
     strategy:
       fail-fast: false
@@ -40,7 +90,9 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: ${{ matrix.python }}
-      - run: python -m pip install pytest pydantic jinja2
+          cache: pip
+          cache-dependency-path: requirements-ci.txt
+      - run: python -m pip install -c requirements-ci.txt pytest pydantic jinja2
       - name: Test every Python component
         run: python tools/test_all.py
 
@@ -53,7 +105,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 20
+          node-version: 22
       - name: Syntax check every JS file
         shell: bash
         run: find components -name "*.js" -not -path "*/node_modules/*" -print0 | xargs -0 -n1 node --check
@@ -73,7 +125,9 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
-      - run: python -m pip install pytest pydantic jinja2
+          cache: pip
+          cache-dependency-path: requirements-ci.txt
+      - run: python -m pip install -c requirements-ci.txt pytest pydantic jinja2
       - name: End-to-end platform walkthrough (package -> registry -> run -> ingest -> analytics -> dashboard -> notifier)
         run: python tools/e2e_demo.py --out e2e-out
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

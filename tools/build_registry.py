@@ -101,12 +101,25 @@ def discover(repo: Path) -> list[Source]:
     return out
 
 
-def content_digest(zip_path: Path) -> str:
+def bump_files(source: "Source") -> str:
+    """The exact file(s) a developer must edit to release new content for this source (shown in errors and PR comments)."""
+    if source.kind == "automation":
+        return f"components/automations/{source.src.name}/automation.yaml (version:)"
+    if source.name == "wrapper-core":
+        return "components/wrapper-core/VERSION AND components/wrapper-core/wrapper_core/_version.py (python tools/bump_version.py wrapper-core)"
+    return f"components/{source.name}/VERSION AND components/{source.name}/package.json (python tools/bump_version.py {source.name})"
+
+
+# parts of the execution-framework package that CI cannot reproduce without downloading Node/npm (git-ignored, built in release)
+BUNDLE_PREFIXES = ("node/", "node_modules/")
+
+
+def content_digest(zip_path: Path, ignore_prefixes: tuple = ()) -> str:
     """sha256 over sorted (entry name, sha256 of decompressed bytes): independent of zlib/zip metadata."""
     h = hashlib.sha256()
     with zipfile.ZipFile(zip_path) as z:
         for info in sorted(z.infolist(), key=lambda i: i.filename):
-            if info.is_dir():
+            if info.is_dir() or (ignore_prefixes and info.filename.startswith(ignore_prefixes)):
                 continue
             h.update(info.filename.encode("utf-8") + b"\0" + hashlib.sha256(z.read(info)).digest())
     return h.hexdigest()
@@ -151,7 +164,9 @@ def _requires(desc: dict | None) -> dict:
 
 def build(repo: Path, manifest_path: Path, out: Path, artifacts_dir: Path | None = None, bootstrap: bool = False,
           bootstrap_rings: str = "all", default_owner: str = "automation-platform@example.com",
-          write_manifest: Path | None = None, new_dir: Path | None = None, auto_promote: bool = False) -> dict:
+          write_manifest: Path | None = None, new_dir: Path | None = None, auto_promote: bool = False, check_only: bool = False) -> dict:
+    """``check_only``: report-only mode for pull requests. Runs the same comparison but never needs the Node/npm bundle (the framework's
+    node/ and node_modules/ are left out of BOTH sides of the content comparison), writes nothing outside ``out`` and names the file to bump."""
     repo, manifest_path, out = Path(repo), Path(manifest_path), Path(out)
     pkg = _package_module()
     m = copy.deepcopy(store.load_manifest(manifest_path))
@@ -189,9 +204,10 @@ def build(repo: Path, manifest_path: Path, out: Path, artifacts_dir: Path | None
             built = tmp / "zips" / info["url"]
             final = out / s.rel
             if s.rel in published:
-                if content_digest(published[s.rel]) != content_digest(built):
+                ign = BUNDLE_PREFIXES if (check_only and s.name == "execution-framework") else ()
+                if content_digest(published[s.rel], ign) != content_digest(built, ign):
                     errors.append(f"{s.name} {s.version} is already released with different content. Released versions are immutable: "
-                                  "bump the version (VERSION file / automation.yaml version) instead of editing it.")
+                                  f"bump the version (VERSION file / automation.yaml version) instead of editing it. Bump: {bump_files(s)}")
                     continue
                 reused.append(f"{s.name} {s.version}")
             else:
@@ -274,6 +290,58 @@ def build(repo: Path, manifest_path: Path, out: Path, artifacts_dir: Path | None
     return result
 
 
+def publish_only(manifest_path: Path, out: Path, artifacts_dir: Path | None) -> dict:
+    """Publish exactly what was released: the manifest from main plus the zips it references from the artifacts branch.
+
+    Nothing is packaged and no source tree is compared, so a source change that breaks the immutability rule (an unbumped version)
+    can never block a Pages deploy - an emergency pause or rollback merged to main always deploys. It fails ONLY when the manifest
+    references an artifact that is missing from the artifacts branch or whose sha256 differs from the one recorded in the manifest.
+    """
+    manifest_path, out = Path(manifest_path), Path(out)
+    m = copy.deepcopy(store.load_manifest(manifest_path))
+    errors: list[str] = []
+    if out.exists():
+        shutil.rmtree(out)
+    (out / "artifacts" / "components").mkdir(parents=True)
+    (out / "artifacts" / "automations").mkdir(parents=True)
+    root = Path(artifacts_dir).resolve() if artifacts_dir else None
+    needed: dict[str, tuple[str, str]] = {}
+    for kind in ("components", "automations"):
+        for name, entry in (m.get(kind) or {}).items():
+            for ver, rec in (((entry or {}).get("versions")) or {}).items():
+                rec = rec or {}
+                needed[str(rec.get("url"))] = (str(rec.get("sha256", "")).lower(), f"{name} {ver}")
+    copied: list[str] = []
+    for rel, (sha, label) in sorted(needed.items()):
+        parts = Path(rel).parts
+        if not rel.startswith("artifacts/") or ".." in parts or Path(rel).is_absolute() or not rel.endswith(".zip"):
+            errors.append(f"{label}: unsafe artifact path {rel!r} in the manifest")
+            continue
+        src = (root / rel) if root else None
+        if src is None or not src.is_file():
+            errors.append(f"{label}: artifact {rel} is not on the artifacts branch")
+            continue
+        if sha256_file(src) != sha:
+            errors.append(f"{label}: artifact {rel} does not match the sha256 recorded in the manifest")
+            continue
+        dest = out / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dest)
+        copied.append(rel)
+    report = checks.validate_all(m, allow_placeholders=False, artifacts_dir=out)
+    errors += [f"manifest: {e}" for e in report.errors]
+    store.save_triggers(out / "triggers.json", store.load_triggers(manifest_path.parent / store.TRIGGERS_FILE))
+    store.atomic_write(out / "manifest.yaml", store.dump_manifest(m))
+    index = {"schema_version": 1, "generated_at": store.now_iso(),
+             "components": {n: {"rings": (c or {}).get("rings") or {}, "versions": sorted(((c or {}).get("versions") or {}))} for n, c in (m.get("components") or {}).items()},
+             "automations": {n: {"rings": (a or {}).get("rings") or {}, "status": (a or {}).get("status"), "versions": sorted(((a or {}).get("versions") or {}))}
+                             for n, a in (m.get("automations") or {}).items()}}
+    store.atomic_write(out / "index.json", json.dumps(index, indent=2, sort_keys=True) + "\n")
+    result = {"ok": not errors, "errors": errors, "published": copied, "mode": "publish-only"}
+    store.atomic_write(out / "build-summary.json", json.dumps(result, indent=2) + "\n")
+    return result
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--repo", default=str(ROOT))
@@ -287,8 +355,32 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--auto-promote", action="store_true", help="new versions go to dev, pilot AND broad immediately (no promotion PRs)")
     ap.add_argument("--default-owner", default="automation-platform@example.com")
     ap.add_argument("--github-output", default=os.environ.get("GITHUB_OUTPUT"), help="append changed=true/false, new=N to this file (GitHub Actions)")
+    ap.add_argument("--publish-only", action="store_true",
+                    help="publish the manifest from main + the zips it references (verifying their sha256); no packaging, no source comparison. Used by the site workflow")
+    ap.add_argument("--check", action="store_true",
+                    help="pull-request gate: report-only; fail if released content changed without a version bump (names the file to bump); needs no Node/npm bundle")
     a = ap.parse_args(argv)
     manifest = Path(a.manifest) if a.manifest else Path(a.repo) / "components" / "automation-registry" / "manifest.yaml"
+    if a.publish_only:
+        res = publish_only(manifest, Path(a.out), Path(a.artifacts_dir) if a.artifacts_dir else None)
+        for rel in res["published"]:
+            print("published", rel)
+        for line in res["errors"]:
+            print("ERROR  ", line, file=sys.stderr)
+        if a.github_output:
+            with open(a.github_output, "a", encoding="utf-8") as fh:
+                fh.write(f"ok={'true' if res['ok'] else 'false'}\n")
+        print(f"registry published as released in {a.out}: {len(res['published'])} artifact(s)")
+        return 0 if res["ok"] else 1
+    if a.check:
+        with tempfile.TemporaryDirectory(prefix="amx-check-") as tmp:
+            res = build(Path(a.repo), manifest, Path(tmp) / "out", Path(a.artifacts_dir) if a.artifacts_dir else None, False, "all",
+                        a.default_owner, None, None, False, check_only=True)
+        for line in res["errors"]:
+            print("ERROR  ", line, file=sys.stderr)
+        if res["ok"]:
+            print("version check passed: no released package changed without a version bump" + (f"; new version(s): {', '.join(res['added'])}" if res["added"] else ""))
+        return 0 if res["ok"] else 1
     res = build(Path(a.repo), manifest, Path(a.out), Path(a.artifacts_dir) if a.artifacts_dir else None, a.bootstrap, a.bootstrap_rings,
                 a.default_owner, Path(a.write_manifest) if a.write_manifest else None, Path(a.new_dir) if a.new_dir else None,
                 a.auto_promote)

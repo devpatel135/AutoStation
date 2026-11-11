@@ -4,6 +4,16 @@ name: site
 # deploys it to GitHub Pages. It also publishes the registry (manifest.yaml + artifacts) that installed machines self-heal from:
 #   https://<owner>.github.io/<repo>/registry/
 #
+# REGISTRY: this workflow publishes what `release` already produced (tools/build_registry.py --publish-only: the manifest from main plus the
+# zips it references, each verified against the sha256 recorded in the manifest). It never repackages the source tree and never compares it
+# with the released zips, so a source change that breaks the immutability rule (an unbumped version) can NOT block a deploy: an emergency
+# pause or rollback merged to main always reaches Pages. It fails (and the previous deployment stays live) only when the manifest points at
+# an artifact that is missing from the registry-artifacts branch or does not match its recorded sha256. The immutability check itself runs in
+# release.yml and, before merge, in pr.yml / ci.yml (build_registry.py --check).
+#
+# SCHEDULES: GitHub starts cron jobs late and sometimes skips them (measured: every 30 minutes became every ~5 hours). The cron below is
+# best-effort; pushes, `release`/`installers` completions and manual runs also rebuild the site.
+#
 # LIVE DATA: the dashboards are built from the real run logs that installed automations push to the private logs repo
 # <owner>/AutoStation-logs (branch `ingest`). That needs the repository secret LOGGING_TOKEN (a fine-grained PAT, contents
 # read+write on the logs repo only; see docs/LIVE_LOGGING.md). Every 30 minutes and after every release/installer build
@@ -14,7 +24,7 @@ on:
   push:
     branches: [main]
   schedule:
-    - cron: "*/30 * * * *"
+    - cron: "11,41 * * * *"      # odd minutes: :00 and :30 are the busiest start times on GitHub
   workflow_run:
     workflows: [installers, release]
     types: [completed]
@@ -34,13 +44,15 @@ jobs:
   build:
     timeout-minutes: 20
     if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     environment: production
     env:
       GH_TOKEN: ${{ github.token }}
       LOG_REPO: ${{ vars.AUTOSTATION_LOG_REPO || format('{0}/AutoStation-logs', github.repository_owner) }}
       # a read-only token is preferred when you create one (LOGS_READ_TOKEN); the installer's write token is the fallback
       LOGGING_TOKEN: ${{ secrets.LOGS_READ_TOKEN || secrets.LOGGING_TOKEN }}
+      # only for a brand-new repo that has never released: lets the site deploy before registry-artifacts exists
+      ALLOW_NO_REGISTRY: ${{ vars.AUTOSTATION_ALLOW_NO_REGISTRY }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -48,35 +60,37 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: 20
-      - name: Bundle Node + playwright-core (the registry compares package content, so the framework must be built exactly as in release)
-        run: python tools/build_framework_bundle.py
-      - name: Fetch published registry artifacts (if any)
+      - name: Fetch published registry artifacts
         id: artifacts
         run: |
           URL="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-          if git ls-remote --exit-code --heads "$URL" registry-artifacts >/dev/null 2>&1; then
-            git clone --quiet --depth 1 --branch registry-artifacts "$URL" ../ra
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::no registry-artifacts branch yet - the release workflow creates it"
-          fi
-      - name: Build the registry from main + published artifacts
+          # exit 0 = exists, exit 2 = the branch is absent, anything else = a transient failure. A network error must never read as
+          # 'no registry': that would deploy a site without /registry/ (a 404 for every endpoint)
+          rc=0
+          git ls-remote --exit-code --heads "$URL" registry-artifacts >/dev/null 2>&1 || rc=$?
+          case "$rc" in
+            0)
+              git clone --quiet --depth 1 --branch registry-artifacts "$URL" ../ra
+              echo "exists=true" >> "$GITHUB_OUTPUT"
+              ;;
+            2)
+              if [ "$ALLOW_NO_REGISTRY" = "true" ]; then
+                echo "exists=false" >> "$GITHUB_OUTPUT"
+                echo "::notice::no registry-artifacts branch yet and AUTOSTATION_ALLOW_NO_REGISTRY=true - deploying without a registry"
+              else
+                echo "::error title=registry-artifacts is missing::the branch that holds every released package does not exist; refusing to deploy a site without the registry (set the variable AUTOSTATION_ALLOW_NO_REGISTRY=true only for a repo that has never released)"
+                exit 1
+              fi
+              ;;
+            *)
+              echo "::error title=cannot read the repository::git ls-remote failed (exit ${rc}); refusing to guess whether registry-artifacts exists"
+              exit 1
+              ;;
+          esac
+      - name: Publish the registry exactly as released (manifest from main + the zips it references, sha256 verified)
         id: registry
         if: ${{ steps.artifacts.outputs.exists == 'true' }}
-        continue-on-error: true
-        run: python tools/build_registry.py --out registry-out --artifacts-dir ../ra
-      - name: Refuse to publish a site that lacks the registry
-        # Machines self-heal from /registry/manifest.yaml. If artifacts exist but the registry did not build (for example a released
-        # version whose content changed without a version bump), failing here keeps the last good Pages deployment live instead of
-        # replacing it with a site that has no registry (404 for every endpoint).
-        if: ${{ steps.artifacts.outputs.exists == 'true' && steps.registry.outcome != 'success' }}
-        run: |
-          echo "::error title=registry did not build::refusing to deploy a site without the registry; fix the registry build (see the step above) - the previous deployment stays live"
-          exit 1
+        run: python tools/build_registry.py --publish-only --out registry-out --artifacts-dir ../ra
       - name: Overlay on-demand triggers (branch 'triggers', written by ops-action)
         if: ${{ steps.registry.outcome == 'success' }}
         run: |

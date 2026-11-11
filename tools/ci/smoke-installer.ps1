@@ -8,7 +8,11 @@
                    (transport forced to a local folder: a smoke run never reaches the live logs) and checks the result
   -Phase uninstall runs the uninstaller and checks that the task and payload are gone
 
-  Used by canary.yml. (installer-dev.yml carries its own copy of the same checks inline; keep them in step.)
+  The ONE copy of the installer smoke checks: installer-dev.yml (before publishing) and canary.yml (after publishing) both call it.
+  The run phase passes --ignore-maintenance: the registry manifest has weekend maintenance windows, and a smoke run that the
+  platform deliberately skips on a Saturday proves nothing (and used to turn the canary red every weekend).
+  -ExpectConnected (install phase): the build embeds the logging token, so config\platform.json must select the github-api transport and the
+  DPAPI token must exist.
   Every failure prints one ::error line and exits 1; success exits 0 (an explicit exit also stops a native command's exit
   code from leaking out of the step).
 #>
@@ -17,7 +21,8 @@ param(
     [Parameter(Mandatory = $true)][ValidateSet('install', 'run', 'uninstall')][string]$Phase,
     [Parameter(Mandatory = $true)][ValidatePattern('^[a-z0-9][a-z0-9-]{0,63}$')][string]$Automation,
     [string]$Installer = '',
-    [int]$TimeoutS = 300
+    [int]$TimeoutS = 300,
+    [switch]$ExpectConnected
 )
 $ErrorActionPreference = 'Stop'
 $homeDir = Join-Path $env:LOCALAPPDATA 'AUTOMAGIX'
@@ -46,6 +51,11 @@ try {
                 if (-not (Test-Path (Join-Path $homeDir $f))) { Fail "missing after install: $f" }
             }
             Get-Content (Join-Path $homeDir 'config\platform.json') | Out-Host
+            if ($ExpectConnected) {
+                $pc = Get-Content (Join-Path $homeDir 'config\platform.json') -Raw | ConvertFrom-Json
+                if ($pc.log_transport -ne 'github-api') { Fail "connected build but log_transport is '$($pc.log_transport)', not github-api" }
+                if (-not (Test-Path (Join-Path $homeDir 'secrets\logging_token.dpapi'))) { Fail 'connected build but no DPAPI logging token was installed' }
+            }
             schtasks /Query /TN "AUTOMAGIX\$Automation-daily" | Out-Host
             if ($LASTEXITCODE -ne 0) { Fail 'scheduled task was not registered' }
             Write-Host 'install OK'
@@ -76,7 +86,7 @@ try {
                 $env:AUTOMATION_PARAM_HEADLESS = 'true'
                 $env:AUTOMATION_PARAM_MODE = 'playwright'   # the runner may have DevTools policies of its own: the demo must use the real browser path
                 $env:AUTOMATION_PARAM_TIMEOUT_S = '45'
-                & (Join-Path $homeDir 'python\python.exe') -m wrapper_core run $Automation --slot daily
+                & (Join-Path $homeDir 'python\python.exe') -m wrapper_core run $Automation --slot daily --ignore-maintenance
                 $code = $LASTEXITCODE
             } finally {
                 Stop-Process -Id $srv.Id -Force -ErrorAction SilentlyContinue

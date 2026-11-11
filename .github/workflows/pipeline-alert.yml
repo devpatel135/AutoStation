@@ -1,0 +1,101 @@
+name: pipeline-alert
+
+# Somebody has to notice when the PIPELINES fail, not only when the fleet does (health.yml covers the fleet). Measured before this existed:
+# release failed 8 of 21 runs, ci 30 of 79, site 7 of 178, and nobody was told except whoever pushed last.
+#
+# 1. alert: whenever release, site, installers, ci or canary COMPLETES on main with a failure, raise (or refresh) ONE `ops-signal` issue
+#    per workflow (id pipe-<workflow>); the next success of that workflow closes it again. Issues are written by tools/ops_issues.py,
+#    the same sanitised path the canary uses (fixed title/detail text, the run link validated against a strict pattern).
+# 2. stale: every few hours check that the last SUCCESSFUL site deployment is not older than STALE_HOURS. Dashboards, the registry
+#    manifest and the pause/rollback channel all depend on that deployment; GitHub cron jobs are best-effort (they have been 5 hours
+#    apart instead of 30 minutes), so a silent stall must raise pipe-site-stale instead of going unnoticed.
+# It never runs code from a pull request: workflow_run on main only, the default branch is checked out.
+on:
+  workflow_run:
+    workflows: [release, site, installers, ci, canary]
+    types: [completed]
+    branches: [main]
+  schedule:
+    - cron: "47 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pipeline-alert
+  cancel-in-progress: false
+
+jobs:
+  alert:
+    if: ${{ github.event_name == 'workflow_run' && (github.event.workflow_run.conclusion == 'failure' || github.event.workflow_run.conclusion == 'success') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
+      WORKFLOW: ${{ github.event.workflow_run.name }}
+      CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+      RUN_URL: ${{ github.event.workflow_run.html_url }}
+      HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+      TRIGGER: ${{ github.event.workflow_run.event }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - name: Raise or resolve the issue for this workflow
+        run: |
+          case "$WORKFLOW" in
+            release|site|installers|ci|canary) ;;
+            *) echo "::error::unexpected workflow name"; exit 1 ;;
+          esac
+          if [ "$CONCLUSION" = "failure" ]; then
+            python tools/ops_issues.py raise --id "pipe-${WORKFLOW}" --type PIPELINE --severity high \
+              --title "Pipeline failed: ${WORKFLOW} on main" \
+              --detail "The ${WORKFLOW} workflow failed on main (commit ${HEAD_SHA:0:7}, trigger ${TRIGGER}). Open the run for the failing step. This issue closes itself when the workflow next succeeds." \
+              --run-url "$RUN_URL"
+          else
+            python tools/ops_issues.py resolve --id "pipe-${WORKFLOW}" --note "The ${WORKFLOW} workflow succeeded again on main."
+          fi
+
+  stale:
+    if: ${{ github.event_name != 'workflow_run' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+      actions: read
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
+      GH_TOKEN: ${{ github.token }}
+      STALE_HOURS: "12"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - name: Is the live site (and with it the registry and the pause channel) still being refreshed?
+        run: |
+          last="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow site.yml --status success --limit 1 --json updatedAt --jq '.[0].updatedAt // empty')"
+          if [ -z "$last" ]; then
+            echo "::notice::no successful site run found yet; nothing to compare"
+            exit 0
+          fi
+          age="$(python3 -c "import sys,datetime as d; t=d.datetime.strptime(sys.argv[1],'%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=d.timezone.utc); print(int((d.datetime.now(d.timezone.utc)-t).total_seconds()//3600))" "$last")"
+          echo "last successful site deployment: ${last} (${age} h ago, limit ${STALE_HOURS} h)"
+          if [ "$age" -ge "$STALE_HOURS" ]; then
+            python tools/ops_issues.py raise --id pipe-site-stale --type PIPELINE --severity high \
+              --title "The live site has not been refreshed for ${age} hours" \
+              --detail "The last successful site deployment finished ${age} hours ago (limit ${STALE_HOURS} hours). Dashboards, the registry manifest and the pause/rollback channel are not being refreshed. Check the site workflow runs and GitHub status."
+          else
+            python tools/ops_issues.py resolve --id pipe-site-stale --note "The site was deployed ${age} hours ago: fresh again."
+          fi

@@ -230,3 +230,76 @@ def test_first_release_activates_a_new_automation_but_never_clears_an_operator_p
     a = m["automations"]["automation-certification-site"]
     ver = miniyaml.loads((repo / "components" / "automations" / "automation-certification-site" / "automation.yaml").read_text(encoding="utf-8"))["version"]
     assert a["status"] == "active" and a["rings"] == {"dev": ver, "pilot": ver, "broad": ver}
+
+
+# ---- publish-only (the site workflow) and --check (the pull-request gate) --------------------------------------------------------
+def released(repo, tmp_path):
+    """Bootstrap-release the repo; return the 'artifacts branch' dir and put the released manifest in the source tree."""
+    first = tmp_path / "released"
+    assert run(repo, first, bootstrap=True)["ok"]
+    (repo / "components" / "automation-registry" / "manifest.yaml").write_text((first / "manifest.yaml").read_text(encoding="utf-8"), encoding="utf-8")
+    return first
+
+
+def test_publish_only_deploys_even_when_the_source_changed_without_a_bump(repo, tmp_path):
+    first = released(repo, tmp_path)
+    (repo / "components" / "automations" / "automation-x" / "main.py").write_text("print('sneaky change, same version')\n")
+    manifest = repo / "components" / "automation-registry" / "manifest.yaml"
+    assert not run(repo, tmp_path / "full", artifacts_dir=first)["ok"]                   # the full build refuses (immutable)...
+    res = br.publish_only(manifest, tmp_path / "pub", first)                             # ...but publishing what was released still works
+    assert res["ok"], res["errors"]
+    assert len(res["published"]) == 3 and (tmp_path / "pub" / "manifest.yaml").exists() and (tmp_path / "pub" / "triggers.json").exists()
+    m = manifest_of(tmp_path / "pub")
+    assert m["automations"]["automation-x"]["rings"]["broad"] == "1.0.0"
+    rec = m["automations"]["automation-x"]["versions"]["1.0.0"]
+    assert br.sha256_file(tmp_path / "pub" / rec["url"]) == rec["sha256"]               # the released bytes, not a rebuild of the source
+
+
+def test_publish_only_fails_for_a_missing_or_tampered_artifact(repo, tmp_path):
+    first = released(repo, tmp_path)
+    manifest = repo / "components" / "automation-registry" / "manifest.yaml"
+    victim = first / "artifacts" / "automations" / "automation-x-1.0.0.zip"
+    victim.write_bytes(victim.read_bytes() + b"tamper")
+    res = br.publish_only(manifest, tmp_path / "pub1", first)
+    assert not res["ok"] and any("does not match the sha256" in e for e in res["errors"])
+    victim.unlink()
+    res = br.publish_only(manifest, tmp_path / "pub2", first)
+    assert not res["ok"] and any("not on the artifacts branch" in e for e in res["errors"])
+    assert not br.publish_only(manifest, tmp_path / "pub3", None)["ok"]                 # no artifacts branch at all
+
+
+def test_publish_only_rejects_unsafe_artifact_paths(repo, tmp_path):
+    first = released(repo, tmp_path)
+    manifest = repo / "components" / "automation-registry" / "manifest.yaml"
+    text = manifest.read_text(encoding="utf-8").replace("artifacts/automations/automation-x-1.0.0.zip", "artifacts/../secrets.zip")
+    manifest.write_text(text, encoding="utf-8")
+    res = br.publish_only(manifest, tmp_path / "pub", first)
+    assert not res["ok"] and any("unsafe artifact path" in e for e in res["errors"])
+
+
+def test_check_names_the_files_to_bump_and_passes_when_clean(repo, tmp_path, capsys):
+    first = released(repo, tmp_path)
+    assert br.main(["--repo", str(repo), "--artifacts-dir", str(first), "--check"]) == 0
+    assert "version check passed" in capsys.readouterr().out
+    (repo / "components" / "wrapper-core" / "wrapper_core" / "__init__.py").write_text("X = 2\n")
+    (repo / "components" / "automations" / "automation-x" / "main.py").write_text("print('changed')\n")
+    assert br.main(["--repo", str(repo), "--artifacts-dir", str(first), "--check"]) == 1
+    err = capsys.readouterr().err
+    assert "wrapper-core 0.1.0" in err and "wrapper_core/_version.py" in err and "bump_version.py wrapper-core" in err
+    assert "automation-x 1.0.0" in err and "components/automations/automation-x/automation.yaml" in err
+
+
+def test_check_ignores_the_node_bundle_that_ci_cannot_rebuild_without_network(repo, tmp_path):
+    first = tmp_path / "released"
+    fw = repo / "components" / "execution-framework"
+    (fw / "node").mkdir()
+    (fw / "node" / "node.exe").write_bytes(b"MZ fake node")
+    (fw / "node_modules" / "playwright-core").mkdir(parents=True)
+    (fw / "node_modules" / "playwright-core" / "package.json").write_text('{"version": "1.0.0"}\n')
+    assert run(repo, first, bootstrap=True)["ok"]
+    (repo / "components" / "automation-registry" / "manifest.yaml").write_text((first / "manifest.yaml").read_text(encoding="utf-8"), encoding="utf-8")
+    shutil.rmtree(fw / "node")                                                          # a PR checkout has no git-ignored bundle...
+    shutil.rmtree(fw / "node_modules")
+    assert br.main(["--repo", str(repo), "--artifacts-dir", str(first), "--check"]) == 0   # ...and must not look like a changed release
+    (fw / "lib" / "a.js").write_text("exports.a = 2;\n")                                 # but a real framework source change is caught
+    assert br.main(["--repo", str(repo), "--artifacts-dir", str(first), "--check"]) == 1

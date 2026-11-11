@@ -104,6 +104,9 @@ def check_text(text: str, name: str = "workflow.yml", repo: Path = ROOT) -> list
                             errs.append(f"{label}: secret interpolated into a shell script (pass it via env:)")
                         if UNTRUSTED.search(em.group(1)):
                             errs.append(f"{label}: untrusted '${{{{ {em.group(1).strip()[:40]} }}}}' interpolated into a shell script (pass it via env:)")
+                    if re.search(r"\bif\s+!?\s*git\s+ls-remote\b", str(st["run"])):
+                        errs.append(f"{label}: 'if git ls-remote ...' reads EVERY failure (a network blip) as 'branch absent'; "
+                                    "use the exit code (0 exists, 2 absent, anything else fails the job)")
                     for m in PATH_RE.finditer(str(st["run"])):
                         rel = m.group(1)
                         if not any(c in rel for c in "*{$") and not (repo / rel).exists():

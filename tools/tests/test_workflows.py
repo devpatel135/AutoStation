@@ -69,9 +69,10 @@ def test_live_site_needs_the_logging_token_and_never_falls_back_to_demo_data():
 def test_installer_workflow_publishes_the_download_and_smoke_tests_the_browser_run():
     text = (WORKFLOWS / "installer-dev.yml").read_text(encoding="utf-8")
     assert "installers-latest" in text and "build_framework_bundle.py" in text
-    assert r"execution-framework\node\node.exe" in text and "account_selected" in text
+    smoke = (ROOT / "tools" / "ci" / "smoke-installer.ps1").read_text(encoding="utf-8")      # the smoke checks live in ONE shared script
+    assert r"execution-framework\node\node.exe" in smoke and "account_selected" in smoke
     assert real("installer-dev.yml") == []
-    assert "LOGGING_TOKEN" in text and "/NORUN" in text      # smoke must not pollute live logs
+    assert "LOGGING_TOKEN" in text and "/NORUN" in smoke      # smoke must not pollute live logs
 
 
 def test_release_auto_promotes_and_stays_append_only():
@@ -164,3 +165,96 @@ def test_py39_checker_detects_the_constructs_it_claims_to():
     probs = check_py39_syntax.check_source(bad)
     assert len(probs) >= 3
     assert check_py39_syntax.check_source("d = {'k': 1}\nx = f\"{d['k']}\"\n") == []
+
+
+# ---- Phase 0 pipeline hardening: guard rails so these fixes cannot silently regress -------------------------------------------
+def _text(name: str) -> str:
+    return (WORKFLOWS / name).read_text(encoding="utf-8")
+
+
+def test_checker_rejects_if_git_ls_remote_as_a_branch_existence_test():
+    bad = GOOD.replace("- run: echo", "- run: |\n          if git ls-remote --exit-code origin x; then echo yes; fi\n      - run: echo")
+    assert "ls-remote" in " | ".join(cw.check_text(bad, "bad.yml"))
+    ok = GOOD.replace("- run: echo", "- run: |\n          rc=0; git ls-remote --exit-code origin x || rc=$?\n      - run: echo")
+    assert "ls-remote" not in " | ".join(cw.check_text(ok, "ok.yml"))
+
+
+def test_site_publishes_what_release_produced_and_never_repackages_source():
+    t = _text("site.yml")
+    assert "--publish-only" in t and "--artifacts-dir" in t
+    assert "Refuse to publish" not in t and "build_framework_bundle.py" not in t      # the deploy no longer depends on rebuilding source
+    assert "AUTOSTATION_ALLOW_NO_REGISTRY" in t                                      # an absent registry branch fails unless explicitly allowed
+    assert "exit 2" in t or "= 2" in t or "-eq 2" in t or "2)" in t                  # ls-remote is read by exit code
+    assert "continue-on-error" not in t.split("--publish-only")[1].split("name:")[0]
+
+
+def test_only_release_may_bootstrap_the_registry_branch():
+    assert re.search(r"\b2\)", _text("release.yml")) or "= 2" in _text("release.yml") or "-eq 2" in _text("release.yml")
+    assert "--bootstrap" in _text("release.yml")
+    for n in ("site.yml", "ci.yml"):
+        assert "--bootstrap" not in _text(n) and "--orphan" not in _text(n), f"{n} must never create registry-artifacts"
+
+
+def test_ci_has_a_version_gate_that_needs_no_token_and_cancels_only_non_main():
+    t = _text("ci.yml")
+    assert "version-gate:" in t and "build_registry.py --check" in t and "bump_version.py --check" in t
+    assert "cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}" in t
+    gate = t.split("version-gate:")[1].split("\n  python:")[0]
+    assert "secrets." not in gate and "LOGGING_TOKEN" not in gate
+
+
+def test_installers_are_serialised_follow_release_and_keep_history():
+    t = _text("installer-dev.yml")
+    assert "concurrency:" in t and "group: installers" in t and "cancel-in-progress: false" in t
+    assert re.search(r"workflow_run:\s*\n\s*workflows:\s*\[release\]", t)
+    assert "tools/ci/smoke-installer.ps1" in t and "-Phase install" in t and "-Phase run" in t and "-Phase uninstall" in t
+    assert "head -n -5" in t                                           # keeps the newest 5 versioned installers
+    assert "deleting stale asset" not in t                             # the old delete-everything-not-in-this-build loop is gone
+    assert "windows-2025" in t and "windows-latest" not in t
+
+
+def test_every_smoke_run_ignores_the_maintenance_window():
+    assert "--ignore-maintenance" in (ROOT / "tools" / "ci" / "smoke-installer.ps1").read_text(encoding="utf-8")
+    assert "wrapper_core run" not in _text("installer-dev.yml")        # no second, drifting copy of the smoke run inline
+    assert "smoke-installer.ps1" in _text("canary.yml")
+
+
+def test_pipeline_alert_watches_every_pipeline_and_runs_no_pr_code():
+    t = _text("pipeline-alert.yml")
+    assert "tools/ops_issues.py raise" in t and "tools/ops_issues.py resolve" in t and "pipe-site-stale" in t
+    m = re.search(r"workflows:\s*\[([^\]]*)\]", t)
+    watched = [w.strip() for w in m.group(1).split(",")]
+    assert {"release", "site", "installers", "ci", "canary"} <= set(watched)
+    names = {}
+    for p in WORKFLOWS.glob("*.yml"):
+        mm = re.match(r"name:\s*(\S+)", p.read_text(encoding="utf-8"))
+        names[mm.group(1)] = p.name
+    assert all(w in names for w in watched), f"workflow_run names that match no workflow: {[w for w in watched if w not in names]}"
+    assert "branches: [main]" in t and "pull_request" not in t.split("jobs:")[0]
+    assert "${{ github.event.workflow_run.name }}" not in t.split("steps:", 1)[1].replace("WORKFLOW: ${{ github.event.workflow_run.name }}", "")
+
+
+def test_no_schedule_sits_on_the_busiest_minutes():
+    for p in WORKFLOWS.glob("*.yml"):
+        for cron in re.findall(r'cron:\s*"([^"]+)"', p.read_text(encoding="utf-8")):
+            minutes = cron.split()[0]
+            assert not set(minutes.split(",")) & {"0", "30"}, f"{p.name}: cron '{cron}' runs on :00/:30"
+
+
+def test_ci_python_dependencies_are_pinned_through_requirements_ci():
+    req = (ROOT / "requirements-ci.txt").read_text(encoding="utf-8")
+    for line in [l for l in req.splitlines() if l.strip() and not l.startswith("#")]:
+        assert "==" in line, f"requirements-ci.txt must pin exactly: {line}"
+    for n in ("ci.yml", "release.yml", "installer-dev.yml", "security.yml"):
+        t = _text(n)
+        assert "requirements-ci.txt" in t, n
+        for l in [l for l in t.splitlines() if "pip install" in l and "pip install --upgrade" not in l]:
+            assert "-c requirements-ci.txt" in l or "-r requirements-ci.txt" in l, f"{n}: unconstrained '{l.strip()}'"
+    assert 'node-version: 22' in _text("ci.yml") and "node-version: 20" not in _text("ci.yml")
+
+
+def test_new_operational_names_are_documented():
+    doc = (ROOT / "docs" / "PIPELINES.md").read_text(encoding="utf-8")
+    for needle in ("pipeline-alert.yml", "AUTOSTATION_ALLOW_NO_REGISTRY", "--publish-only", "version-gate", "bump_version.py", "requirements-ci.txt", "best-effort"):
+        assert needle in doc, needle
+    assert "The registry always deploys" not in doc

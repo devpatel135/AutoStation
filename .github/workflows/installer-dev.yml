@@ -14,16 +14,23 @@ name: installers
 # heartbeat and failure evidence is pushed over HTTPS to the private logs repo <owner>/AutoStation-logs (override with the
 # variable AUTOSTATION_LOG_REPO). Without the secret it is a standalone build and logs stay in <install>\local-logs.
 # Unsigned installers trigger Windows SmartScreen ("More info -> Run anyway"); compare the published SHA-256 first.
+# WHEN IT RUNS: after every SUCCESSFUL `release` (workflow_run): the release already proved that no released package changed without a
+# version bump, and an installer is only ever built from that state. A push re-runs it only when the installer itself changes (builder,
+# its helper tools, this workflow, the shared smoke script). Package changes therefore build the installer exactly once, via the release.
+# Builds are serialized (concurrency) so two runs can never publish out of order.
 on:
   push:
     branches: [main]
     paths:
       - "components/automation-builder/**"
-      - "components/wrapper-core/**"
-      - "components/automations/**"
-      - "components/execution-framework/**"
       - "tools/build_framework_bundle.py"
+      - "tools/fetch_mingit.py"
+      - "tools/ci/smoke-installer.ps1"
       - ".github/workflows/installer-dev.yml"
+  workflow_run:
+    workflows: [release]
+    types: [completed]
+    branches: [main]
   workflow_dispatch:
     inputs:
       ring:
@@ -33,6 +40,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: installers
+  cancel-in-progress: false
+
 env:
   AUTOMATION: automation-certification-site
   # Pinned: the installer bundles this interpreter, so it is verified byte-for-byte (python.org publishes no signature for embed zips).
@@ -41,7 +52,8 @@ env:
 
 jobs:
   build:
-    runs-on: windows-latest
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: windows-2025     # pinned: the installer must not change with the runner image
     environment: production
     timeout-minutes: 40
     env:
@@ -57,10 +69,13 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-ci.txt
+      # Node stays on 20: the npm that builds the node_modules shipped inside the framework is part of the package content (see release.yml)
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 20
-      - run: python -m pip install jinja2 pytest pydantic
+      - run: python -m pip install -c requirements-ci.txt jinja2 pytest pydantic
       - name: Install NSIS
         run: choco install nsis -y --no-progress
       - name: Bundle Node + playwright-core into the execution-framework
@@ -117,105 +132,22 @@ jobs:
         with:
           name: installer
           path: release/*
+      # The smoke checks live in ONE place (tools/ci/smoke-installer.ps1), also used by canary.yml after publishing.
       - name: Smoke - silent per-user install (everything is bundled; nothing else installed)
         shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          trap {
-            $m = ($_.Exception.Message -replace '[\r\n]+', ' | ')
-            Write-Host "::error title=smoke failed::$m"
-            $h = Join-Path $env:LOCALAPPDATA 'AUTOMAGIX'
-            if (Test-Path $h) { Get-ChildItem $h -Recurse -Depth 2 -ErrorAction SilentlyContinue | Select-Object -First 80 -ExpandProperty FullName | Out-Host }
-            Get-Content (Join-Path $h 'logs\wrapper.log') -ErrorAction SilentlyContinue | Select-Object -Last 40 | Out-Host
-            exit 1
-          }
-          # /NORUN: the smoke run below must not push a CI run into the live logs
-          $p = Start-Process -FilePath "release/$env:AUTOMATION-setup.exe" -ArgumentList '/S', '/NORUN' -Wait -PassThru
-          if ($p.ExitCode -ne 0) { throw "installer exit code $($p.ExitCode)" }
-          $home_ = Join-Path $env:LOCALAPPDATA 'AUTOMAGIX'
-          foreach ($f in @('python\python.exe', 'wrapper-core\wrapper_core\__init__.py', 'execution-framework\node\node.exe',
-                           'execution-framework\node_modules\playwright-core\package.json', 'execution-framework\VERSION',
-                           "automations\$env:AUTOMATION\automation.yaml", 'state\installed.json', 'config\platform.json')) {
-            if (-not (Test-Path (Join-Path $home_ $f))) { throw "missing after install: $f" }
-          }
-          Get-Content (Join-Path $home_ 'config\platform.json') | Out-Host
-          $pc = Get-Content (Join-Path $home_ 'config\platform.json') -Raw | ConvertFrom-Json
-          if ($env:LOG_TOKEN_SET -eq 'true' -and $pc.log_transport -ne 'github-api') { throw "connected build but log_transport is '$($pc.log_transport)', not github-api" }
-          if ($env:LOG_TOKEN_SET -eq 'true' -and -not (Test-Path (Join-Path $home_ 'secrets\logging_token.dpapi'))) { throw 'connected build but no DPAPI logging token was installed' }
-          schtasks /Query /TN "AUTOMAGIX\$env:AUTOMATION-daily" | Out-Host
-          if ($LASTEXITCODE -ne 0) { throw 'scheduled task was not registered' }
-          Write-Host 'install OK'
-          exit 0
+        run: ./tools/ci/smoke-installer.ps1 -Phase install -Automation $env:AUTOMATION -Installer "release/$env:AUTOMATION-setup.exe" -ExpectConnected:($env:LOG_TOKEN_SET -eq 'true')
       - name: Smoke - a real run of the installed automation (bundled Node + Playwright + Edge) against a local demo page
         shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $srv = $null
-          trap {
-            $m = ($_.Exception.Message -replace '[\r\n]+', ' | ')
-            Write-Host "::error title=smoke failed::$m"
-            $h = Join-Path $env:LOCALAPPDATA 'AUTOMAGIX'
-            Get-ChildItem (Join-Path $h 'runs') -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 30 -ExpandProperty FullName | Out-Host
-            Get-ChildItem (Join-Path $h 'runs') -Recurse -Filter stderr.log -ErrorAction SilentlyContinue | ForEach-Object { Get-Content $_.FullName -Tail 30 } | Out-Host
-            Get-Content (Join-Path $h 'logs\wrapper.log') -ErrorAction SilentlyContinue | Select-Object -Last 40 | Out-Host
-            if ($srv) { Stop-Process -Id $srv.Id -Force -ErrorAction SilentlyContinue }
-            exit 1
-          }
-          $home_ = Join-Path $env:LOCALAPPDATA 'AUTOMAGIX'
-          $payload = Join-Path $home_ "automations\$env:AUTOMATION"
-          $node = Join-Path $home_ 'execution-framework\node\node.exe'
-          $srv = Start-Process -FilePath $node -ArgumentList 'demo\server.js' -WorkingDirectory $payload -PassThru -WindowStyle Hidden
-          $up = $false
-          foreach ($i in 1..30) {
-            try { Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:8099/portal.html' -TimeoutSec 2 | Out-Null; $up = $true; break } catch { Start-Sleep -Seconds 1 }
-          }
-          if (-not $up) { throw 'demo portal did not start' }
-          $logs = Join-Path $home_ 'smoke-logs'
-          $env:AUTOMAGIX_HOME = $home_
-          $env:PYTHONPATH = Join-Path $home_ 'wrapper-core'
-          $env:AUTOMAGIX_LOG_TRANSPORT = 'dir'; $env:AUTOMAGIX_LOG_REMOTE = $logs
-          $env:AUTOMAGIX_NO_TOAST = '1'; $env:AUTOMAGIX_NO_REMEDIATION = '1'
-          $env:AUTOMATION_PARAM_PORTAL_URL = 'http://127.0.0.1:8099/portal.html'
-          $env:AUTOMATION_PARAM_PICKER_HOST = 'localhost:8099'
-          $env:AUTOMATION_PARAM_HEADLESS = 'true'
-          $env:AUTOMATION_PARAM_ALLOWED_HOSTS = '127.0.0.1:8099,localhost:8099'; $env:AMX_ALLOW_TEST_HOSTS = '1'   # local demo only
-          $env:AUTOMATION_PARAM_TIMEOUT_S = '45'
-          & (Join-Path $home_ 'python\python.exe') -m wrapper_core run $env:AUTOMATION --slot daily
-          $code = $LASTEXITCODE
-          Stop-Process -Id $srv.Id -Force -ErrorAction SilentlyContinue
-          $run = Get-ChildItem -Recurse -Path $logs -Filter *.json -ErrorAction SilentlyContinue | Where-Object { $_.FullName -match 'run[\\/]' } | Select-Object -First 1
-          if (-not $run) { throw "no run log was written (exit code $code)" }
-          $rec = Get-Content $run.FullName -Raw | ConvertFrom-Json
-          Write-Host "run: status=$($rec.status) result=$($rec.result | ConvertTo-Json -Compress) synopsis=$($rec.synopsis)"
-          if ($rec.status -ne 'success') { throw "run status was $($rec.status): $($rec.error | ConvertTo-Json -Compress)" }
-          if ($rec.result.state -ne 'account_selected') { throw "expected the account tile to be clicked, got state '$($rec.result.state)'" }
-          Write-Host 'browser automation OK: the account tile was clicked and the run stopped'
-          exit 0
+        run: ./tools/ci/smoke-installer.ps1 -Phase run -Automation $env:AUTOMATION
       - name: Smoke - uninstall removes everything it installed
         shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          trap {
-            $m = ($_.Exception.Message -replace '[\r\n]+', ' | ')
-            Write-Host "::error title=smoke failed::$m"
-            exit 1
-          }
-          $home_ = Join-Path $env:LOCALAPPDATA 'AUTOMAGIX'
-          $un = Get-ChildItem $home_ -Filter 'uninstall-*.exe' | Select-Object -First 1
-          $p = Start-Process -FilePath $un.FullName -ArgumentList '/S' -Wait -PassThru
-          if ($p.ExitCode -ne 0) { throw "uninstaller exit code $($p.ExitCode)" }
-          Start-Sleep -Seconds 3
-          schtasks /Query /TN "AUTOMAGIX\$env:AUTOMATION-daily" 2>$null
-          if ($LASTEXITCODE -eq 0) { throw 'scheduled task still registered after uninstall' }
-          if (Test-Path (Join-Path $home_ "automations\$env:AUTOMATION")) { throw 'payload still present after uninstall' }
-          Write-Host 'uninstall OK'
-          exit 0
+        run: ./tools/ci/smoke-installer.ps1 -Phase uninstall -Automation $env:AUTOMATION
 
   publish:
-    # Rolling pre-release that every Download button links to; stale assets (removed automations) are deleted.
+    # Rolling pre-release that every Download button links to. Older versioned installers are kept (newest 5) so a bad release can be rolled back by hand.
     needs: build
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-    runs-on: ubuntu-latest
+    if: ${{ (github.event_name == 'push' || github.event_name == 'workflow_run') && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: write
@@ -262,10 +194,14 @@ jobs:
           gh release upload installers-latest "dist/${AUTOMATION}-setup.exe" --clobber
           gh release upload installers-latest "dist/${AUTOMATION}-setup.exe.sha256" --clobber
           for f in $(ls dist | grep -v -E -- "-[0-9]+[.][0-9]+[.][0-9]+|^${AUTOMATION}-setup[.]exe"); do gh release upload installers-latest "dist/$f" --clobber; done
-          KEEP=$(ls dist | tr '\n' ' ')
-          for a in $(gh release view installers-latest --json assets --jq '.assets[].name'); do
-            case " $KEEP " in *" $a "*) ;; *) echo "deleting stale asset $a"; gh release delete-asset installers-latest "$a" -y ;; esac
-          done
+          # Keep the newest 5 versioned installers (each with its .sha256); prune only older ones. The stable names and everything just
+          # uploaded are never touched. (Previously every asset not in this build was deleted, including all older versioned installers.)
+          gh release view installers-latest --json assets --jq '.assets[].name' \
+            | grep -E "^${AUTOMATION}-[0-9]+[.][0-9]+[.][0-9]+-setup[.]exe$" | sort -V | head -n -5 \
+            | while read -r old; do
+                echo "pruning old versioned installer ${old}"
+                gh release delete-asset installers-latest "${old}" -y
+                gh release delete-asset installers-latest "${old}.sha256" -y || true
+              done
           gh release view installers-latest --json assets --jq '.assets[].name'
 
-# rebuilt after LOGGING_TOKEN was added (connected build)
