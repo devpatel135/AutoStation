@@ -21,6 +21,7 @@ from . import tray as tray_mod
 from ._version import __version__ as WRAPPER_VERSION
 from .broker import Broker
 from .heartbeat import send_heartbeat, send_lifecycle
+from .locking import FileLock, pid_alive
 from .logging import log_event
 from .paths import Paths, check_name, get_logger, platform_config
 from .retry import (Category, Escalation, RetryPolicy, Skipped, AuthExpired, DataError, LogicError, NetworkError,
@@ -57,69 +58,14 @@ class RunOutcome:
     exit_code: int
 
 
-def _pid_alive(pid: int) -> bool:
-    """Is a process with this PID running? Query only - never signals it (os.kill(pid, 0) would terminate it on Windows)."""
-    if pid <= 0:
-        return False
-    if os.name == "nt":
-        import ctypes
-        k32 = ctypes.windll.kernel32
-        k32.OpenProcess.restype = ctypes.c_void_p
-        h = k32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
-        if not h:
-            return k32.GetLastError() == 5  # access denied => exists
-        try:
-            code = ctypes.c_ulong()
-            return bool(k32.GetExitCodeProcess(ctypes.c_void_p(h), ctypes.byref(code))) and code.value == 259  # STILL_ACTIVE
-        finally:
-            k32.CloseHandle(ctypes.c_void_p(h))
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except OSError:
-        return True
-    return True
+def _pid_alive(pid: int, started: int | None = None) -> bool:
+    """Is a process with this PID running (and, with ``started``, is it still the SAME process)? Query only - see locking.pid_alive."""
+    return pid_alive(pid, started)
 
 
-class RunLock:
-    """File lock: stale when older than the TTL, or when the PID that wrote it is gone (a killed/crashed run must not block the next one).
-    Age-based staleness (os.kill(pid, 0) would TERMINATE the process on Windows - never use it)."""
-
-    def __init__(self, path: Path, ttl_s: int):
-        self.path, self.ttl_s, self.held = path, ttl_s, False
-
-    def acquire(self) -> bool:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        for _ in range(2):
-            try:
-                fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-                os.write(fd, f"{os.getpid()} {time.time()}".encode())
-                os.close(fd)
-                self.held = True
-                return True
-            except FileExistsError:
-                try:
-                    owner = 0
-                    try:
-                        owner = int(self.path.read_text(encoding="ascii").split()[0])
-                    except (OSError, ValueError, IndexError):
-                        pass
-                    if time.time() - self.path.stat().st_mtime > self.ttl_s or (owner and owner != os.getpid() and not _pid_alive(owner)):
-                        self.path.unlink()  # stale: previous run died hard
-                        continue
-                except OSError:
-                    pass
-                return False
-        return False
-
-    def release(self) -> None:
-        if self.held:
-            try:
-                self.path.unlink()
-            except OSError:
-                pass
-            self.held = False
+class RunLock(FileLock):
+    """The per-automation run lock (see ``locking.FileLock``): stale when older than the TTL, when its owner is gone, or when the PID has been
+    recycled by another process; a killed/crashed run therefore never blocks the next one. ``acquire()`` does not block."""
 
 
 def _kill_tree(proc: subprocess.Popen) -> None:
@@ -133,11 +79,17 @@ def _kill_tree(proc: subprocess.Popen) -> None:
 
 
 def _tail(path: Path, n: int = 4000) -> str:
+    """Last ``n`` bytes of a file, read by seeking (a chatty payload can leave a log of hundreds of MB)."""
     try:
-        data = path.read_bytes()
-        return data[-n:].decode("utf-8", "replace")
+        with open(path, "rb") as f:
+            size = f.seek(0, os.SEEK_END)
+            f.seek(max(0, size - n))
+            return f.read(n).decode("utf-8", "replace")
     except OSError:
         return ""
+
+
+MAX_LOG_BYTES = int(os.environ.get("AUTOMAGIX_MAX_LOG_BYTES", str(100 * 1024 * 1024)))   # per stream, per run
 
 
 def _descriptor(adir: Path) -> dict:
@@ -204,6 +156,7 @@ class _Execution:
         self.cfg = cfg
         self.hung_detected = False
         self.timed_out = False
+        self.log_overflow = False
         self.exit_code: int | None = None
         self.stderr_tail = ""
 
@@ -235,6 +188,16 @@ class _Execution:
                     proc.wait()
                     self.exit_code = -9
                     break
+                try:
+                    over = max(os.path.getsize(out_f), os.path.getsize(err_f)) > MAX_LOG_BYTES
+                except OSError:
+                    over = False
+                if over:                                    # a runaway payload must not fill the disk
+                    self.log_overflow = True
+                    _kill_tree(proc)
+                    proc.wait()
+                    self.exit_code = -9
+                    break
         self.stderr_tail = _tail(err_f)
 
     def execute(self) -> Exception | None:
@@ -243,6 +206,8 @@ class _Execution:
             self._launch_once()
             if self.timed_out:
                 raise Escalation("run exceeded timeout_s and was killed", Category.SYSTEM_UNAVAILABLE, 1)
+            if self.log_overflow:
+                raise Escalation(f"run wrote more than {MAX_LOG_BYTES // (1024 * 1024)} MB to stdout/stderr and was killed", Category.LOGIC_ERROR, 1)
             if self.exit_code == 0:
                 return True
             err = self.ctx.read_error() or {}
@@ -311,11 +276,10 @@ def run_automation(name: str, slot_id: str | None = None, dry_run: bool = False,
     cfg = platform_config(paths)
     ring = cfg["ring"]
 
-    # applying a staged wrapper-core is the launcher's job; do it here too when launched directly
-    try:
-        selfheal.apply_pending(paths)
-    except Exception as exc:  # noqa: BLE001
-        log.warning("apply_pending failed: %s", exc)
+    # Applying a staged wrapper-core is the launcher's job (bin\apply-pending.cmd: self-tested, rolled back on failure). The running
+    # process has wrapper-core loaded, so it never swaps its own files; a pending copy waits for the next launcher.
+    if (paths.root / "wrapper-core.pending").exists():
+        log.info("a staged wrapper-core is waiting; the next launcher applies it")
 
     lock = RunLock(paths.lock_file(name), ttl_s=4 * 3600 + 600)
     if not lock.acquire():
@@ -347,7 +311,8 @@ def run_automation(name: str, slot_id: str | None = None, dry_run: bool = False,
                 "wrapper_version": heal.versions.get("wrapper-core") or WRAPPER_VERSION,
                 "framework_version": heal.versions.get("execution-framework"), "ring": ring, "host": hostname(),
                 "user_hash": user_hash(), "started_at": iso(started_dt), "params": params,
-                "self_heal": {"installed": heal.installed, "errors": heal.errors, "offline": heal.offline},
+                "self_heal": {"installed": heal.installed, "errors": heal.errors, "offline": heal.offline,
+                              "stale_registry": heal.stale_registry},
                 "hung_detected": False, "exit_code": None, "error": None,
             }
 
@@ -389,12 +354,12 @@ def run_automation(name: str, slot_id: str | None = None, dry_run: bool = False,
 
         last: RunOutcome | None = None
         for params, trigger_id in invocations:
-            if not dry_run and trigger_id:
-                selfheal.consume_trigger(paths, trigger_id)
             t0 = time.monotonic()
             started_dt = utcnow()
             last = _run_once(paths, cfg, name, slot_id, params, trigger_id, heal, entry, schedule, base_record,
                              finish, dry_run, ignore_maintenance, t0)
+            if not dry_run and trigger_id:
+                selfheal.consume_trigger(paths, trigger_id)    # at completion, not before: a crash mid-run leaves the trigger for the next poll
         return last or RunOutcome(None, EXIT_OK)
     finally:
         if isinstance(tray_handle, tray_mod.TrayHandle) and last is not None and last.record:

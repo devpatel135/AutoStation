@@ -66,6 +66,37 @@ def configured_keys(cfg: Optional[dict] = None) -> List[str]:
     return _clean(keys)
 
 
+def learned_keys_path(paths):
+    return paths.state / "trusted_keys.json"
+
+
+def load_learned(paths) -> List[str]:
+    """Keys this machine learned from a document signed by an already-trusted key AND co-signed by the new key (rotation)."""
+    try:
+        data = json.loads(learned_keys_path(paths).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    return _clean(data if isinstance(data, list) else [])
+
+
+def effective_keys(paths, cfg: Optional[dict] = None) -> List[str]:
+    """Pinned keys plus learned ones. No pinned key = no signature enforcement at all, so learned keys never switch enforcement on by themselves."""
+    pinned = configured_keys(cfg)
+    if not pinned:
+        return []
+    return _clean(pinned + load_learned(paths))
+
+
+def learn_keys(paths, new_keys: Iterable[str]) -> List[str]:
+    """Persist keys from a verified document (cap 16). Returns the keys that were new."""
+    have = load_learned(paths)
+    add = [k for k in _clean(new_keys) if k not in have]
+    if add:
+        from .util import write_json
+        write_json(learned_keys_path(paths), (have + add)[-16:])
+    return add
+
+
 def parse_iso(value: str) -> datetime:
     try:
         d = datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
@@ -101,24 +132,65 @@ def _check_extras(extras) -> dict:
     return out
 
 
+DOMAIN3 = "autostation-manifest-v3"
+MAX_EPOCH = 2 ** 31
+MAX_TRUSTED_KEYS = 8
+
+
+def signing_message_v3(manifest_sha256: str, signed_at: str, seq: int, extras: dict, epoch: int, reset_seq: bool,
+                       trusted_keys: List[str]) -> bytes:
+    """Message covered by ``sig3`` and by every co-signature: everything ``sig2`` covers plus the signed ``epoch``, the ``reset_seq`` flag
+    and the public keys the operator endorses (``trusted_keys``)."""
+    lines = "\n".join(f"{n}={extras[n].lower()}" for n in sorted(extras))
+    keys = "\n".join(sorted(k.lower() for k in trusted_keys))
+    return (f"{DOMAIN3}\n{manifest_sha256.lower()}\n{signed_at}\n{int(seq)}\n{int(epoch)}\n{1 if reset_seq else 0}\n"
+            f"{lines}\n--\n{keys}").encode("utf-8")
+
+
 def make_sig_doc(manifest_bytes: bytes, seed: bytes, signed_at: str, seq: Optional[int] = None,
-                 extras: Optional[dict] = None) -> dict:
+                 extras: Optional[dict] = None, epoch: Optional[int] = None, reset_seq: bool = False,
+                 trusted_keys: Optional[Iterable[str]] = None, cosign_seeds: Optional[Iterable[bytes]] = None) -> dict:
     """Operator side (``tools/sign_registry.py``): sign exact manifest bytes with a 32-byte Ed25519 seed.
 
     The v1 signature (``sig``) always covers manifest digest + time, so endpoints that predate ``seq``/``extras`` keep working.
-    When ``seq`` and/or ``extras`` are given they are covered by a second signature ``sig2`` (same key)."""
+    When ``seq`` and/or ``extras`` are given they are covered by a second signature ``sig2`` (same key).
+    ``epoch`` / ``reset_seq`` / ``trusted_keys`` / ``cosign_seeds`` are the recovery + rotation features: they are covered by a third
+    signature ``sig3`` (older endpoints ignore it and keep verifying through ``sig``/``sig2``):
+
+    * ``epoch`` (int): a counter only the operator raises; with ``reset_seq`` true and a HIGHER epoch than the endpoint has stored, the
+      endpoint accepts this document's ``seq`` even though it is lower (recovery after a mistaken seq or a restored backup).
+    * ``trusted_keys``: public keys the signer endorses. An endpoint learns one only when that key also co-signed (proof of possession),
+      so the fleet can rotate keys by publishing a document signed by the OLD key and co-signed by the NEW key.
+    """
     _, pub = ed25519.keypair_from_seed(seed)
     digest = hashlib.sha256(manifest_bytes).hexdigest()
     sig = ed25519.sign(seed, signing_message(digest, signed_at))
     doc = {"v": 1, "key_id": pub.hex()[:8], "signed_at": signed_at, "manifest_sha256": digest,
            "sig": base64.b64encode(sig).decode("ascii")}
-    if seq is not None or extras:
+    v3 = epoch is not None or reset_seq or bool(trusted_keys) or bool(cosign_seeds)
+    if seq is not None or extras or v3:
         seq = 0 if seq is None else int(seq)
         if not 0 <= seq <= MAX_SEQ:
             raise TrustError("seq out of range")
         ex = _check_extras(extras or {})
         doc["seq"], doc["extras"] = seq, ex
         doc["sig2"] = base64.b64encode(ed25519.sign(seed, signing_message_v2(digest, signed_at, seq, ex))).decode("ascii")
+        if v3:
+            ep = 0 if epoch is None else int(epoch)
+            if not 0 <= ep <= MAX_EPOCH:
+                raise TrustError("epoch out of range")
+            tk = _clean(trusted_keys or [])
+            if len(tk) > MAX_TRUSTED_KEYS:
+                raise TrustError("too many trusted_keys")
+            msg3 = signing_message_v3(digest, signed_at, seq, ex, ep, bool(reset_seq), tk)
+            doc["epoch"], doc["reset_seq"], doc["trusted_keys"] = ep, bool(reset_seq), tk
+            doc["sig3"] = base64.b64encode(ed25519.sign(seed, msg3)).decode("ascii")
+            cos = []
+            for cs in cosign_seeds or []:
+                _, cpub = ed25519.keypair_from_seed(cs)
+                cos.append({"key_id": cpub.hex()[:8], "key": cpub.hex(), "sig": base64.b64encode(ed25519.sign(cs, msg3)).decode("ascii")})
+            if cos:
+                doc["cosigs"] = cos
     return doc
 
 
@@ -128,6 +200,9 @@ class Verified(NamedTuple):
     key_id: str
     seq: Optional[int]
     extras: dict
+    epoch: Optional[int] = None
+    reset_seq: bool = False
+    trusted_keys: tuple = ()      # endorsed AND co-signed public keys (safe to learn)
 
 
 def verify_manifest(manifest_bytes: bytes, sig_doc, keys: Iterable[str]) -> str:
@@ -188,7 +263,43 @@ def _verify_v2(doc: dict, digest: str, signed_at: str, key_hex: str) -> Verified
         raise TrustError("sig2 is not valid base64") from exc
     if not ed25519.verify(bytes.fromhex(key_hex), signing_message_v2(digest, signed_at, seq, ex), raw2):
         raise TrustError("seq/extras were not signed by the registry key (tampered)")
-    return Verified(signed_at, key_id(key_hex), seq, ex)
+    if not any(f in doc for f in ("epoch", "reset_seq", "trusted_keys", "sig3", "cosigs")):
+        return Verified(signed_at, key_id(key_hex), seq, ex)
+    return _verify_v3(doc, digest, signed_at, key_hex, seq, ex)
+
+
+def _verify_v3(doc: dict, digest: str, signed_at: str, key_hex: str, seq: int, ex: dict) -> Verified:
+    epoch, reset, tk, sig3 = doc.get("epoch"), doc.get("reset_seq", False), doc.get("trusted_keys", []), doc.get("sig3")
+    if (isinstance(epoch, bool) or not isinstance(epoch, int) or not 0 <= epoch <= MAX_EPOCH or not isinstance(reset, bool)
+            or not isinstance(tk, list) or len(tk) > MAX_TRUSTED_KEYS or not isinstance(sig3, str)):
+        raise TrustError("signature document has an incomplete epoch/trusted_keys section")
+    keys = _clean(tk)
+    if len(keys) != len(tk):
+        raise TrustError("trusted_keys contains an invalid key")
+    try:
+        raw3 = base64.b64decode(sig3, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise TrustError("sig3 is not valid base64") from exc
+    msg3 = signing_message_v3(digest, signed_at, seq, ex, epoch, reset, keys)
+    if not ed25519.verify(bytes.fromhex(key_hex), msg3, raw3):
+        raise TrustError("epoch/trusted_keys were not signed by the registry key (tampered)")
+    cosigned = []
+    cos = doc.get("cosigs", [])
+    if not isinstance(cos, list) or len(cos) > MAX_TRUSTED_KEYS:
+        raise TrustError("cosigs is malformed")
+    for c in cos:
+        ck = c.get("key") if isinstance(c, dict) else None
+        if not (isinstance(ck, str) and _HEX64.match(ck) and isinstance(c.get("sig"), str)):
+            raise TrustError("cosigs contains a malformed entry")
+        try:
+            ok = ed25519.verify(bytes.fromhex(ck), msg3, base64.b64decode(c["sig"], validate=True))
+        except (binascii.Error, ValueError):
+            ok = False
+        if not ok:
+            raise TrustError("a co-signature does not verify")
+        if ck.lower() in keys and ck.lower() not in cosigned:
+            cosigned.append(ck.lower())
+    return Verified(signed_at, key_id(key_hex), seq, ex, epoch, reset, tuple(cosigned))
 
 
 def pin_keys(candidates: Iterable[str], paths=None, fetch=None) -> Tuple[bool, str]:

@@ -22,6 +22,15 @@ installed automation ──HTTPS (Contents API, DPAPI-protected token)──▶ 
  https://<owner>.github.io/<repo>/registry/  ◀── `release` workflow       `site` workflow: ingest → signals → dashboards → Pages
 ```
 
+## Scale design (layout v2)
+
+- **Bundles.** One run process sends ONE commit: a `bundle` file holding the run record, heartbeats and lifecycle events (evidence stays a separate file). Bundle ids derive from their contents, so a retry can never double-count.
+- **Date folders and monthly branches.** Files go to `ingest/<ring>/<kind>/<name>/YYYY/MM/DD/<id>.json` on branch `ingest-YYYY-MM`, so no branch or directory grows without bound. The legacy flat layout on `ingest` is still read.
+- **Fair to GitHub.** Jittered sends, `Retry-After` / secondary-rate-limit backoff, and one idle heartbeat per machine per day (`AUTOMAGIX_HEARTBEAT_EVERY_H`, default 20).
+- **Offline.** The spool is capped (14 days, 100 MB; evidence is dropped first). A run record is truncated to the ingest limits (900 KB, 4000 events) rather than rejected.
+- **Credential problems are visible.** A rejected token (401/403) pauses sending for 30 min; a missing or undecryptable token for 6 h. Heartbeats carry `spool` and `logging_auth_failed`, and `wrapper_core doctor` reports both.
+- **Ingest (`python -m automation_logging ingest --source dir --from <dir>`).** Reads only the last 60 days, newest first, up to 250,000 files; the source is left untouched unless `--consume` is given. Anything deferred, rejected above `--max-rejected`, or errored makes the command exit 3 and is recorded in `_ingest_stats.json`, which analytics surfaces as `data_quality.ingest` / `ingest_incomplete`. `tools/fetch_logs.py` fetches the recent branches (read-only, depth 1) into such a directory.
+
 ## One-time setup (3 minutes)
 
 Run `tools/setup_logging.ps1` (uses the GitHub CLI), or do it by hand:

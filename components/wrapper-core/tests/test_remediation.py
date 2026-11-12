@@ -309,7 +309,7 @@ def test_profile_lock_kills_only_processes_that_name_exactly_this_profile(paths)
         alive.discard(pid)
         return True
 
-    rep = rem(paths, lister=lister, killer=killer).handle(diag("STALE_BROWSER_PROFILE_LOCK"))
+    rep = rem(paths, lister=lister, killer=killer, inspector=lambda pid: (False, 99999)).handle(diag("STALE_BROWSER_PROFILE_LOCK"))
     a = rep.attempts[0]
     assert sorted(killed) == [101, 102, 107] and a["outcome"] == "fixed" and rep.retry
     assert not (prof / "SingletonLock").exists() and not (prof / "lockfile").exists()
@@ -330,7 +330,7 @@ def test_profile_lock_not_applicable_when_clean(paths):
 def test_profile_lock_not_fixed_when_the_process_will_not_die(paths):
     prof = make_profile(paths)
     procs = [(201, "msedge.exe", f"msedge.exe --user-data-dir={prof}")]
-    rep = rem(paths, lister=lambda: procs, killer=lambda pid: False).handle(diag("STALE_BROWSER_PROFILE_LOCK"))
+    rep = rem(paths, lister=lambda: procs, killer=lambda pid: False, inspector=lambda pid: (False, 99999)).handle(diag("STALE_BROWSER_PROFILE_LOCK"))
     assert rep.attempts[0]["outcome"] == "not_fixed" and not rep.retry
 
 
@@ -939,3 +939,21 @@ def main():
     rec = run().record
     assert rec["status"] == "success"
     assert (paths.automation_dir("auto-a") / "main.py").exists()
+
+
+def test_profile_lock_playbook_never_kills_a_visible_or_fresh_edge(paths):
+    p = R.profile_dir(paths, "auto-a")
+    procs = [(201, "msedge.exe", f"msedge.exe --user-data-dir={p}"), (202, "msedge.exe", f"msedge.exe --user-data-dir={p}"),
+             (203, "msedge.exe", f"msedge.exe --user-data-dir={p}"), (204, "msedge.exe", f"msedge.exe --user-data-dir={p}")]
+    state = {201: (True, 99999), 202: (False, 30), 203: (None, None), 204: (False, 99999)}   # visible window / fresh / unknown / killable
+    alive, killed = {t[0] for t in procs}, []
+
+    def killer(pid):
+        killed.append(pid)
+        alive.discard(pid)
+        return True
+    p.mkdir(parents=True, exist_ok=True)
+    (p / "SingletonLock").write_text("x")
+    rem(paths, lister=lambda: [t for t in procs if t[0] in alive], killer=killer, inspector=lambda pid: state[pid]).handle(diag("STALE_BROWSER_PROFILE_LOCK"))
+    assert killed == [204]                                   # only the old, windowless one
+    assert (p / "SingletonLock").exists()                    # a browser still holds the profile: its lock files stay

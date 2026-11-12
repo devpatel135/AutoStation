@@ -6,7 +6,6 @@
  */
 
 const DEFAULT_URL = 'https://develop.deloitte.com/ai-season-of-certifications#subpage/res';
-const DEFAULT_ACCOUNT = 'devpatel@deloitte.com';
 const MICROSOFT_LOGIN_HOSTS = /(^|\.)login\.microsoftonline\.com$|(^|\.)login\.live\.com$|(^|\.)login\.microsoft\.com$/i;
 
 /** Validate the account parameter: it is interpolated into selectors, so it must look like a plain e-mail address. */
@@ -156,4 +155,4 @@ function postClickOk(url, ctx = {}) {
 
 module.exports = {
   DEFAULT_ALLOWED_HOSTS, parseAllowedHosts, hostAllowed, isMicrosoftLoginHost, isTrustedHost, isAllowedPortal, redirectAllowed, postClickOk,
-  DEFAULT_URL, DEFAULT_ACCOUNT, MICROSOFT_LOGIN_HOSTS, assertEmail, accountTileSelectors, classifyPage, hostOf };
+  DEFAULT_URL, MICROSOFT_LOGIN_HOSTS, assertEmail, accountTileSelectors, classifyPage, hostOf };

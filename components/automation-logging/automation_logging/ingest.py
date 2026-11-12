@@ -23,7 +23,8 @@ import tempfile
 from pathlib import Path
 
 from .common import KINDS, iso, parse_iso, utcnow
-from .validate import MAX_BYTES, check_name_matches_record, check_path_parts, normalize_timestamps, ref_digest, validate_record
+from .validate import (MAX_BUNDLE_ITEMS, MAX_BYTES, check_name_matches_record, check_path_parts, normalize_timestamps, ref_digest,
+                       validate_record)
 
 
 class IngestError(RuntimeError):
@@ -90,7 +91,9 @@ def archive_path(archive: Path, kind: str, name: str, art_id: str, rec: dict) ->
 
 MAX_REJECTED_FILES = 1000          # quarantine copies kept per archive
 MAX_REJECT_BYTES = 20_000          # bytes of a rejected artefact kept for forensics
-MAX_INGEST_FILES = 20_000          # artefacts processed per ingest_dir run (the rest wait for the next run)
+MAX_INGEST_FILES = 250_000         # files processed per ingest_dir run; newest first, so a cap can only ever cost OLD data (and is reported)
+INGEST_WINDOW_DAYS = 60            # files dated older than this are not read at all (analytics only looks at 30 days)
+MAX_SCAN_DEPTH = 8                 # directory levels below ingest/ that are walked (ring/kind/name/YYYY/MM/DD)
 
 
 def _validate(rec, kind: str, name: str, art_id: str) -> str | None:
@@ -141,6 +144,9 @@ def _store(archive: Path, ring: str, kind: str, name: str, art_id: str, raw: byt
     if reason:
         _reject(archive, source_label if source_label else ref, raw, reason, stats)
         return
+    if rec.get("ring") is not None and rec["ring"] != ring:
+        _reject(archive, source_label if source_label else ref, raw, "ring in the content does not match the path", stats)
+        return
     normalize_timestamps(rec)
     rec.setdefault("ring", ring)
     target = archive_path(archive, kind, name, art_id, rec)
@@ -156,40 +162,136 @@ def _store(archive: Path, ring: str, kind: str, name: str, art_id: str, raw: byt
 
 
 def _stats() -> dict:
-    return {"archived": 0, "duplicates": 0, "rejected": 0, "by_kind": {}, "deleted_refs": 0, "errors": []}
+    return {"archived": 0, "duplicates": 0, "rejected": 0, "by_kind": {}, "deleted_refs": 0, "errors": [],
+            "deferred_files": 0, "out_of_window": 0, "symlinks": 0, "bundles": 0}
 
 
-def ingest_dir(src: str | Path, archive: str | Path, keep_source: bool = False) -> dict:
+def _store_bundle(archive: Path, ring: str, name: str, art_id: str, raw: bytes, stats: dict, label: str) -> None:
+    """A bundle is one commit that carries a run's artefacts: unpack it, validating every item exactly like a stand-alone artefact."""
+    try:
+        doc = json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError, RecursionError):
+        _reject(archive, label, raw, "invalid JSON (bundle)", stats)
+        return
+    items = doc.get("items") if isinstance(doc, dict) else None
+    if not isinstance(doc, dict) or doc.get("schema_version") != 1 or doc.get("kind") != "bundle" or not isinstance(items, list):
+        _reject(archive, label, raw, "malformed bundle", stats)
+        return
+    if len(items) > MAX_BUNDLE_ITEMS:
+        _reject(archive, label, raw, f"bundle has {len(items)} items (limit {MAX_BUNDLE_ITEMS})", stats)
+        return
+    stats["bundles"] += 1
+    for i, it in enumerate(items):
+        ilabel = f"{label}#{i}"
+        if not isinstance(it, dict) or it.get("kind") not in KINDS or not isinstance(it.get("payload"), dict):
+            _reject(archive, ilabel, b"", "malformed bundle item", stats)
+            continue
+        try:
+            body = json.dumps(it["payload"], default=str).encode("utf-8")
+        except (TypeError, ValueError, RecursionError):
+            _reject(archive, ilabel, b"", "bundle item is not serialisable", stats)
+            continue
+        iname, iid = str(it.get("name", "")), str(it.get("id", ""))
+        _store(archive, ring, it["kind"], iname, iid, body, stats, ilabel)
+
+
+_ID_DATE = re.compile(r"^([0-9]{4})([0-9]{2})([0-9]{2})T")
+
+
+def _path_date(rel: tuple, art_id: str):
+    """The day an artefact belongs to: its YYYY/MM/DD folders, else the timestamp prefix of its id, else unknown (None)."""
+    from datetime import date
+    try:
+        if len(rel) >= 6:
+            return date(int(rel[3]), int(rel[4]), int(rel[5]))
+        m = _ID_DATE.match(art_id)
+        if m:
+            return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    except ValueError:
+        pass
+    return None
+
+
+def _scan(root: Path, stats: dict) -> list:
+    """Collect (rel_dirs, art_id, path) for every .json below ``root`` WITHOUT following symlinks (a pushed symlink could point at any
+    file or directory of the machine that runs the ingest); each symlink is counted as rejected and skipped."""
+    out: list = []
+    stack: list = [(str(root), (), 0)]
+    while stack:
+        path, rel, depth = stack.pop()
+        try:
+            entries = list(os.scandir(path))
+        except OSError:
+            continue
+        for e in entries:
+            try:
+                if e.is_symlink():
+                    stats["rejected"] += 1
+                    stats["symlinks"] += 1
+                elif e.is_dir(follow_symlinks=False):
+                    if depth < MAX_SCAN_DEPTH:
+                        stack.append((e.path, rel + (e.name,), depth + 1))
+                elif e.is_file(follow_symlinks=False) and e.name.endswith(".json"):
+                    out.append((rel, e.name[:-5], e.path))
+            except OSError:
+                continue
+    return out
+
+
+def ingest_dir(src: str | Path, archive: str | Path, keep_source: bool = False, window_days: int = INGEST_WINDOW_DAYS, now=None) -> dict:
+    """Archive what is under <src>/ingest (both layouts: flat <ring>/<kind>/<name>/<id>.json and date-partitioned
+    <ring>/<kind>/<name>/YYYY/MM/DD/<id>.json; bundle files are unpacked).
+
+    Files dated older than ``window_days`` are skipped unread (``out_of_window``). The rest are processed NEWEST FIRST and capped at
+    ``MAX_INGEST_FILES``; anything beyond the cap is ``deferred_files`` - the caller must treat that as a data-quality failure.
+    ``keep_source=False`` (the historical default of this function) deletes each processed file; ``ingest()`` (the CLI path) keeps them.
+    """
+    from datetime import date as _date
+    from datetime import timedelta
     src, archive = Path(src), Path(archive)
     stats = _stats()
     root = src / "ingest"
-    if not root.exists():
+    if not root.exists() or root.is_symlink():
         return stats
-    for n_files, f in enumerate(sorted(root.glob("*/*/*/*.json"))):
+    cutoff = ((now or utcnow()) - timedelta(days=window_days)).date()
+    todo = []
+    for rel, art_id, path in _scan(root, stats):
+        if len(rel) not in (3, 6):
+            stats["rejected"] += 1                       # not a layout any transport writes
+            continue
+        d = _path_date(rel, art_id)
+        if d is not None and d < cutoff:
+            stats["out_of_window"] += 1
+            continue
+        todo.append((d, rel, art_id, path))
+    todo.sort(key=lambda t: (t[0] or _date.max, t[3]), reverse=True)        # newest first
+    for n_files, (_d, rel, art_id, path) in enumerate(todo):
         if n_files >= MAX_INGEST_FILES:
-            stats["deferred_files"] = stats.get("deferred_files", 0) + 1
+            stats["deferred_files"] += 1
             continue
-        if f.is_symlink():                      # a pushed symlink could point at any file on the runner: never follow it
-            stats["rejected"] += 1
-            try:
-                f.unlink()
-            except OSError:
-                pass
-            continue
-        ring, kind, name = f.relative_to(root).parts[:3]
-        art_id = f.stem
+        ring, kind, name = rel[0], rel[1], rel[2]
         try:
             limit = MAX_BYTES.get(kind, 1_000_000)
-            with open(f, "rb") as fh:
+            with open(path, "rb") as fh:
                 raw = fh.read(limit + 1)  # never read an unbounded file into memory
-            _store(archive, ring, kind, name, art_id, raw, stats, f"{ring}/{kind}/{name}/{art_id}")
+            label = f"{ring}/{kind}/{name}/{art_id}"
+            reason = check_path_parts(ring, kind, name, art_id)
+            if reason:
+                _reject(archive, label, raw, reason, stats)
+            elif kind == "bundle":
+                if len(raw) > limit:
+                    _reject(archive, label, raw, f"bundle is over {limit} bytes", stats)
+                else:
+                    _store_bundle(archive, ring, name, art_id, raw, stats, label)
+            else:
+                _store(archive, ring, kind, name, art_id, raw, stats, label)
         except OSError as exc:
-            stats["errors"].append(f"cannot read {ref_digest(str(f))}: {type(exc).__name__}")
+            stats["errors"].append(f"cannot read {ref_digest(str(path))}: {type(exc).__name__}")
         if not keep_source:
             try:
-                f.unlink()
+                os.unlink(path)
             except OSError as exc:
-                stats["errors"].append(f"cannot remove {f}: {exc}")
+                stats["errors"].append(f"cannot remove {ref_digest(str(path))}: {type(exc).__name__}")
     return stats
 
 
@@ -270,16 +372,49 @@ def ingest_git(remote: str, archive: str | Path, delete: bool = True, token: str
     return stats
 
 
+def data_quality_problems(stats: dict, max_rejected: int = 50) -> list:
+    """What makes an ingest run untrustworthy as the basis of dashboards and signals (the workflow fails on any of these)."""
+    out = []
+    if stats.get("deferred_files"):
+        out.append(f"{stats['deferred_files']} file(s) deferred by the per-run cap (newest data was processed first; the oldest was not)")
+    if stats.get("deferred_refs"):
+        out.append(f"{stats['deferred_refs']} ref(s) deferred")
+    if stats.get("rejected", 0) > max_rejected:
+        out.append(f"{stats['rejected']} artefact(s) rejected (limit {max_rejected})")
+    if stats.get("errors"):
+        out.append(f"{len(stats['errors'])} read/removal error(s)")
+    return out
+
+
+def write_stats(archive: str | Path, stats: dict) -> None:
+    """Leave the verdict next to the archive so the report (analytics data_quality) can show it - a silently incomplete archive
+    must never look like a healthy one."""
+    try:
+        doc = {k: v for k, v in stats.items() if k not in ("errors", "by_kind")}
+        doc["errors"] = len(stats.get("errors") or [])
+        doc["at"] = iso(utcnow())
+        p = Path(archive)
+        p.mkdir(parents=True, exist_ok=True)
+        (p / "_ingest_stats.json").write_text(json.dumps(doc, indent=1), encoding="utf-8")
+    except OSError:
+        pass
+
+
 def ingest(source: str, archive: str | Path, remote: str | None = None, src_dir: str | Path | None = None, **kw) -> dict:
     if source == "git":
         if not remote:
             raise IngestError("--remote is required for --source git")
-        return ingest_git(remote, archive, **kw)
-    if source == "dir":
+        stats = ingest_git(remote, archive, **kw)
+    elif source == "dir":
         if not src_dir:
             raise IngestError("--from is required for --source dir")
-        return ingest_dir(src_dir, archive)
-    raise IngestError(f"unknown source {source!r}")
+        # a directory given with --from is somebody else's checkout: never delete from it unless --consume says so
+        stats = ingest_dir(src_dir, archive, keep_source=not kw.get("consume", False),
+                           window_days=kw.get("window_days", INGEST_WINDOW_DAYS), now=kw.get("now"))
+    else:
+        raise IngestError(f"unknown source {source!r}")
+    write_stats(archive, stats)
+    return stats
 
 
 def prune(archive: str | Path, days: int, now=None) -> dict:

@@ -3,7 +3,7 @@
 Browser automation example (Node + Playwright on **execution-framework**).
 
 **What it does:** opens `https://develop.deloitte.com/ai-season-of-certifications#subpage/res`; when the Microsoft
-authentication "Pick an account" page appears it clicks the tile for `devpatel@deloitte.com`, **then stops**.
+authentication "Pick an account" page appears it clicks the tile for the configured `account` (a required parameter, no default), **then stops**.
 
 **What it deliberately does not do:** it never types a password, a code or a token, and it does nothing after the click.
 Authentication is the signed-in user's — the automation runs in the user's Edge profile (Windows SSO / cert). If Microsoft
@@ -41,12 +41,15 @@ Everything below is enforced in code (`lib/login.js` pure functions, covered by 
 CI smoke configuration (installer-dev.yml): `AMX_ALLOW_TEST_HOSTS=1`, `AUTOMATION_PARAM_PORTAL_URL=http://127.0.0.1:8099/portal.html`,
 `AUTOMATION_PARAM_ALLOWED_HOSTS=127.0.0.1:8099`, `AUTOMATION_PARAM_PICKER_HOST=localhost:8099`, `AUTOMATION_PARAM_HEADLESS=true`.
 
-Parameters (schedule slot `params`): `portal_url`, `allowed_hosts` (optional), `account` (default `devpatel@deloitte.com`; validated as an
+Parameters (schedule slot `params`): `portal_url`, `allowed_hosts` (optional), `account` (**required**, no default - the e-mail of the Microsoft account tile to choose; validated as an
 e-mail address before it is used in selectors), `channel` (default `msedge`), `timeout_s` (default 60, clamped 5-600). Test-only (need
 `AMX_ALLOW_TEST_HOSTS=1`): `picker_host`, `headless`.
 
 Native UI-Automation mode (used only when managed Edge forbids DevTools) validates `portal_url` the same way but cannot see the
-sign-in URL, so the redirect and post-click checks apply to the Playwright path only.
+sign-in URL, so the redirect and post-click checks apply to the Playwright path only. It matches nothing by translated caption (the state
+comes from the account tile's accessible name and the host in the address bar), only touches - and closes - the Edge window it opened
+(it stays open when a person must continue the sign-in), and the run FAILS unless the tile was pressed or the user was already on the portal
+(`manual_step_required` is reported as an auth failure, anything else as unavailable). `AUTOMATION_PARAM_ACCOUNT` is needed in CI smoke runs too.
 
 ## Try it
 

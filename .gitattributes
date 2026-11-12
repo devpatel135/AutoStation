@@ -4,3 +4,6 @@
 *.vbs text eol=crlf
 *.exe binary
 *.zip binary
+
+# bundled IANA tz data (binary TZif; must never be line-ending converted)
+components/wrapper-core/wrapper_core/_tzdata/** -text

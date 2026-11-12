@@ -120,17 +120,48 @@ def run_checks(paths: Paths | None = None, online: bool = True) -> list[dict]:
             add("registry", WARN, f"{reg} unreachable ({str(exc)[:120]})",
                 "the automation keeps running from the last cached manifest" if cached else
                 "first-time installs run from the payload bundled in the installer; updates/kill-switch need the registry")
+    if reg and paths.manifest_cache.exists():
+        age = selfheal.cached_manifest_age_days(paths)
+        if age is not None and age > selfheal.STALE_REGISTRY_DAYS:
+            add("registry freshness", FAIL, f"STALE REGISTRY: the cached manifest is {age:.0f} days old (limit {selfheal.STALE_REGISTRY_DAYS})",
+                "this machine has not confirmed updates or the kill-switch for that long: check the network/proxy and that the registry URL is reachable")
+        elif age is not None:
+            add("registry freshness", PASS, f"cached manifest is {age:.1f} day(s) old")
     transport = cfg.get("log_transport")
     remote = cfg.get("log_remote", "")
     add("run-log destination", PASS if remote else WARN, f"{transport}: {remote or 'not configured'}",
         "set log_remote in config/platform.json (or reinstall with a configured installer)" if not remote else "")
-    spooled = len(list(paths.spool.glob("*.json"))) if paths.spool.exists() else 0
-    add("unsent log spool", PASS if spooled == 0 else WARN, f"{spooled} item(s)",
+    from . import transport as _tr
+    try:
+        sp = _tr.spool_stats(paths)
+        spooled, sp_bytes = int(sp.get("count", 0)), int(sp.get("bytes", 0))
+        oldest = round(int(sp.get("oldest_age_s", 0)) / 3600.0, 1) if spooled else None
+    except Exception:  # noqa: BLE001 - a diagnostic must not crash on its own helper
+        spooled = len(list(paths.spool.glob("*.json"))) if paths.spool.exists() else 0
+        sp_bytes, oldest = 0, None
+    add("unsent log spool", PASS if spooled == 0 else WARN,
+        f"{spooled} item(s)" + (f", {sp_bytes // 1024} KB" if sp_bytes else "") + (f", oldest {oldest} h" if oldest else ""),
         "logs could not be sent; they retry on the next run. Check connectivity/keys." if spooled else "")
     if transport == "github-api":
-        tok = paths.secrets / "logging_token.dpapi"
-        add("logging token (DPAPI)", PASS if tok.exists() else FAIL, "present" if tok.exists() else "missing",
-            "this installer was built without live logging; use the connected installer from the install page" if not tok.exists() else "")
+        try:
+            from . import secrets as _sec
+            status, detail = _sec.logging_token_status(paths)
+        except Exception as exc:  # noqa: BLE001
+            status, detail = "undecryptable", type(exc).__name__
+        msg = {"ok": "present", "missing": "missing", "undecryptable": f"present but cannot be decrypted ({detail})"}.get(status, status)
+        add("logging token (DPAPI)", PASS if status == "ok" else FAIL, msg,
+            "" if status == "ok" else
+            "this installer was built without live logging; use the connected installer from the install page" if status == "missing" else
+            "Windows cannot decrypt the token (profile rebuilt / password reset): reinstall with the connected installer")
+        try:
+            failure = _tr.auth_failure(paths)
+        except Exception:  # noqa: BLE001
+            failure = None
+        if failure:
+            add("logging token accepted", FAIL, f"GitHub rejected it (HTTP {failure.get('http')}) at {failure.get('ts')}",
+                "the logging token expired or was revoked: telemetry is paused for this machine until it is replaced (new installer/update)")
+        else:
+            add("logging token accepted", PASS, "no rejection recorded")
     if transport == "git-ssh":
         key = paths.secrets / "logging_key.dpapi"
         add("logging key (DPAPI)", PASS if key.exists() else FAIL, "present" if key.exists() else "missing",

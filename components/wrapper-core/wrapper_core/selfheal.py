@@ -17,6 +17,7 @@ import urllib.error
 import urllib.request
 import zipfile
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 
 from . import manifest as mf
@@ -49,6 +50,8 @@ class HealResult:
     assets: dict = field(default_factory=dict)
     triggers: list[dict] = field(default_factory=list)
     versions: dict = field(default_factory=dict)
+    stale_registry: bool = False        # offline AND the cached manifest is older than STALE_REGISTRY_DAYS: kill-switch state is unknown
+    manifest_age_days: float | None = None
 
 
 # --- transport ---------------------------------------------------------------------------------------
@@ -182,7 +185,8 @@ def _member_is_unsafe(info: zipfile.ZipInfo) -> bool:
     return (mode & 0o170000) == 0o120000  # symlink
 
 
-def safe_extract(zip_path: Path, dest: Path, max_total: int = MAX_EXTRACT_BYTES, max_members: int = MAX_EXTRACT_MEMBERS) -> None:
+def safe_extract(zip_path: Path, dest: Path, max_total: int = MAX_EXTRACT_BYTES, max_members: int = MAX_EXTRACT_MEMBERS,
+                 max_path: int | None = None) -> None:
     """Extract a package: zip-slip, symlink and drive/ADS names rejected; member count and the *actual* decompressed byte
     count capped (the declared sizes in the zip header are attacker-controlled, so they are not trusted). On any failure
     the partial extraction is removed."""
@@ -193,6 +197,11 @@ def safe_extract(zip_path: Path, dest: Path, max_total: int = MAX_EXTRACT_BYTES,
             infos = z.infolist()
             if len(infos) > max_members:
                 raise HealError(f"archive has more than {max_members} members")
+            limit = max_path if max_path is not None else (WIN_MAX_PATH if os.name == "nt" else 0)
+            if limit and infos:       # Windows MAX_PATH: a too-deep package would extract half-way and fail mid-swap
+                longest = max(len(i.filename) for i in infos)
+                if len(str(root)) + 1 + longest > limit:
+                    raise HealError(f"package paths would exceed {limit} characters under {root} (longest member {longest}); install under a shorter path")
             for info in infos:
                 target = (dest / info.filename).resolve()
                 if _member_is_unsafe(info) or (root != target and root not in target.parents):
@@ -243,14 +252,20 @@ def installed_platform_version(paths: Paths) -> str | None:
 
 
 def installed_component_version(paths: Paths, name: str) -> str | None:
-    """The VERSION marker inside the component dir is authoritative (the launcher swaps wrapper-core outside Python)."""
-    marker = (paths.wrapper_core if name == "wrapper-core" else paths.framework) / "VERSION"
-    if marker.exists():
-        return marker.read_text(encoding="utf-8").strip()
-    v = read_installed(paths)["components"].get(name)
-    if v:
-        return v
-    return WRAPPER_VERSION if name == "wrapper-core" else None
+    """The VERSION marker inside the component dir is authoritative (the launcher swaps wrapper-core outside Python).
+    A framework directory without a marker (a half-extracted or hand-edited copy) counts as NOT installed, so it gets re-installed;
+    the running wrapper-core itself falls back to the version of the code that is executing."""
+    d = paths.wrapper_core if name == "wrapper-core" else paths.framework
+    marker = d / "VERSION"
+    try:
+        v = marker.read_text(encoding="utf-8").strip()
+        if v:
+            return v
+    except OSError:
+        pass
+    if name == "wrapper-core":
+        return read_installed(paths)["components"].get(name) or WRAPPER_VERSION
+    return None
 
 
 def _replace(src: Path, dst: Path, attempts: int = 6) -> None:
@@ -280,19 +295,150 @@ def _swap(staging: Path, target: Path) -> None:
     shutil.rmtree(old, ignore_errors=True)
 
 
-def download_and_stage(location: str, expected_sha: str, staging: Path, token: str | None, base: str | None = None) -> None:
+MIN_FREE_BYTES = 256 * 1024 * 1024     # refuse to start a download/extract with less free space than this
+WIN_MAX_PATH = 250
+
+
+class Deadline:
+    """Wall-clock budget of one self-heal pass: a hung registry or a crawling download must never hold a scheduled run for long."""
+
+    def __init__(self, seconds: float = 120.0):
+        self.end = time.monotonic() + seconds
+
+    def left(self) -> float:
+        return self.end - time.monotonic()
+
+    def check(self, what: str = "self-heal") -> None:
+        if self.left() <= 0:
+            raise HealError(f"{what}: self-heal deadline exceeded")
+
+
+def fetch_file(location: str, dest: Path, token: str | None = None, retries: int = 3, timeout_s: int = 60,
+               trusted_base: str | None = None, max_bytes: int = MAX_DOWNLOAD_BYTES, deadline: "Deadline | None" = None) -> str:
+    """Like ``fetch_bytes`` but streams to ``dest`` (a package can be hundreds of MB: never hold it in memory). Returns its sha256."""
+    if not _is_url(location):
+        if "://" in location and not location.lower().startswith("file://"):
+            raise HealError(f"refusing URL with unsupported scheme: {location[:80]}")
+        try:
+            src = Path(location.replace("file://", ""))
+            if src.stat().st_size > max_bytes:
+                raise HealError(f"{location} larger than {max_bytes} bytes")
+            shutil.copyfile(src, dest)
+        except OSError as exc:
+            raise HealError(f"cannot read {location}: {exc}") from exc
+        return sha256_file(dest)
+    http_origin = trusted_base if trusted_base and trusted_base.startswith("http://") else None
+    check_url(location, http_origin)
+    headers = {"User-Agent": f"wrapper-core/{WRAPPER_VERSION}"}
+    if token and _same_origin(location, trusted_base):
+        headers["PRIVATE-TOKEN"] = token
+    last: Exception | None = None
+    for attempt in range(retries):
+        if deadline:
+            deadline.check(f"download {location[-60:]}")
+        h, total = hashlib.sha256(), 0
+        try:
+            req = urllib.request.Request(location, headers=headers)
+            with _open(req, timeout_s, http_origin) as resp, open(dest, "wb") as out:  # noqa: S310 - policy enforced by check_url
+                while True:
+                    chunk = resp.read(1 << 20)
+                    if not chunk:
+                        return h.hexdigest()
+                    total += len(chunk)
+                    if total > max_bytes:
+                        raise HealError(f"response larger than {max_bytes} bytes")
+                    if deadline:
+                        deadline.check(f"download {location[-60:]}")
+                    h.update(chunk)
+                    out.write(chunk)
+        except urllib.error.HTTPError as exc:
+            if exc.code in (301, 302, 303, 307, 308, 401, 403, 404):
+                raise HealError(f"HTTP {exc.code} fetching {location}") from exc
+            last = exc
+        except (urllib.error.URLError, OSError) as exc:
+            last = exc
+        time.sleep(min(2 ** attempt, 5))
+    raise HealError(f"cannot fetch {location}: {last}")
+
+
+def precheck_space(where: Path, need: int = MIN_FREE_BYTES) -> None:
+    probe = where
+    while not probe.exists() and probe.parent != probe:
+        probe = probe.parent
+    try:
+        free = shutil.disk_usage(probe).free
+    except OSError:
+        return
+    if free < need:
+        raise HealError(f"not enough free disk space under {probe} ({free // (1024 * 1024)} MB free, {need // (1024 * 1024)} MB needed)")
+
+
+def download_and_stage(location: str, expected_sha: str, staging: Path, token: str | None, base: str | None = None,
+                       deadline: "Deadline | None" = None) -> None:
     if base and _is_url(base) and not _is_url(location):
         raise HealError(f"manifest points a URL registry at a local path: {location[:80]}")  # a manifest must not read local files
-    data = fetch_bytes(location, token, trusted_base=base)
-    with tempfile.TemporaryDirectory(prefix="amx-dl-") as tmp:
+    staging.parent.mkdir(parents=True, exist_ok=True)
+    precheck_space(staging.parent)
+    with tempfile.TemporaryDirectory(prefix="amx-dl-", dir=str(staging.parent)) as tmp:   # same volume: no cross-drive surprises
         zp = Path(tmp) / "pkg.zip"
-        zp.write_bytes(data)
-        actual = sha256_file(zp)
+        actual = fetch_file(location, zp, token, trusted_base=base, deadline=deadline)
         if actual.lower() != expected_sha.lower():
             raise HealError(f"sha256 mismatch for {location}: expected {expected_sha[:12]}…, got {actual[:12]}…")
         if staging.exists():
             shutil.rmtree(staging, ignore_errors=True)
         safe_extract(zp, staging)
+
+
+def staging_dir(target: Path) -> Path:
+    """A staging directory unique to this process: two concurrent passes (login maintain + a scheduled run) never share one."""
+    return target.with_name(f"{target.name}.staging-{os.getpid()}")
+
+
+def is_leftover(name: str) -> bool:
+    return name.endswith((".old", ".bad")) or ".staging" in name
+
+
+def recover_orphans(paths: Paths, stale_after_s: float = 600.0) -> list[str]:
+    """Repair what a crash or a kill left behind: a target that is missing while its ``.old`` exists is restored (the swap died between
+    its two renames), and ``.staging*`` directories older than ``stale_after_s`` are removed. Call while holding the self-heal lock."""
+    notes: list[str] = []
+    targets = [paths.wrapper_core, paths.framework]
+    try:
+        targets += [d for d in paths.automations.iterdir() if d.is_dir() and not is_leftover(d.name)]
+    except OSError:
+        pass
+    parents = {paths.root, paths.automations}
+    for t in list(targets):
+        old = t.with_name(t.name + ".old")
+        if not t.exists() and old.exists():
+            try:
+                os.replace(old, t)
+                notes.append(f"restored {t.name} from {old.name}")
+            except OSError as exc:
+                notes.append(f"cannot restore {t.name}: {exc}")
+    # also restore an automation dir whose live copy vanished (it is not in `targets` then)
+    try:
+        for old in paths.automations.glob("*.old"):
+            live = old.with_name(old.name[:-4])
+            if old.is_dir() and not live.exists():
+                os.replace(old, live)
+                notes.append(f"restored {live.name} from {old.name}")
+    except OSError:
+        pass
+    now = time.time()
+    for parent in parents:
+        try:
+            for d in parent.iterdir():
+                if d.is_dir() and ".staging" in d.name:
+                    try:
+                        if now - d.stat().st_mtime > stale_after_s:
+                            shutil.rmtree(d, ignore_errors=True)
+                            notes.append(f"removed stale {d.name}")
+                    except OSError:
+                        pass
+        except OSError:
+            pass
+    return notes
 
 
 def apply_pending(paths: Paths) -> list[str]:
@@ -310,16 +456,25 @@ def apply_pending(paths: Paths) -> list[str]:
     return applied
 
 
-def install_component(paths: Paths, name: str, version: str, rec: dict, base: str, token: str | None) -> str:
+def rejected_wrapper_versions(paths: Paths) -> set[str]:
+    """Versions of wrapper-core that failed their post-swap self-test (written by the launcher): never staged again until the registry moves on."""
+    try:
+        return {ln.strip() for ln in (paths.state / "rejected-wrapper-core.txt").read_text(encoding="utf-8").splitlines() if ln.strip()}
+    except OSError:
+        return set()
+
+
+def install_component(paths: Paths, name: str, version: str, rec: dict, base: str, token: str | None,
+                      deadline: "Deadline | None" = None) -> str:
     target = {"wrapper-core": paths.wrapper_core, "execution-framework": paths.framework}[name]
     loc = resolve_location(rec["url"], base)
     if name == "wrapper-core":
         staging = paths.root / "wrapper-core.pending"
-        download_and_stage(loc, rec["sha256"], staging, token, base)
+        download_and_stage(loc, rec["sha256"], staging, token, base, deadline)
         atomic_write_text(staging / "VERSION", version + "\n")
         return f"{name} staged {version} (applied at next launch)"
-    staging = target.with_name(target.name + ".staging")
-    download_and_stage(loc, rec["sha256"], staging, token, base)
+    staging = staging_dir(target)
+    download_and_stage(loc, rec["sha256"], staging, token, base, deadline)
     atomic_write_text(staging / "VERSION", version + "\n")
     _swap(staging, target)
     data = read_installed(paths)
@@ -328,10 +483,11 @@ def install_component(paths: Paths, name: str, version: str, rec: dict, base: st
     return f"{name} -> {version}"
 
 
-def install_automation(paths: Paths, name: str, version: str, rec: dict, base: str, token: str | None) -> str:
+def install_automation(paths: Paths, name: str, version: str, rec: dict, base: str, token: str | None,
+                       deadline: "Deadline | None" = None) -> str:
     target = paths.automation_dir(name)
-    staging = target.with_name(name + ".staging")
-    download_and_stage(resolve_location(rec["url"], base), rec["sha256"], staging, token, base)
+    staging = staging_dir(target)
+    download_and_stage(resolve_location(rec["url"], base), rec["sha256"], staging, token, base, deadline)
     atomic_write_text(staging / "VERSION", version + "\n")
     target.parent.mkdir(parents=True, exist_ok=True)
     _swap(staging, target)
@@ -354,9 +510,13 @@ def _needs_update(cur: str | None, target: str) -> bool:
 
 def installed_automation_version(paths: Paths, name: str) -> str | None:
     marker = paths.automation_dir(name) / "VERSION"
-    if marker.exists():
-        return marker.read_text(encoding="utf-8").strip()
-    return read_installed(paths)["automations"].get(name)
+    try:
+        v = marker.read_text(encoding="utf-8").strip()
+        if v:
+            return v
+    except OSError:
+        pass
+    return None if paths.automation_dir(name).exists() else read_installed(paths)["automations"].get(name)
 
 
 PAYLOAD_DEFAULT_KEYS = ("schedule", "error_handling", "data_classification", "llm_allowed_classification", "notify_on_complete")
@@ -385,7 +545,7 @@ def install_bundled(paths: Paths, name: str) -> str | None:
     if not meta.get("sha256") or sha256_file(zp).lower() != str(meta["sha256"]).lower():
         raise HealError(f"bundled payload for {name} failed its sha256 check")
     target = paths.automation_dir(name)
-    staging = target.with_name(name + ".staging")
+    staging = staging_dir(target)
     if staging.exists():
         shutil.rmtree(staging, ignore_errors=True)
     safe_extract(zp, staging)
@@ -449,8 +609,18 @@ def _check_seq(paths: Paths, v: "trust.Verified") -> None:
         return
     marks = read_json(paths.manifest_seq, {})
     last = marks.get(v.key_id) if isinstance(marks, dict) else None
+    stored_epoch = marks.get("_epoch") if isinstance(marks, dict) else None
+    if isinstance(stored_epoch, int) and not isinstance(stored_epoch, bool) and v.epoch is not None and v.epoch < stored_epoch:
+        raise _Untrusted(f"rollback refused: epoch {v.epoch} is lower than the newest accepted {stored_epoch}")
+    if _is_reset(marks, v):
+        return      # operator recovery: a higher signed epoch with reset_seq lets the (lower) seq start over
     if isinstance(last, int) and not isinstance(last, bool) and v.seq < last:
         raise _Untrusted(f"rollback refused: seq {v.seq} is lower than the newest accepted {last} for key {v.key_id}")
+
+
+def _is_reset(marks, v: "trust.Verified") -> bool:
+    stored = marks.get("_epoch") if isinstance(marks, dict) else None
+    return bool(v.reset_seq and v.epoch is not None and isinstance(stored, int) and not isinstance(stored, bool) and v.epoch > stored)
 
 
 def _remember_seq(paths: Paths, v: "trust.Verified") -> None:
@@ -460,9 +630,32 @@ def _remember_seq(paths: Paths, v: "trust.Verified") -> None:
     if not isinstance(marks, dict):
         marks = {}
     last = marks.get(v.key_id)
-    if not (isinstance(last, int) and not isinstance(last, bool)) or v.seq > last:
+    changed = False
+    if not (isinstance(last, int) and not isinstance(last, bool)) or v.seq > last or _is_reset(marks, v):
         marks[v.key_id] = v.seq
+        changed = True
+    stored = marks.get("_epoch")
+    if v.epoch is not None and (not (isinstance(stored, int) and not isinstance(stored, bool)) or v.epoch > stored):
+        marks["_epoch"] = v.epoch
+        changed = True
+    if changed:
         write_json(paths.manifest_seq, marks)
+
+
+STALE_REGISTRY_DAYS = 14
+
+
+def cached_manifest_age_days(paths: Paths) -> float | None:
+    """How old the cached registry manifest is: the time it was SIGNED when a signature is cached, else when the cache file was written."""
+    try:
+        doc = json.loads(paths.manifest_sig_cache.read_text(encoding="utf-8"))
+        return max(0.0, (datetime.now(timezone.utc) - trust.parse_iso(str(doc["signed_at"]))).total_seconds() / 86400.0)
+    except (OSError, ValueError, KeyError, trust.TrustError):
+        pass
+    try:
+        return max(0.0, (time.time() - paths.manifest_cache.stat().st_mtime) / 86400.0)
+    except OSError:
+        return None
 
 
 def fetch_manifest(paths: Paths, base: str, token: str | None, notes: list | None = None, cfg: dict | None = None) -> tuple[dict, bool]:
@@ -470,31 +663,46 @@ def fetch_manifest(paths: Paths, base: str, token: str | None, notes: list | Non
     rejected (bad YAML, bad/missing signature, rollback). With a pinned key (``trust``) an unverified manifest is NEVER
     used and never replaces the cache; rejection reasons are appended to ``notes``."""
     log = get_logger(paths)
-    keys = trust.configured_keys(cfg)
+    keys = trust.effective_keys(paths, cfg)
     try:
-        raw = fetch_bytes(resolve_location("manifest.yaml", base), token, trusted_base=base, max_bytes=MAX_MANIFEST_BYTES)
+        sig_raw = None
+        signed_at = ""
+        verified = None
+        if keys:
+            # Signature FIRST, then the manifest it vouches for. A CDN that serves the new signature next to the old manifest (or the reverse)
+            # for a few seconds is skew, not an attack: re-fetch both once before rejecting.
+            for attempt in (1, 2):
+                try:
+                    sig_raw = fetch_bytes(resolve_location("manifest.yaml.sig", base), token, retries=1, trusted_base=base,
+                                          max_bytes=64 * 1024)
+                except HealError as exc:
+                    raise _Untrusted(f"signature file unavailable ({exc})") from exc
+                raw = fetch_bytes(resolve_location("manifest.yaml", base), token, trusted_base=base, max_bytes=MAX_MANIFEST_BYTES)
+                try:
+                    verified = trust.verify_manifest_doc(raw, sig_raw, keys)
+                    break
+                except trust.TrustError as exc:
+                    if attempt == 1 and "does not match the signed sha256" in str(exc):
+                        log.warning("manifest and signature do not match yet (CDN skew?): retrying once")
+                        time.sleep(2.0)
+                        continue
+                    raise _Untrusted(str(exc)) from exc
+            signed_at = verified.signed_at
+            _check_rollback(paths, signed_at, hashlib.sha256(raw).hexdigest())
+            _check_seq(paths, verified)
+            if verified.trusted_keys:
+                learned = trust.learn_keys(paths, verified.trusted_keys)
+                if learned:
+                    log.warning("learned %d new registry key(s) endorsed by a trusted key (rotation): %s", len(learned),
+                                ", ".join(trust.key_id(k) for k in learned))
+        else:
+            raw = fetch_bytes(resolve_location("manifest.yaml", base), token, trusted_base=base, max_bytes=MAX_MANIFEST_BYTES)
         try:
             text = raw.decode("utf-8")
         except UnicodeDecodeError as exc:
             raise mf.ManifestError("manifest is not UTF-8") from exc
         m = mf.parse(text)
-        sig_raw = None
-        signed_at = ""
-        verified = None
-        if keys:
-            try:
-                sig_raw = fetch_bytes(resolve_location("manifest.yaml.sig", base), token, retries=1, trusted_base=base,
-                                      max_bytes=64 * 1024)
-            except HealError as exc:
-                raise _Untrusted(f"signature file unavailable ({exc})") from exc
-            try:
-                verified = trust.verify_manifest_doc(raw, sig_raw, keys)
-                signed_at = verified.signed_at
-            except trust.TrustError as exc:
-                raise _Untrusted(str(exc)) from exc
-            _check_rollback(paths, signed_at, hashlib.sha256(raw).hexdigest())
-            _check_seq(paths, verified)
-        else:
+        if not keys:
             log.warning("registry manifest is unsigned and no registry key is pinned (set registry_pubkeys in platform.json)")
         try:
             if sig_raw is not None:
@@ -532,7 +740,18 @@ def run(paths: Paths, cfg: dict, automation: str | None) -> HealResult:
     """The self-heal pass for one automation (or just the shared components when `automation` is None).
     Never raises: a hostile/garbled registry degrades to an error note and the installed payload keeps running."""
     res = HealResult(ring=str(cfg.get("ring", "")))
+    lock = None
     try:
+        from .locking import FileLock
+        paths.state.mkdir(parents=True, exist_ok=True)
+        lock = FileLock(paths.state / "selfheal.lock", ttl_s=900)
+        if not lock.acquire(wait_s=float(cfg.get("selfheal_lock_wait_s", 20))):
+            res.errors.append("another self-heal pass is running - skipped this one")
+            res.versions = _versions_snapshot(paths)
+            return res
+        lock_note = recover_orphans(paths)
+        if lock_note:
+            get_logger(paths).warning("self-heal recovered leftovers: %s", "; ".join(lock_note))
         return _run(paths, cfg, automation, res)
     except Exception as exc:  # noqa: BLE001
         get_logger(paths).error("self-heal crashed: %s: %s", type(exc).__name__, exc)
@@ -542,11 +761,15 @@ def run(paths: Paths, cfg: dict, automation: str | None) -> HealResult:
         except Exception:  # noqa: BLE001
             res.versions = {}
         return res
+    finally:
+        if lock is not None:
+            lock.release()
 
 
 def _run(paths: Paths, cfg: dict, automation: str | None, res: HealResult) -> HealResult:
     ring = cfg["ring"]
     log = get_logger(paths)
+    deadline = Deadline(float(cfg.get("selfheal_deadline_s", 120)))
     if automation:
         try:
             check_name(automation)
@@ -576,6 +799,13 @@ def _run(paths: Paths, cfg: dict, automation: str | None, res: HealResult) -> He
     res.manifest, res.offline = m, offline
     if offline:
         res.errors.append("registry unreachable - using cached manifest")
+        age = cached_manifest_age_days(paths)
+        res.manifest_age_days = age
+        if age is not None and age > STALE_REGISTRY_DAYS:
+            res.stale_registry = True
+            res.errors.append(f"stale registry: the cached manifest is {age:.0f} days old (limit {STALE_REGISTRY_DAYS}); updates and the kill-switch "
+                              "have not been confirmed since - check the network/proxy or the registry")
+            log.error("stale registry: cached manifest is %.0f days old", age)
 
     # kill-switch comes first: nothing else matters if the fleet/automation is paused
     if automation:
@@ -610,7 +840,11 @@ def _run(paths: Paths, cfg: dict, automation: str | None, res: HealResult) -> He
         res.errors.append(f"cannot write assets.json: {exc}")
 
     # secret rotation via manifest — fetch plaintext asset, DPAPI-encrypt locally, atomically replace the blob
-    for name, entry in (m.get("secret_refresh") or {}).items():
+    # OFF unless the machine's platform.json opts in with ``"secret_refresh": true``: it pulls plaintext from the registry URL.
+    refresh_items = (m.get("secret_refresh") or {}) if cfg.get("secret_refresh") is True else {}
+    if m.get("secret_refresh") and not refresh_items:
+        log.info("manifest carries secret_refresh but platform.json does not enable it (secret_refresh: true): ignored")
+    for name, entry in refresh_items.items():
         if not isinstance(name, str) or not isinstance(entry, dict):
             continue
         loc = resolve_location(str(entry.get("url", "")), base)
@@ -648,18 +882,31 @@ def _run(paths: Paths, cfg: dict, automation: str | None, res: HealResult) -> He
         return res
 
     # components
+    # wrapper-core and the framework are applied as a PAIR: the framework is only swapped in when wrapper-core is current or was staged
+    # successfully in this pass (a framework built for a newer wrapper-core must never run under an older one).
+    core_ok = True
     for cname in COMPONENTS:
         entry = (m.get("components") or {}).get(cname)
         if not entry:
             continue
         tv = mf.target_version(entry, ring)
         cur = installed_component_version(paths, cname)
+        if tv and cname == "wrapper-core" and str(tv) in rejected_wrapper_versions(paths):
+            res.errors.append(f"wrapper-core {tv} failed its self-test on this machine earlier and is skipped until the registry moves on")
+            core_ok = _needs_update(cur, str(tv)) is False
+            continue
         if tv and _needs_update(cur, str(tv)):
+            if cname == "execution-framework" and not core_ok:
+                res.errors.append(f"execution-framework {tv}: not applied because wrapper-core could not be updated in this pass")
+                continue
             try:
-                res.installed.append(install_component(paths, cname, str(tv), mf.version_record(entry, str(tv)), base, token))
+                deadline.check(cname)
+                res.installed.append(install_component(paths, cname, str(tv), mf.version_record(entry, str(tv)), base, token, deadline))
             except (HealError, mf.ManifestError, OSError, zipfile.BadZipFile) as exc:
                 log.error("component %s install failed: %s", cname, exc)
                 res.errors.append(f"{cname} {tv}: {exc}")
+                if cname == "wrapper-core":
+                    core_ok = False
 
     # the automation payload
     if automation:
@@ -669,7 +916,8 @@ def _run(paths: Paths, cfg: dict, automation: str | None, res: HealResult) -> He
         have_dir = paths.automation_dir(automation).exists()
         if tv and (not have_dir or _needs_update(cur, str(tv))):
             try:
-                res.installed.append(install_automation(paths, automation, str(tv), mf.version_record(entry, str(tv)), base, token))
+                deadline.check(automation)
+                res.installed.append(install_automation(paths, automation, str(tv), mf.version_record(entry, str(tv)), base, token, deadline))
             except (HealError, mf.ManifestError, OSError, zipfile.BadZipFile) as exc:
                 log.error("automation %s install failed: %s", automation, exc)
                 res.errors.append(f"{automation} {tv}: {exc}")
@@ -733,7 +981,7 @@ def pending_triggers(paths: Paths, base: str, token: str | None, automation: str
         raw = fetch_bytes(resolve_location("triggers.json", base), token, retries=1, trusted_base=base)
     except HealError:
         return []
-    keys = trust.configured_keys(platform_config(paths))
+    keys = trust.effective_keys(paths, platform_config(paths))
     if keys:
         # a key is pinned: triggers queue runs on endpoints, so they must be the exact bytes the operator signed (fail closed)
         want = _signed_extra_sha(paths, "triggers.json", keys)
@@ -763,7 +1011,7 @@ def consume_trigger(paths: Paths, trigger_id: str) -> None:
 
 def _automation_dirs(paths: Paths) -> set:
     try:
-        return {d.name for d in paths.automations.iterdir() if d.is_dir() and not d.name.endswith((".staging", ".old"))}
+        return {d.name for d in paths.automations.iterdir() if d.is_dir() and not is_leftover(d.name)}
     except OSError:
         return set()
 

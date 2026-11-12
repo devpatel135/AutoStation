@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import copy
+import json
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -583,11 +584,21 @@ def _data_quality(data: Data, now: datetime, state: dict) -> dict:
     loaded little or nothing, is stale, skipped many records, or had a signal builder fail."""
     stamps = [_ts(r) for r in data.runs[-50:]] + [_ts(h) for h in data.heartbeats[-50:]] + [_ts(e) for e in data.lifecycle[-50:]]
     newest = max(stamps) if stamps else None
+    ing: dict = {}
+    try:  # the verdict of the last ingest (ingest.write_stats): an archive that was capped/partly rejected must not look complete
+        ing = json.loads((Path(data.archive) / "_ingest_stats.json").read_text(encoding="utf-8")) if data.archive else {}
+        if not isinstance(ing, dict):
+            ing = {}
+    except (OSError, ValueError):
+        ing = {}
     return {"skipped_malformed": int(getattr(data, "skipped_malformed", 0)),
             "records_loaded": len(data.runs) + len(data.heartbeats) + len(data.lifecycle),
             "newest_record_age_h": round((now - newest).total_seconds() / 3600.0, 2) if newest else None,
             "signal_errors": list(state.get("signal_errors") or []),
-            "extra_signals_error": state.get("extra_signals_error")}
+            "extra_signals_error": state.get("extra_signals_error"),
+            "ingest": {k: int(ing.get(k) or 0) for k in ("archived", "duplicates", "rejected", "deferred_files", "deferred_refs",
+                                                          "out_of_window", "symlinks", "errors")} if ing else None,
+            "ingest_incomplete": bool(ing.get("deferred_files") or ing.get("deferred_refs") or ing.get("errors"))}
 
 
 def _daily(runs: list[dict], now: datetime, days: int) -> list[dict]:

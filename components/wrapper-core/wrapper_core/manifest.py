@@ -106,17 +106,43 @@ _TZ_WARNED: set = set()
 _TZ_NAME = re.compile(r"^(?:UTC|Z|GMT|Etc/UTC|[A-Za-z_]+(?:/[A-Za-z0-9_+-]+){1,2})$")
 
 
-def _tz(name: str | None, strict: bool = False):
+_BUNDLED_TZ = Path(__file__).resolve().parent / "_tzdata" / "zoneinfo"
+_TZ_CACHE: dict = {}
+
+
+def bundled_tz(name: str):
+    """The zone from the tz data that ships INSIDE wrapper-core (``_tzdata/zoneinfo``, refreshed by tools/fetch_tzdata.py), independent of
+    whatever the host Python has. Raises KeyError/OSError when the zone is not bundled."""
+    if name in _TZ_CACHE:
+        return _TZ_CACHE[name]
+    parts = name.split("/")
+    if not name or any(p in ("", ".", "..") or "\\" in p or ":" in p for p in parts):
+        raise KeyError(name)
+    from zoneinfo import ZoneInfo
+    with open(_BUNDLED_TZ.joinpath(*parts), "rb") as f:
+        z = ZoneInfo.from_file(f, key=name)
+    _TZ_CACHE[name] = z
+    return z
+
+
+def _tz(name: str | None, strict: bool = False, bundled_only: bool = False):
     """tzinfo for a schedule's zone. Unknown zone: ``strict`` raises TimezoneUnresolvable (task registration refuses to guess); otherwise
-    None (= the machine's local zone) AND a one-time WARNING in wrapper.log, never a silent fallback."""
+    None (= the machine's local zone) AND a one-time WARNING in wrapper.log, never a silent fallback. The bundled tz data is tried first
+    (stock Windows Python has none); ``bundled_only`` is the release check: a zone must resolve WITHOUT any host tz database."""
     if not name:
         return None
     if name in ("UTC", "Etc/UTC", "GMT", "Z"):
         return timezone.utc
     try:
+        return bundled_tz(name)
+    except Exception:  # noqa: BLE001 - not bundled / unreadable: fall through to the host's tz database
+        pass
+    try:
+        if bundled_only:
+            raise KeyError(name)
         from zoneinfo import ZoneInfo
         return ZoneInfo(name)
-    except Exception as exc:  # noqa: BLE001 - no tzdata on stock Windows Python
+    except Exception as exc:  # noqa: BLE001 - zone not in the bundle and no host tz database
         msg = (f"timezone {name!r} cannot be resolved on this machine ({type(exc).__name__}): install the tz database "
                "(pip install tzdata into the embedded Python) or use UTC; refusing to guess the machine's local zone")
         if strict:
@@ -128,9 +154,9 @@ def _tz(name: str | None, strict: bool = False):
         return None
 
 
-def tz_resolves(name: str | None) -> bool:
+def tz_resolves(name: str | None, bundled_only: bool = False) -> bool:
     try:
-        _tz(name, strict=True)
+        _tz(name, strict=True, bundled_only=bundled_only)
         return True
     except TimezoneUnresolvable:
         return False

@@ -76,7 +76,7 @@ def test_register_is_idempotent_and_prunes_removed_slots(monkeypatch):
 def test_launchers_apply_pending_before_python_and_hide_window():
     p = Paths()
     cmd = launcher_cmd(p, "auto-a", "C:/py/python.exe")
-    assert cmd.index("wrapper-core.pending") < cmd.index("-m wrapper_core run")
+    assert cmd.index("apply-pending.cmd") < cmd.index("-m wrapper_core run")    # the swap (with self-test + rollback) runs before Python starts
     assert "PYTHONPATH" in cmd and '--slot "%~1"' in cmd
     vbs = launcher_vbs(p, "auto-a")
     assert ", 0, True" in vbs                                         # window style 0 = hidden
@@ -215,17 +215,27 @@ def test_doctor_reports_without_crashing_and_never_leaks_secrets(monkeypatch, tm
 
 
 def _fake_github(state):
-    """Minimal fake of the GitHub REST endpoints the log transport uses (branch bootstrap + contents PUT)."""
+    """Fake of the GitHub REST endpoints the log transport uses (branch bootstrap + contents PUT).
+
+    ``state`` knobs: ``empty`` (repo has no commits), ``fail_once`` (one 409), ``script`` (list of ``(code, headers, body)`` answers
+    handed out to the next PUTs before normal behaviour resumes: throttling, 401, ...). Observations: ``branches`` (created),
+    ``files`` (path -> body), ``put_count``, ``get_count`` (ref checks)."""
     import threading
     from http.server import BaseHTTPRequestHandler, HTTPServer
+    state.setdefault("branches", set())
+    state.setdefault("files", {})
+    state.setdefault("put_count", 0)
+    state.setdefault("get_count", 0)
 
     class H(BaseHTTPRequestHandler):
         def log_message(self, *a):
             pass
 
-        def _send(self, code, obj):
+        def _send(self, code, obj, headers=None):
             data = json.dumps(obj).encode()
             self.send_response(code)
+            for k, v in (headers or {}).items():
+                self.send_header(k, v)
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             self.wfile.write(data)
@@ -235,10 +245,13 @@ def _fake_github(state):
 
         def do_GET(self):
             self._auth()
+            if "/git/ref/heads/" in self.path:
+                state["get_count"] += 1
             if state.get("empty") and "/git/ref/heads/" in self.path:
                 return self._send(409, {"message": "Git Repository is empty."})
-            if self.path.endswith("/git/ref/heads/ingest"):
-                return self._send(200 if state.get("branch") else 404, {"object": {"sha": "abc"}})
+            if "/git/ref/heads/ingest" in self.path:
+                branch = self.path.split("/git/ref/heads/", 1)[1]
+                return self._send(200 if branch in state["branches"] else 404, {"object": {"sha": "abc"}})
             if self.path.endswith("/git/ref/heads/main"):
                 return self._send(200, {"object": {"sha": "abc"}})
             if self.path.endswith("/repos/o/logs"):
@@ -247,7 +260,8 @@ def _fake_github(state):
 
         def do_POST(self):
             self._auth()
-            self.rfile.read(int(self.headers["Content-Length"]))
+            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])) or b"{}")
+            state["branches"].add(str(body.get("ref", "")).replace("refs/heads/", ""))
             state["branch"] = True
             self._send(201, {})
 
@@ -255,11 +269,17 @@ def _fake_github(state):
             self._auth()
             body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             path = self.path.split("/contents/", 1)[1]
+            state["put_count"] += 1
+            if state.get("script"):
+                code, headers, obj = state["script"].pop(0)
+                return self._send(code, obj, headers)
             if path == "README.md" and state.get("empty"):
                 state["empty"] = False
                 state["readme"] = True
                 return self._send(201, {})
-            if path in state.setdefault("files", {}):
+            if body.get("branch") and body["branch"] not in state["branches"]:
+                return self._send(404, {"message": "Branch not found"})
+            if path in state["files"]:
                 return self._send(422, {"message": "Invalid request. \"sha\" wasn't supplied."})
             if state.get("fail_once"):
                 state["fail_once"] = False
@@ -272,23 +292,49 @@ def _fake_github(state):
     return srv
 
 
+def _gh_env(monkeypatch, srv, **extra):
+    monkeypatch.setenv("AUTOMAGIX_GITHUB_API", f"http://127.0.0.1:{srv.server_port}")
+    monkeypatch.setenv("AUTOMAGIX_LOGGING_TOKEN", "ghp_test_token")
+    monkeypatch.setenv("AUTOMAGIX_LOG_TRANSPORT", "github-api")
+    monkeypatch.setenv("AUTOMAGIX_LOG_REMOTE", "o/logs")
+    monkeypatch.setenv("AUTOMAGIX_RETRY_SCALE", "0")           # no real sleeping in tests
+    for k, v in extra.items():
+        monkeypatch.setenv(k, v)
+
+
 def test_github_api_transport_uploads_artefacts_idempotently(monkeypatch):
+    """Default layout: date folders and one branch per month (ingest-YYYY-MM)."""
     import base64
     state = {"fail_once": True}
     srv = _fake_github(state)
     try:
-        monkeypatch.setenv("AUTOMAGIX_GITHUB_API", f"http://127.0.0.1:{srv.server_port}")
-        monkeypatch.setenv("AUTOMAGIX_LOGGING_TOKEN", "ghp_test_token")
-        monkeypatch.setenv("AUTOMAGIX_LOG_TRANSPORT", "github-api")
-        monkeypatch.setenv("AUTOMAGIX_LOG_REMOTE", "o/logs")
+        _gh_env(monkeypatch, srv)
         p = Paths().ensure()
-        assert transport.emit("run", "auto-a", "RID1", {"hello": "world"}, p) is True      # branch created, 409 retried
-        assert transport.emit("run", "auto-a", "RID1", {"hello": "world"}, p) is True      # duplicate -> idempotent
+        rec = {"hello": "world", "started_at": "2026-03-05T10:00:00Z"}
+        assert transport.emit("run", "auto-a", "RID1", rec, p) is True      # branch created, 409 retried
+        assert transport.emit("run", "auto-a", "RID1", rec, p) is True      # duplicate -> idempotent
+        files = state["files"]
+        path = "ingest/pilot/run/auto-a/2026/03/05/RID1.json"
+        assert list(files) == [path]
+        assert json.loads(base64.b64decode(files[path]["content"])) == rec
+        assert files[path]["branch"] == "ingest-2026-03" and state["branches"] == {"ingest-2026-03"}
+        assert set(state["auth"]) == {"Bearer ghp_test_token"}
+    finally:
+        srv.shutdown()
+
+
+def test_github_api_transport_legacy_layout_is_still_available(monkeypatch):
+    import base64
+    state = {}
+    srv = _fake_github(state)
+    try:
+        _gh_env(monkeypatch, srv, AUTOMAGIX_LOG_LAYOUT="legacy")
+        p = Paths().ensure()
+        assert transport.emit("run", "auto-a", "RID1", {"hello": "world"}, p) is True
         files = state["files"]
         assert list(files) == ["ingest/pilot/run/auto-a/RID1.json"]
         assert json.loads(base64.b64decode(files["ingest/pilot/run/auto-a/RID1.json"]["content"])) == {"hello": "world"}
         assert files["ingest/pilot/run/auto-a/RID1.json"]["branch"] == "ingest"
-        assert set(state["auth"]) == {"Bearer ghp_test_token"}
     finally:
         srv.shutdown()
 
@@ -304,7 +350,7 @@ def test_github_api_transport_initialises_a_brand_new_empty_logs_repo(monkeypatc
         p = Paths().ensure()
         assert transport.emit("run", "auto-a", "RID9", {"first": True}, p) is True
         assert state.get("readme") and state.get("branch")
-        assert list(state["files"]) == ["ingest/pilot/run/auto-a/RID9.json"]
+        assert [k for k in state["files"]] and all(k.startswith("ingest/pilot/run/auto-a/") and k.endswith("/RID9.json") for k in state["files"])
     finally:
         srv.shutdown()
 

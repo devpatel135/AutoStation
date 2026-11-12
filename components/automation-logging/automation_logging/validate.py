@@ -15,12 +15,14 @@ from .common import iso, parse_iso
 
 RINGS = ("dev", "pilot", "broad")
 KINDS = ("run", "heartbeat", "lifecycle", "evidence")
+PATH_KINDS = KINDS + ("bundle",)       # a bundle is a transport container: ingest unpacks it into ordinary artefacts
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 REMEDIATION_OUTCOMES = ("fixed", "not_fixed", "skipped", "escalated", "recommended")
 MAX_PLAYBOOKS = 20
 RUN_STATUSES = {"success", "partial", "failed", "halted_paused", "skipped_maintenance", "self_heal_failed", "hung"}
-MAX_BYTES = {"run": 1_000_000, "heartbeat": 100_000, "lifecycle": 100_000, "evidence": 3_000_000}
+MAX_BYTES = {"run": 1_000_000, "heartbeat": 100_000, "lifecycle": 100_000, "evidence": 3_000_000, "bundle": 1_300_000}
+MAX_BUNDLE_ITEMS = 200
 MAX_EVENTS = 5000
 
 
@@ -69,7 +71,7 @@ def normalize_timestamps(rec: dict) -> dict:
 def check_path_parts(ring: str, kind: str, name: str, art_id: str) -> str | None:
     if ring not in RINGS:
         return f"unknown ring {ring[:30]!r}"
-    if kind not in KINDS:
+    if kind not in PATH_KINDS:
         return f"unknown kind {kind[:30]!r}"
     if not NAME_RE.match(name) or name.startswith(".") or ".." in name:
         return "unsafe artefact name"
@@ -191,6 +193,14 @@ def _validate_heartbeat(rec: dict) -> str | None:
             return f"heartbeat: {key} is not a string"
     if rec.get("ring") is not None and rec["ring"] not in RINGS:
         return "heartbeat: unknown ring"
+    sp = rec.get("spool")
+    if sp is not None:
+        if not isinstance(sp, dict) or not all(_is_num(sp.get(k, 0)) for k in ("count", "bytes", "oldest_age_s")):
+            return "heartbeat: spool counters malformed"
+    af = rec.get("logging_auth_failed")
+    if af is not None:
+        if not isinstance(af, dict) or not all(af.get(k) is None or _str(af.get(k), 100) or _is_num(af.get(k)) for k in ("http", "reason", "ts")):
+            return "heartbeat: logging_auth_failed malformed"
     v = rec.get("versions")
     if v is not None:
         if not isinstance(v, dict):
@@ -243,6 +253,8 @@ def validate_record(rec, kind: str) -> str | None:
 
 
 def check_name_matches_record(kind: str, name: str, rec: dict) -> str | None:
+    if kind == "heartbeat" and name != rec.get("host"):
+        return "heartbeat host does not match the host in its path"
     if kind in ("run", "lifecycle", "evidence"):
         auto = rec.get("automation")
         if kind == "lifecycle" and auto is None:

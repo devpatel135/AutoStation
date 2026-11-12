@@ -26,6 +26,9 @@ def main(argv: list[str] | None = None) -> int:
     i.add_argument("--out", required=True, help="archive directory")
     i.add_argument("--keep-refs", action="store_true", help="git: do not delete processed refs")
     i.add_argument("--max-refs", type=int, default=2000, help="git: process at most this many refs per run (rest wait for the next run)")
+    i.add_argument("--consume", action="store_true", help="dir: delete each source file after it is archived (default: leave --from untouched)")
+    i.add_argument("--window-days", type=int, default=60, help="dir: skip files dated older than this many days without reading them")
+    i.add_argument("--max-rejected", type=int, default=50, help="exit code 3 when more artefacts than this were rejected")
 
     def common(sp, alerts=True):
         sp.add_argument("--archive", required=True)
@@ -36,6 +39,9 @@ def main(argv: list[str] | None = None) -> int:
     a = sub.add_parser("analyze", help="compute report + signals JSON")
     common(a)
     a.add_argument("--out", required=True)
+    a.add_argument("--state-in", default=None, help="read the analytics state from this directory instead of --state (e.g. a restored cache)")
+    a.add_argument("--state-out", default=None, help="write the analytics state to this directory instead of --state")
+    a.add_argument("--fail-on-data-quality", action="store_true", help="exit 3 when the archive is incomplete (ingest capped/errors) or nothing loaded")
 
     d = sub.add_parser("diagnose", help="LLM-diagnose signals in an analyze output (signals.json) ")
     common(d)
@@ -112,9 +118,14 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.cmd == "ingest":
         from . import ingest
-        stats = ingest.ingest(args.source, args.out, remote=args.remote, src_dir=args.src, **({"delete": not args.keep_refs, "max_refs": args.max_refs} if args.source == "git" else {}))
-        print(json.dumps(stats, indent=2))
-        return 1 if stats["errors"] else 0
+        extra = ({"delete": not args.keep_refs, "max_refs": args.max_refs} if args.source == "git"
+                 else {"consume": args.consume, "window_days": args.window_days})
+        stats = ingest.ingest(args.source, args.out, remote=args.remote, src_dir=args.src, **extra)
+        problems = ingest.data_quality_problems(stats, args.max_rejected)
+        print(json.dumps(dict(stats, data_quality_problems=problems), indent=2))
+        if stats["errors"]:
+            return 1
+        return 3 if problems else 0
 
     if args.cmd == "prune":
         from . import ingest
@@ -136,11 +147,16 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "analyze":
         manifest = pipeline.load_manifest(args.manifest)
         data = analytics.load_archive(args.archive, now)
-        state_path = Path(args.state) / "analytics.json"
-        report, st = analytics.compute(data, manifest, now, None, read_json(state_path, {}))
+        state_in = Path(args.state_in or args.state) / "analytics.json"
+        state_path = Path(args.state_out or args.state) / "analytics.json"
+        report, st = analytics.compute(data, manifest, now, None, read_json(state_in, {}))
         write_json(state_path, st)
         write_json(args.out, report)
         print(json.dumps({"signals": len(report["signals"]), "fleet": report["fleet"]["status"]}))
+        dq = report.get("data_quality") or {}
+        if args.fail_on_data_quality and (dq.get("ingest_incomplete") or not dq.get("records_loaded")):
+            print("analyze: data quality check failed (incomplete ingest or nothing loaded)", file=sys.stderr)
+            return 3
         return 0
     if args.cmd == "diagnose":
         manifest = pipeline.load_manifest(args.manifest)

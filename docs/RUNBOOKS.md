@@ -81,27 +81,48 @@ The `dev` ring uses a **separate logging remote** (set `log_remote` in its insta
 The Playwright path only clicks the Microsoft account tile when the sign-in's `redirect_uri` points back at the portal or an allow-listed host (default `develop.deloitte.com`). Look at the run's `events.jsonl` for `untrusted_redirect`: `redirect_host` is the host Microsoft would return to. If it is a Deloitte host you trust, add it as a slot param in the registry manifest (`schedule.slots[].params.allowed_hosts: "host1,host2"`, exact hosts only) and promote; if you do not recognise it, do not add it. Machines whose Edge policy forbids DevTools (`RemoteDebuggingAllowed=0`) use native mode, which opens your normal Edge and cannot check redirects (it only presses a tile inside the window it opened).
 
 ## Signing the registry manifest
-`python tools/setup_live.py` (answer `y` to the signing key) stores `REGISTRY_SIGNING_SEED` and the repo variable `AUTOSTATION_REGISTRY_PUBKEY`. The next `site` run signs `registry/manifest.yaml`; the next installer build pins the public key in `platform.json` (`registry_pubkeys`). Machines installed before that hold no key and keep accepting the registry until reinstalled. To rotate: generate a new key, list both public keys in the variable (comma-separated), release, then drop the old one. Verify any machine with `python -m wrapper_core.trust --show`.
+`python tools/setup_live.py` (answer `y` to the signing key) stores `REGISTRY_SIGNING_SEED` and the repo variable `AUTOSTATION_REGISTRY_PUBKEY`. The next `site` run signs `registry/manifest.yaml`; the next installer build pins the public key in `platform.json` (`registry_pubkeys`). Machines installed before that hold no key and keep accepting the registry until reinstalled (pin in place: see "Pinning the registry key" below). Verify any machine with `python -m wrapper_core trust --show` (pinned AND learned keys).
 
+### Offline seed backup (do this once, today)
+The signing seed exists in two places only: the GitHub secret `REGISTRY_SIGNING_SEED` (write-only, you cannot read it back) and wherever you stored it when
+`--gen-key` / `setup_live.py` printed it. **If you lose both you cannot sign again and every pinned endpoint refuses new manifests.** So:
+1. Keep the seed (`seed.txt`, 64 hex characters) in the corporate password manager (secure note) AND an offline copy (encrypted USB or printed, in a safe) held by a SECOND person.
+2. Never put it in the repo, a chat, a ticket or a CI log. `python tools/check_secrets.py` and the push protection catch most accidents; assume anything pasted is burned and rotate.
+3. Write down the PUBLIC key and its key id next to it, and the date. Once a year restore from the backup on a scratch machine and sign a dummy manifest (`python tools/sign_registry.py --registry-dir <tmp>` with `REGISTRY_SIGNING_SEED` set) to prove the copy works.
+4. If the seed is truly lost: a fleet that pinned only that key cannot be repaired remotely. Reinstall (the installer pins the new key) or run `python -m wrapper_core trust --pin <new public key>` on each machine - and note that `--pin` only succeeds if the live registry already verifies against the new key, so publish the new key's signature first. This is why rotation (below) should be rehearsed BEFORE you need it.
 
+### Rollback protection (`seq`, `epoch`) and what to do when it blocks you
+Every signed manifest carries a sequence number `seq` and endpoints remember the highest one per key. `tools/sign_registry.py` always derives `seq` from the
+clock (UTC seconds, monotonic) and refuses to sign a number that is not higher than the previously published signature; a counter such as the workflow
+run number in `SIGN_SEQ` is ignored with a warning (mixing counters into a timestamp series would make the next documents look like rollbacks). A validly
+signed manifest with a LOWER `seq` is refused (`rollback refused: seq N is lower than the newest accepted M`) and the machine keeps running from its
+last verified manifest. That is the point: a replayed old release cannot be installed. To roll a release back on purpose, do not re-publish an old
+manifest: revert the change on `main` (a new commit, a new run, a higher `seq`) or use the `rollback` ops-action.
 
-### Rollback protection (`seq`) and what to do when it blocks you
-Each signed manifest carries a sequence number (the `site` workflow run number, `SIGN_SEQ`) and endpoints remember the highest one per key. A
-validly signed manifest with a LOWER number is refused (`rollback refused: seq N is lower than the newest accepted M`) and the machine keeps
-running from its last verified manifest. That is the point: a replayed old release cannot be installed. To roll a release back on purpose, do not
-re-publish an old manifest: revert the change on `main` (a new commit, a new run, a higher `seq`) or use the `rollback` ops-action, which also
-produces a new signed manifest. If the repository itself was re-created (run numbers restart from 1), rotate the signing key (below) or delete
-`state/manifest.seq.json` on the affected machines. `python tools/readiness.py` shows the current `seq` and whether `triggers.json` is covered.
+**Recovery when `seq` is genuinely wrong** (a seq far in the future was published by mistake, the repo was re-created, a backup restored): use the signed epoch, not
+ssh-ing into machines. Run the site workflow with `SIGN_EPOCH=<n+1>` and `SIGN_RESET_SEQ=1` (first time: `SIGN_EPOCH=1`). Endpoints accept a lower `seq` only from a
+document signed by the pinned key whose `epoch` is HIGHER than the one they stored and that carries `reset_seq`; they then continue from the new numbers. An older epoch is
+refused outright, so the reset cannot be replayed. After the fleet has verified one such manifest, leave `SIGN_EPOCH` set to that value (never lower it) and remove `SIGN_RESET_SEQ`.
+Deleting `state/manifest.seq.json` on a machine still works as a last resort (it also forgets the epoch).
 
-### Key rotation
-1. `python tools/sign_registry.py --gen-key new-seed.txt` prints the new PUBLIC key. Put the seed in the repo secret `REGISTRY_SIGNING_SEED`
-   only AFTER step 2 has reached the machines.
-2. Add the new public key next to the old one in the repo variable `AUTOSTATION_REGISTRY_PUBKEY` (comma separated) or in `platform.json`
-   `registry_pubkeys`, release, and let the fleet pick it up (installers built afterwards pin both).
-3. Switch the secret to the new seed; the next `site` run signs with the new key (its own `seq` counter starts fresh).
-4. After the fleet has verified a manifest signed by the new key, remove the old key from the list.
+### Key rotation (no re-pinning, no reinstall)
+Rotation is done by endorsement: a document signed by the CURRENT key lists the NEW public key in `trusted_keys` and is co-signed by the new key (proof the new seed exists).
+Endpoints learn the new key only from such a document, store it in `state/trusted_keys.json`, and from then on accept manifests signed by either key.
+1. `python tools/sign_registry.py --gen-key new-seed.txt` prints the new PUBLIC key. Back the new seed up offline (see above) BEFORE going on.
+2. One signing run with the OLD seed in `REGISTRY_SIGNING_SEED` and `SIGN_EPOCH=<n>` `SIGN_TRUSTED_KEYS=<new public key>` `REGISTRY_COSIGN_SEEDS=<new seed>` (the new seed is supplied only for this run, e.g. as a temporary secret you delete right afterwards; never leave it stored).
+3. Wait until the fleet has fetched it (check `doctor`/`trust --show` on a few machines: `learned` lists the new key id; the Fleet tab shows who has not reported).
+4. Switch the repo secret `REGISTRY_SIGNING_SEED` to the new seed. The next `site` run signs with the new key; endpoints verify it through the learned key (its own `seq` series starts from the clock, which is higher anyway).
+5. Update `AUTOSTATION_REGISTRY_PUBKEY` to the new key so new installers pin it. Old keys stay learned on existing machines; to retire the old key everywhere, a machine must be re-pinned or reinstalled (a learned key cannot be revoked remotely - treat a COMPROMISED key as the lost-seed case above and rotate immediately, then reinstall/re-pin the fleet).
+Older endpoints (before this feature) ignore `trusted_keys`/`epoch` and keep verifying through the original signatures; they need the old procedure (pin both keys, release, switch).
 `triggers.json` is signed together with the manifest on every `site` run, so a trigger added with `ops-action trigger-add` takes effect after the
 next site build, not instantly; a `triggers.json` that does not match the signed digest is ignored by endpoints with a pinned key.
+
+### Stale registry (`stale registry` in doctor / run records)
+An endpoint that cannot reach the registry keeps running from its last verified manifest. After **14 days** that cache is considered stale: `doctor` shows `registry freshness` as FAIL
+("STALE REGISTRY ... days old"), the run record's `self_heal.stale_registry` is true and `self_heal.errors` starts with `stale registry`. The kill-switch state is then
+**unknown** (the cached copy may predate a pause): runs are NOT blocked (an outage must not stop the business), but treat the machine as unmanaged until it reaches the registry: check
+proxy/VPN/DNS (`doctor` first), then `python -m wrapper_core maintain`. A signature that fails to verify because the CDN briefly served the new signature next to the old
+manifest is retried once automatically (the signature is fetched first, then the manifest it vouches for).
 
 ## "I don't see the train icon while an automation runs"
 1. Windows 11 parks new notification-area icons behind the **up-caret** (^) at the bottom right. Click the caret: the train is in that flyout. To keep it visible drag it onto the taskbar, or turn it on under *Settings -> Personalization -> Taskbar -> Other system tray icons*.
@@ -161,3 +182,32 @@ Machines installed before the signing key was published hold no key and accept a
     python -m wrapper_core trust --pin <public key hex>
 
 (`<install>\python\python.exe` with `AUTOMAGIX_HOME` and `PYTHONPATH=<install>\wrapper-core` set, or the installed `bin` launcher.) The command first downloads the live registry's `manifest.yaml` and `manifest.yaml.sig` and checks the signature against the key you give it; only a key that verifies is written to `platform.json` (`registry_pubkeys`), so a mistyped or wrong key can never lock the machine out. The public key is the value of the repository variable `AUTOSTATION_REGISTRY_PUBKEY` (Settings > Secrets and variables > Actions > Variables). Check with `python -m wrapper_core trust --show`.
+
+## Time zones on the embedded Python (`tzdata`)
+Stock Windows Python has no time-zone database, so wrapper-core ships its own copy (`wrapper_core/_tzdata/zoneinfo`, the IANA data of the pinned PyPI `tzdata` release) and
+`manifest._tz` reads it first; the host's database is only a fallback. Release gate: `python tools/check_timezones.py` (also run by the test-suite,
+`tests/test_tzdata_bundle.py`) fails if any `timezone:` in `components/automation-registry/manifest.yaml` or an `automation.yaml` does not resolve from the BUNDLED data alone.
+To update the data: edit `PIN_VERSION`/`PIN_SHA256` in `tools/fetch_tzdata.py` (hash from pypi.org), run `python tools/fetch_tzdata.py`, run the tests, commit `_tzdata/`,
+release wrapper-core. `python tools/fetch_tzdata.py --check` verifies the committed folder offline. A schedule naming a zone that is not bundled is refused at registration (doctor: FAIL) - add the zone by updating the data, or use UTC.
+
+## wrapper-core update: how it is applied and how it rolls back
+Self-heal only STAGES a new wrapper-core as `wrapper-core.pending`. Every launcher (`bin\run-*.cmd`, `bin\heartbeat.cmd`, the login `maintain` script) first calls `bin\apply-pending.cmd`, which:
+1. repairs an interrupted earlier swap (`wrapper-core` missing but `wrapper-core.old` present: restore it);
+2. does nothing while any run holds a lock in `state\locks` (a running Python has wrapper-core loaded); the next launcher retries;
+3. renames the current copy to `wrapper-core.old` and the pending copy into place (4 attempts, 2 s apart: antivirus/indexers briefly lock new folders);
+4. runs `python -m wrapper_core selftest` (imports every module, parses a manifest, verifies a signature, builds a task XML; ~1 s, offline). On failure it moves the new copy to `wrapper-core.bad`,
+   restores `wrapper-core.old`, writes the rejected version to `state\rejected-wrapper-core.txt` (self-heal will not stage that version again) and logs it in `logs\wrapper.log`.
+`wrapper-core.old` is only removed (a) just before the NEXT swap and (b) by `DISK_LOW` clean-up after a day, never before the new copy has passed its self-test. A running automation never replaces wrapper-core in-process.
+The execution-framework is applied as a pair with wrapper-core: it is only swapped in when wrapper-core is current or was staged successfully in the same pass.
+If a machine ends with no `wrapper-core` folder at all: re-run the installer (the launcher repair covers every interrupted-swap case; a missing folder with no `.old` means it was deleted).
+
+## Scheduled tasks: what to expect
+Tasks are re-asserted at every login, and that is a no-op unless the schedule really changed: the "unchanged" digest ignores today's date, and the start boundary is the NEXT occurrence, so (re)registering never makes Windows catch up a run that was never missed.
+Calendar slots carry a bounded random delay (2 min) so a fleet-wide 09:00 does not hit the registry in the same second; tasks run only when a network is available. The principal is the current `DOMAIN\user`.
+A slot that cannot be registered right now (unresolvable time zone, unsafe id) keeps its EXISTING task and is logged; only slots removed from the manifest are deleted. If the task name is already taken by another user of the same machine,
+the task is registered as `<automation>-<slot>-<user hash>` instead (recorded in `state\tasks.json`).
+
+## Self-heal behaviour worth knowing
+* One pass at a time per machine (`state\selfheal.lock`); a second pass waits up to 20 s, then skips with a note. Staging folders are per process (`*.staging-<pid>`); leftovers older than 10 min and a target missing next to its `.old` are repaired at the start of the next pass.
+* A component or automation folder without its `VERSION` marker counts as NOT installed and is re-installed. The whole pass has a 120 s budget; downloads stream to disk, need 256 MB free space and refuse packages whose paths would exceed Windows `MAX_PATH`.
+* **`secret_refresh` is OFF by default.** The manifest section pulls secrets as plaintext from the registry URL; it is only honoured on machines whose `config\platform.json` contains `"secret_refresh": true`. Prefer re-running the installer or `python -m wrapper_core secrets` for rotation.

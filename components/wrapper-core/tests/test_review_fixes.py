@@ -75,7 +75,7 @@ def test_profile_lock_is_left_alone_while_another_run_is_live(paths):
         lock.write_text(f"{child.pid} {time.time()}", encoding="ascii")
         killed = []
         procs = [(901, "msedge.exe", f'msedge.exe --user-data-dir="{prof}"')]
-        rep = R.Remediator(paths, "auto-a", {}, lister=lambda: procs, killer=lambda pid: killed.append(pid) or True, force=True).handle(
+        rep = R.Remediator(paths, "auto-a", {}, lister=lambda: procs, killer=lambda pid: killed.append(pid) or True, force=True, inspector=lambda pid: (False, 99999)).handle(
             diag("STALE_BROWSER_PROFILE_LOCK"))
         assert rep.attempts[0]["outcome"] == "skipped" and killed == []
         assert (prof / "SingletonLock").exists()
@@ -104,7 +104,7 @@ def test_the_command_line_is_rechecked_right_before_each_kill(paths):
         return [(777, "msedge.exe", f'msedge.exe --user-data-dir="{prof}"')] if state["calls"] <= 1 else []
 
     killed = []
-    R.Remediator(paths, "auto-a", {}, lister=lister, killer=lambda pid: killed.append(pid) or True).handle(diag("STALE_BROWSER_PROFILE_LOCK"))
+    R.Remediator(paths, "auto-a", {}, lister=lister, killer=lambda pid: killed.append(pid) or True, inspector=lambda pid: (False, 99999)).handle(diag("STALE_BROWSER_PROFILE_LOCK"))
     assert killed == []
 
 
@@ -160,6 +160,8 @@ def _no_tzdata(monkeypatch):
     def boom(name):
         raise zoneinfo.ZoneInfoNotFoundError(name)
     monkeypatch.setattr(zoneinfo, "ZoneInfo", boom)
+    monkeypatch.setattr(mf, "_BUNDLED_TZ", Path("/nonexistent-amx-tzdata"))     # and no bundled data either
+    monkeypatch.setattr(mf, "_TZ_CACHE", {})
 
 
 def test_unresolvable_zone_is_refused_for_task_registration_and_warned_elsewhere(monkeypatch, caplog):

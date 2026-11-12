@@ -60,6 +60,32 @@ def list_browser_processes() -> List[tuple]:
     return out
 
 
+MIN_BROWSER_AGE_S = 600     # a browser younger than this may be one a run is launching right now
+
+
+def process_state(pid: int):
+    """(has_visible_window, age_seconds) of a process; either is None when it cannot be determined (callers then leave the process alone)."""
+    pid = int(pid)
+    if sys.platform == "win32":
+        ps = (f"$p=Get-Process -Id {pid} -ErrorAction Stop; "
+              f"$c=(Get-CimInstance Win32_Process -Filter 'ProcessId={pid}').CreationDate; "
+              "@{w=[bool]($p.MainWindowHandle -ne 0);a=[int]((Get-Date)-$c).TotalSeconds}|ConvertTo-Json -Compress")
+        env = dict(os.environ)
+        env.pop("PSModulePath", None)
+        try:
+            r = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", ps], capture_output=True, timeout=12, env=env)
+            d = json.loads(r.stdout.decode("utf-8", "replace").strip() or "{}")
+            return (bool(d["w"]), int(d["a"])) if isinstance(d, dict) and "w" in d and "a" in d else (None, None)
+        except (OSError, subprocess.SubprocessError, ValueError, KeyError):
+            return (None, None)
+    try:   # Linux: age from /proc; a Linux browser started by a headless run has no window we could protect
+        start_ticks = int(Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[19])
+        up = float(Path("/proc/uptime").read_text().split()[0])
+        return (False, int(up - start_ticks / os.sysconf("SC_CLK_TCK")))
+    except (OSError, ValueError, IndexError):
+        return (None, None)
+
+
 def kill_pid(pid: int) -> bool:
     """Terminate ONE process (no tree kill). The caller has already matched it to the automation's own profile."""
     try:
@@ -158,14 +184,23 @@ class ReleaseProfileLock(Playbook):
 
     def fix(self, ctx: Context):
         killed = 0
+        protected = []
         kill = ctx.killer or kill_pid
+        inspect = getattr(ctx, "inspector", None) or process_state
         for pid, _name, _cmd in self._procs(ctx):
             if R.other_run_live(ctx.paths, ctx.automation):
                 break  # a run started since the check: stop at once
             if pid not in [p[0] for p in self._procs(ctx)]:
                 continue  # re-list immediately before the kill: the PID may have exited and been reused by something else
+            has_window, age_s = inspect(pid)
+            if has_window is not False or age_s is None or age_s < MIN_BROWSER_AGE_S:
+                protected.append(pid)   # a window someone may be using, a fresh start (a run is launching it) or an unknown state: never kill
+                continue
             if kill(pid):
                 killed += 1
+        if protected:
+            return (f"left {len(protected)} browser process(es) alone (visible window, started under {MIN_BROWSER_AGE_S // 60} min ago, or state unknown); "
+                    f"stopped {killed}; lock files NOT removed while a browser still holds the profile")
         for _ in range(10):  # give the processes a moment to exit before touching their files
             if not self._procs(ctx):
                 break
@@ -548,10 +583,11 @@ def prune_local(ctx: Context, max_delete: int = 500) -> Tuple[int, int]:
         if old(d, 7):
             drop(d)
     for d in entries(root):  # only the exact folder names the updater creates: AUTOMAGIX_HOME may be a shared directory
-        if d.is_dir() and d.name in OWN_LEFTOVERS and old(d, 1):
+        if d.is_dir() and (d.name in OWN_LEFTOVERS or re.fullmatch(r"(wrapper-core|execution-framework)\.staging-\d+", d.name)
+                           or d.name == "wrapper-core.bad") and old(d, 1):
             drop(d)
     for d in entries(ctx.paths.automations, True):
-        if d.name.endswith((".old", ".staging")) and old(d, 1):
+        if (d.name.endswith(".old") or ".staging" in d.name) and old(d, 1):
             drop(d)
     # the spool holds telemetry that has not been delivered yet: never deleted here, whatever its age
     return deleted, freed

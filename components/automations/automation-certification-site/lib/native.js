@@ -31,13 +31,30 @@ function parseResult(stdout) {
   try { return JSON.parse(line); } catch (_) { return { state: 'error', clicked: false, detail: line.slice(0, 200) }; }
 }
 
-function runNative({ url, account, timeoutS, dryRun }, spawn = spawnSync) {
+/**
+ * Verdict on the script's result line. Success = the account tile was pressed, or the user was already on the target page (nothing to click),
+ * or a dry run that found the picker. Everything else (no tile found, still on a sign-in that needs a person, timeout, script error) is a failure.
+ */
+function judge(r, dryRun) {
+  const res = r || {};
+  if (res.state === 'error') return { ok: false, kind: 'error', reason: res.detail || 'unknown error' };
+  if (res.state === 'target') return { ok: true };
+  if (res.state === 'account_selected' && res.clicked === true) return { ok: true };
+  if (dryRun && res.state === 'account-picker') return { ok: true };
+  if (res.state === 'manual_step_required' || res.state === 'signin') {
+    return { ok: false, kind: 'manual', reason: 'Microsoft sign-in needs a person (account not offered, or password/MFA requested)' };
+  }
+  return { ok: false, kind: 'other', reason: `ended in state ${res.state || 'unknown'} without clicking the account tile (clicked=${res.clicked === true})` };
+}
+
+function runNative({ url, account, timeoutS, dryRun, portalHost }, spawn = spawnSync) {
   const script = path.resolve(__dirname, '..', 'scripts', 'native-click-account.ps1');
   const args = ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', script, '-Url', url, '-Account', account, '-TimeoutS', String(timeoutS)];
+  if (portalHost && /^[a-z0-9.-]+$/i.test(portalHost)) args.push('-PortalHost', portalHost);
   if (dryRun) args.push('-DryRun');
   const r = spawn('powershell.exe', args, { encoding: 'utf8', timeout: (timeoutS + 30) * 1000, windowsHide: true });
   if (r.error) throw new Error(`native mode failed to start: ${r.error.message}`);
   return parseResult(r.stdout);
 }
 
-module.exports = { devtoolsBlockedByPolicy, isDevtoolsPolicyError, parseResult, runNative };
+module.exports = { devtoolsBlockedByPolicy, isDevtoolsPolicyError, parseResult, judge, runNative };

@@ -35,7 +35,7 @@ AUTOMAGIX\
     registry_token.dpapi   # optional; preferred location is Windows Credential Manager target AUTOMAGIX/registry_token
   wrapper-core\            # python package dir (contains wrapper_core\), plus VERSION file
   execution-framework\     # node runtime + node_modules + framework js, plus VERSION file
-  python\                  # embedded CPython (+ tzdata) laid down by the installer; NOT under execution-framework (self-heal swaps that dir while Python runs)
+  python\                  # embedded CPython laid down by the installer (IANA tz data ships inside wrapper-core: `wrapper_core/_tzdata`); NOT under execution-framework (self-heal swaps that dir while Python runs)
   automations\<name>\      # payload (automation.yaml + code), plus VERSION file
   state\
     installed.json         # {"components": {"wrapper-core": "0.1.0", ...}, "automations": {"name": "1.0.0"}}
@@ -196,6 +196,23 @@ verifying. The document may also carry `seq` (a monotonic non-negative integer, 
 an equal `seq` is fine, a missing or corrupt mark never locks the fleet out, and a legacy document without `seq` is accepted. `triggers.json`
 queues runs on endpoints, so once a key is pinned `selfheal.pending_triggers` accepts it only if its sha256 equals the signed `extras` entry
 (otherwise it is ignored with a warning, never an exception); with no key pinned it is used with a warning, as before.
+
+**Third signature (`epoch`, `reset_seq`, `trusted_keys`, `cosigs`).** `sig3` (same key) covers the UTF-8 message
+`autostation-manifest-v3
+<manifest_sha256>
+<signed_at>
+<seq>
+<epoch>
+<0|1 reset_seq>
+<name>=<sha256>...
+--
+<sorted trusted_keys, one per line>`; every entry of `cosigs`
+(`{key_id, key, sig}`) signs the same message with the endorsed key. Older endpoints ignore all of it (v1/v2 still verify). New endpoints: (1) record the highest `epoch`
+in `state/manifest.seq.json` (`_epoch`) and refuse a lower one; a document with `reset_seq: true` and an epoch HIGHER than the stored one is accepted even though its `seq`
+is lower (operator recovery), anything else with a lower `seq` is a rollback; (2) learn a key from `trusted_keys` only when it is also co-signed, persisting it in
+`state/trusted_keys.json`; learned keys are trusted in addition to the pinned ones and never turn signature enforcement on by themselves. `tools/sign_registry.py` always
+derives `seq` from the clock (UTC seconds) and refuses a value that is not higher than the previously published one. A cached manifest older than 14 days is reported as
+a stale registry (doctor FAIL, `self_heal.stale_registry`); the signature file is fetched before the manifest and a mismatch is retried once (CDN skew).
 
 ## 5. Payload descriptor (`automation.yaml`, inside every automation payload)
 

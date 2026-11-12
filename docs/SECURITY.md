@@ -16,6 +16,7 @@
 
 | Risk | Control |
 |---|---|
+| Stolen/expired **GitHub logging token** (github-api transport) | The embedded fine-grained PAT is scoped to the single private logs repo (Contents read/write). Endpoints treat 401/403 as a credential failure: sending pauses (30 min rejected, 6 h missing/undecryptable), the state is visible in heartbeats and `doctor`, and the token is rotated by shipping a new installer/update. Ingest never trusts pushed data: symlinks are skipped, ring/host in content must equal the path, bundle items are validated one by one, and the source repo is never deleted from by default (`--consume`). |
 | Stolen **logging key** | Write-only *by construction*: the endpoint never fetches; it pushes orphan commits to new unique `ingest/<ring>/…` refs. GitLab push rules + protected `ingest/*` (no force-push, no delete) bound the blast radius to junk refs. DPAPI-protected at rest, owner-only ACL. |
 | Stolen **read token** | Read-only, scoped to the registry project; Credential Manager storage; rotation with overlap (runbook §4). |
 | Tampered package | Every component/payload zip is verified against the manifest's `sha256` before extraction; the manifest changes only via approved MR. Zip-slip rejected. Installers are code-signed (release builds fail closed without signing). |

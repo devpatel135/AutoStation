@@ -8,7 +8,7 @@
  * picker, the automation stops and reports `manual_step_required` rather than attempting anything.
  *
  * Parameters (schedule slot params): portal_url (https, host must be allow-listed), allowed_hosts (extra exact hosts, optional),
- * account (default devpatel@deloitte.com), channel (default msedge), timeout_s (default 60).
+ * account (REQUIRED: the e-mail of the Microsoft account tile to choose; no default), channel (default msedge), timeout_s (default 60).
  * Test-only overrides - ignored unless the environment variable AMX_ALLOW_TEST_HOSTS=1 is set: picker_host, headless, http:// and
  * loopback hosts in portal_url / allowed_hosts. Honours --dry-run: navigates and classifies, never clicks.
  *
@@ -35,7 +35,7 @@ const _PAGE_CLASSIFY_SCHEMA = {
   additionalProperties: false,
 };
 const {
-  DEFAULT_URL, DEFAULT_ACCOUNT, assertEmail, accountTileSelectors, classifyPage, hostOf,
+  DEFAULT_URL, assertEmail, accountTileSelectors, classifyPage, hostOf,
   parseAllowedHosts, isAllowedPortal, isMicrosoftLoginHost, redirectAllowed, postClickOk,
 } = require('./lib/login');
 
@@ -59,7 +59,11 @@ fw.wrapper.entrypoint(async (framework) => {
   const portalCheck = isAllowedPortal(portalUrl, { allowedHosts, allowTestHosts });
   if (!portalCheck.ok) throw new Error(`portal_url refused: ${portalCheck.reason} (allowed hosts: ${allowedHosts.join(', ')})`);
   const portalHost = portalCheck.host;
-  const account = assertEmail(w.param('account', DEFAULT_ACCOUNT));
+  const accountParam = w.param('account', undefined);
+  if (accountParam === undefined || String(accountParam).trim() === '') {
+    throw new Error("the 'account' parameter is required (e-mail of the Microsoft account tile to choose); set it in the schedule slot params");
+  }
+  const account = assertEmail(accountParam);
   const timeoutParam = Number(w.param('timeout_s', '60'));
   const timeoutMs = (Number.isFinite(timeoutParam) ? Math.min(Math.max(timeoutParam, 5), 600) : 60) * 1000;
   const selectors = accountTileSelectors(account);
@@ -77,11 +81,16 @@ fw.wrapper.entrypoint(async (framework) => {
   const mode = String(w.param('mode', 'auto'));
   const runNativeMode = async (why) => {
     w.logEvent('native_mode', { reason: why });
-    const r = native.runNative({ url: portalUrl, account, timeoutS: Math.round(timeoutMs / 1000), dryRun: w.isDryRun() });
-    if (r.state === 'error') throw new Error(`native mode: ${r.detail || 'unknown error'}`);
+    const r = native.runNative({ url: portalUrl, account, timeoutS: Math.round(timeoutMs / 1000), dryRun: w.isDryRun(), portalHost });
     if (r.clicked) w.logEvent('account_tile_clicked', { account_domain: account.split('@')[1] });
     if (r.state === 'manual_step_required') w.logEvent('manual_step_required', { reason: 'Microsoft sign-in needs a person (password/MFA); not handled by design', host: 'login.microsoftonline.com' });
-    w.setResult({ state: r.state, clicked: !!r.clicked, final_host: '', mode: 'native-uia' });
+    const verdict = native.judge(r, w.isDryRun());
+    w.setResult({ state: r.state, clicked: !!r.clicked, final_host: '', mode: 'native-uia', ...(verdict.ok ? {} : { failed: true, reason: verdict.reason }) });
+    // a run that neither clicked the tile nor found the user already on the target is a FAILED run, not a quiet success
+    if (!verdict.ok) {
+      const E = fw.wrapper.errors;
+      throw verdict.kind === 'manual' ? new E.AuthExpired(`native mode: ${verdict.reason}`) : new E.SystemUnavailable(`native mode: ${verdict.reason}`);
+    }
   };
   if (mode === 'native' || (mode === 'auto' && native.devtoolsBlockedByPolicy())) {
     await runNativeMode(mode === 'native' ? 'requested' : 'Edge policy RemoteDebuggingAllowed=0');

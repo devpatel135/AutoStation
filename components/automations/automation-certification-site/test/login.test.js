@@ -1,24 +1,25 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { DEFAULT_URL, DEFAULT_ACCOUNT, assertEmail, accountTileSelectors, classifyPage } = require('../lib/login');
+const login = require('../lib/login');
+const { DEFAULT_URL, assertEmail, accountTileSelectors, classifyPage } = require('../lib/login');
 
-test('defaults are the requested portal and account', () => {
+test('the default portal is set and there is NO default account', () => {
   assert.equal(DEFAULT_URL, 'https://develop.deloitte.com/ai-season-of-certifications#subpage/res');
-  assert.equal(DEFAULT_ACCOUNT, 'devpatel@deloitte.com');
+  assert.equal(login.DEFAULT_ACCOUNT, undefined);
 });
 
 test('account is validated before it is interpolated into selectors', () => {
-  assert.equal(assertEmail('devpatel@deloitte.com'), 'devpatel@deloitte.com');
+  assert.equal(assertEmail('demo.user@example.test'), 'demo.user@example.test');
   for (const bad of ['', 'nope', 'a"b@x.com', 'a@b', "x'y@z.com", 'a b@c.com', '<script>@x.com']) {
     assert.throws(() => assertEmail(bad), /invalid account parameter/);
   }
 });
 
 test('tile selectors are ordered most-specific first and contain the account', () => {
-  const sel = accountTileSelectors('devpatel@deloitte.com');
-  assert.equal(sel[0], '[data-test-id="devpatel@deloitte.com"]');
-  assert.ok(sel.every((s) => s.includes('devpatel@deloitte.com')));
+  const sel = accountTileSelectors('demo.user@example.test');
+  assert.equal(sel[0], '[data-test-id="demo.user@example.test"]');
+  assert.ok(sel.every((s) => s.includes('demo.user@example.test')));
   assert.ok(sel.length >= 3);
 });
 

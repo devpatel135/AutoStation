@@ -217,6 +217,25 @@ def get_logging_token(paths: Paths | None = None) -> str | None:
     return None
 
 
+def logging_token_status(paths: Paths | None = None) -> tuple[str, str]:
+    """Why is (or is not) there a usable logging token? -> ``(status, detail)`` with status one of
+    ``ok`` (env or decryptable DPAPI file), ``missing`` (no token file: a standalone install), ``undecryptable`` (the file exists but
+    Windows cannot decrypt it: the profile was rebuilt, the password was reset, or the file came from another user/machine)."""
+    if os.environ.get("AUTOMAGIX_LOGGING_TOKEN"):
+        return "ok", "environment"
+    paths = paths or Paths()
+    f = paths.secrets / "logging_token.dpapi"
+    if not f.exists():
+        return "missing", "no secrets/logging_token.dpapi"
+    try:
+        unprotect_file(f)
+    except SecretError as exc:
+        return "undecryptable", str(exc)[:160]
+    except OSError as exc:
+        return "undecryptable", f"cannot read the token file: {type(exc).__name__}"
+    return "ok", "dpapi"
+
+
 def get_llm_key() -> str | None:
     key = os.environ.get("AUTOSTATION_LLM_KEY") or credman_read("AUTOMAGIX/llm_key")
     return key.strip() if key else None

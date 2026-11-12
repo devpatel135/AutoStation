@@ -397,6 +397,7 @@ class Context:
     now: Callable[[], datetime] = utcnow
     scratch: Dict[str, Any] = field(default_factory=dict)  # rollback tokens, details
     run_id: Optional[str] = None
+    inspector: Optional[Callable[[int], tuple]] = None    # pid -> (has_visible_window, age_seconds); None = ask the OS
 
     def inside_root(self, p: Path) -> bool:
         return inside_root(self.paths, p)
@@ -465,7 +466,7 @@ def registry() -> List[Playbook]:
 # ---------------------------------------------------------------------------------------------------- engine
 class Remediator:
     def __init__(self, paths: Optional[Paths] = None, automation: Optional[str] = None, cfg: Optional[dict] = None, dry_run: bool = False,
-                 lister: Optional[Callable] = None, killer: Optional[Callable] = None, scheduler_runner: Optional[Callable] = None,
+                 lister: Optional[Callable] = None, killer: Optional[Callable] = None, scheduler_runner: Optional[Callable] = None, inspector: Optional[Callable] = None,
                  http_head: Optional[Callable] = None, now: Optional[Callable[[], datetime]] = None, force: bool = False):
         self.paths = paths or Paths()
         self.automation = automation
@@ -473,6 +474,7 @@ class Remediator:
         self.dry_run = dry_run
         self.force = force  # explicit operator request (CLI): ignores the cool-down but never the per-day budget or the kill switch
         self.lister, self.killer, self.scheduler_runner, self.http_head = lister, killer, scheduler_runner, http_head
+        self.inspector = inspector
         self.now = now or utcnow
         self.log = get_logger(self.paths)
 
@@ -533,7 +535,7 @@ class Remediator:
         off = disabled_playbooks(self.cfg)
         pbs = [p for p in registry() if diag.category in p.categories and p.name not in off]
         state = load_state(self.paths)
-        ctx = Context(self.paths, self.automation, self.cfg, diag, self.dry_run, self.lister, self.killer, self.scheduler_runner, self.http_head, self.now, run_id=run_id)
+        ctx = Context(self.paths, self.automation, self.cfg, diag, self.dry_run, self.lister, self.killer, self.scheduler_runner, self.http_head, self.now, run_id=run_id, inspector=self.inspector)
         dirty = False
         for pb in pbs:
             t0 = time.monotonic()
@@ -667,16 +669,13 @@ def lock_state(paths: Paths, automation: str) -> str:
     f = paths.lock_file(automation)
     if not f.exists():
         return "none"
-    try:
-        owner = int(f.read_text(encoding="ascii", errors="replace").split()[0])
-    except (OSError, ValueError, IndexError):
-        owner = 0
+    from .locking import pid_alive, read_lock
+    owner, started = read_lock(f)
     try:
         age = time.time() - f.stat().st_mtime
     except OSError:
         return "none"
-    from .runner import _pid_alive
-    if owner and owner != os.getpid() and not _pid_alive(owner):
+    if owner and owner != os.getpid() and not pid_alive(owner, started):   # also 'stale' when the PID was recycled by another process
         return "stale"
     if age > 4 * 3600 + 600:
         return "stale"

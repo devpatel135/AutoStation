@@ -40,6 +40,9 @@ def main(argv: list[str] | None = None) -> int:
     if argv and argv[0] == "debug-bundle":
         from . import debugbundle
         return debugbundle.main(argv[1:])
+    if argv and argv[0] == "selftest":      # the launcher runs this right after swapping in a staged wrapper-core and reverts on failure
+        from . import selftest
+        return selftest.main(argv[1:])
 
     p = argparse.ArgumentParser(prog="wrapper_core", description="AUTOSTATION wrapper-core")
     p.add_argument("--version", action="version", version=f"wrapper-core {__version__}")

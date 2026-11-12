@@ -160,7 +160,7 @@ test('CI smoke configuration still classifies and passes every gate end to end (
   const picker = { url: 'http://localhost:8099/login.html', hasTile: true, text: '' };
   assert.equal(classifyPage(picker, portalUrl, { pickerHost }), 'account-picker');
   assert.equal(redirectAllowed(picker.url, { portalHost: pc.host, allowedHosts, allowTestHosts }).ok, true);
-  assert.equal(postClickOk('http://127.0.0.1:8099/portal.html#signed-in=devpatel@deloitte.com', { allowedHosts, pickerHost }), true);
+  assert.equal(postClickOk('http://127.0.0.1:8099/portal.html#signed-in=demo.user@example.test', { allowedHosts, pickerHost }), true);
   // the same inputs without test mode are refused up front
   assert.equal(isAllowedPortal(portalUrl, { allowedHosts: HOSTS, allowTestHosts: false }).ok, false);
   assert.throws(() => parseAllowedHosts('127.0.0.1:8099', { allowTestHosts: false }), /invalid allowed_hosts entry/);
