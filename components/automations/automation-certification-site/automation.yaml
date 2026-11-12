@@ -1,12 +1,13 @@
 name: automation-certification-site
-version: 1.1.2
+version: 1.2.0
 runtime: node
 entrypoint: main.js
 args: []
 requires: {wrapper_core: ">=0.1.0,<1.0.0", execution_framework: ">=0.1.0,<1.0.0"}
 timeout_s: 900
 # Defaults used when no registry manifest is reachable; a manifest entry overrides these.
-# Runs at 09:00 daily and once right after install. Headed on purpose: the first sign-in to the browser profile is interactive.
+# Runs daily at 14:00 (the schedule's timezone; the manifest entry overrides). The `account` param (the Microsoft account e-mail whose tile to choose)
+# is REQUIRED and has no default: set it in the registry manifest slot params. Headed on purpose: the first sign-in to the browser profile is interactive.
 schedule:
   slots:
     - {id: daily, type: daily, time: "14:00", params: {}}

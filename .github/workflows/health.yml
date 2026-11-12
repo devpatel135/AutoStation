@@ -48,7 +48,7 @@ jobs:
           path: health-state
           key: health-state-${{ github.run_id }}
           restore-keys: health-state-
-      - name: Fetch the live run logs (private logs repo, branch ingest)
+      - name: Fetch the run logs (private logs repo, the last two monthly branches)
         id: logs
         env:
           # read-only token preferred (LOGS_READ_TOKEN); the installer's read/write token is the fallback
@@ -56,18 +56,14 @@ jobs:
         run: |
           if [ -z "$LOGGING_TOKEN" ]; then
             echo "live=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::LOGGING_TOKEN is not set - nothing to monitor yet (see docs/LIVE_LOGGING.md)"
+            echo "::notice::no LOGGING_TOKEN or LOGS_READ_TOKEN secret - nothing to monitor yet (see docs/LIVE_LOGGING.md)"
             exit 0
           fi
-          AUTH="$(printf 'x-access-token:%s' "$LOGGING_TOKEN" | base64 -w0)"
-          echo "::add-mask::$AUTH"
-          if git -c "http.extraheader=Authorization: Basic $AUTH" clone --quiet --depth 1 --branch ingest "https://github.com/${LOG_REPO}.git" ../logs 2>/dev/null; then
-            rm -rf ../logs/.git
+          if python tools/fetch_logs.py --remote "https://github.com/${LOG_REPO}.git" --out logs-src --months 2 --token-env LOGGING_TOKEN; then
             echo "live=true" >> "$GITHUB_OUTPUT"
-            echo "fetched $(find ../logs/ingest -name '*.json' 2>/dev/null | wc -l) log artefact(s)"
           else
             echo "live=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::${LOG_REPO} has no ingest branch yet - nothing has reported, so nothing is closed"
+            echo "::notice::no run logs could be fetched from ${LOG_REPO} (nothing has reported yet, or the fetch failed) - nothing is closed"
           fi
       - name: Ingest and compute the signals
         id: analyze
@@ -77,12 +73,23 @@ jobs:
           PYTHONPATH: ${{ github.workspace }}/components/wrapper-core
         run: |
           mkdir -p "$GITHUB_WORKSPACE/health-state" "$GITHUB_WORKSPACE/health-out"
-          python -m automation_logging ingest --source dir --from "$GITHUB_WORKSPACE/../logs" --out "$GITHUB_WORKSPACE/health-out/archive"
-          python -m automation_logging analyze --archive "$GITHUB_WORKSPACE/health-out/archive" \
-            --manifest "$GITHUB_WORKSPACE/components/automation-registry/manifest.yaml" \
-            --state "$GITHUB_WORKSPACE/health-state" --out "$GITHUB_WORKSPACE/health-out/report.json"
+          complete=true
+          # exit 3 = data was deferred or many records were rejected: the signals are still computed, but the report is not
+          # trustworthy enough to CLOSE issues (a signal can be missing only because its data was not read)
+          rc=0
+          python -m automation_logging ingest --source dir --from "$GITHUB_WORKSPACE/logs-src" --out "$GITHUB_WORKSPACE/health-out/archive" || rc=$?
+          if [ "$rc" = "3" ]; then complete=false; elif [ "$rc" != "0" ]; then exit "$rc"; fi
+          rc=0
+          python -m automation_logging analyze --archive "$GITHUB_WORKSPACE/health-out/archive" --manifest "$GITHUB_WORKSPACE/components/automation-registry/manifest.yaml" --state "$GITHUB_WORKSPACE/health-state" --out "$GITHUB_WORKSPACE/health-out/report.json" --fail-on-data-quality || rc=$?
+          if [ "$rc" = "3" ]; then complete=false; elif [ "$rc" != "0" ]; then exit "$rc"; fi
+          echo "complete=${complete}" >> "$GITHUB_OUTPUT"
+          if [ "$complete" != "true" ]; then echo "::warning title=incomplete telemetry::issues can be opened or updated but will not be closed in this run"; fi
       - name: Sync the ops-signal issues
         if: ${{ steps.analyze.outcome == 'success' }}
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: python tools/ops_issues.py sync --signals health-out/report.json --live-data-ok --max-new 5 --max-open 50 --min-severity high
+          DATA_COMPLETE: ${{ steps.analyze.outputs.complete }}
+        run: |
+          OK=""
+          if [ "$DATA_COMPLETE" = "true" ]; then OK="--live-data-ok"; fi
+          python tools/ops_issues.py sync --signals health-out/report.json $OK --max-new 5 --max-open 50 --min-severity high

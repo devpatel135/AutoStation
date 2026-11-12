@@ -126,7 +126,7 @@ def check_registry(rep: Report, fetch: Fetch, base: str, manifest: dict) -> List
             if isinstance(seq, int) and not isinstance(seq, bool) and doc.get("sig2"):
                 rep.add("signing", OK, "anti-rollback sequence", f"seq {seq} (endpoints refuse a lower one)")
             else:
-                rep.add("signing", WARN, "anti-rollback sequence", "no seq in the signature: set SIGN_SEQ in the site workflow")
+                rep.add("signing", WARN, "anti-rollback sequence", "no seq in the signature: tools/sign_registry.py derives it from the clock; check the signing step ran")
             if isinstance(extras, dict) and "triggers.json" in extras:
                 code_t, trig = fetch(base + "registry/triggers.json", None)
                 same = code_t == 200 and hashlib.sha256(trig).hexdigest() == str(extras["triggers.json"]).lower()

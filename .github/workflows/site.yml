@@ -1,25 +1,28 @@
 name: site
 
-# Builds the whole site (landing, install center, docs, registry portal + admin panel, dashboards, program, jobs, machines, queues, schedules, audit) and
-# deploys it to GitHub Pages. It also publishes the registry (manifest.yaml + artifacts) that installed machines self-heal from:
+# Builds the whole site (single-page app: Home, Install, Fleet, Docs) and deploys it to GitHub Pages. It also publishes the registry
+# (manifest.yaml + artifacts) that installed machines self-heal from:
 #   https://<owner>.github.io/<repo>/registry/
 #
-# REGISTRY: this workflow publishes what `release` already produced (tools/build_registry.py --publish-only: the manifest from main plus the
-# zips it references, each verified against the sha256 recorded in the manifest). It never repackages the source tree and never compares it
-# with the released zips, so a source change that breaks the immutability rule (an unbumped version) can NOT block a deploy: an emergency
-# pause or rollback merged to main always reaches Pages. It fails (and the previous deployment stays live) only when the manifest points at
-# an artifact that is missing from the registry-artifacts branch or does not match its recorded sha256. The immutability check itself runs in
-# release.yml and, before merge, in pr.yml / ci.yml (build_registry.py --check).
+# FOUR JOBS, so a slow or failing telemetry fetch can never delay the registry or an emergency pause:
+#   registry   publishes what `release` already produced (tools/build_registry.py --publish-only: the manifest from main plus the zips it
+#              references, each verified against the sha256 recorded in the manifest), overlays triggers.json and signs the manifest.
+#              It never repackages the source tree and never compares it with the released zips, so a source change that breaks the
+#              immutability rule (an unbumped version) can NOT block a deploy. It fails (and the previous deployment stays live) only
+#              when the manifest points at an artifact that is missing from registry-artifacts or does not match its recorded sha256.
+#   telemetry  fetches the last months of run logs from the private logs repo (tools/fetch_logs.py), ingests them without deleting
+#              anything and keeps the result as an artifact. It NEVER fails the workflow: any problem just means the site is built
+#              without live data (an honest "waiting for data" state, never demo data). A hard 10 minute limit applies.
+#   site       builds the pages from the registry artifact (+ the telemetry artifact when there is one) and uploads them.
+#   deploy     publishes to Pages.
+# The immutability check itself runs in release.yml and, before merge, in pr.yml / ci.yml (build_registry.py --check).
 #
 # SCHEDULES: GitHub starts cron jobs late and sometimes skips them (measured: every 30 minutes became every ~5 hours). The cron below is
 # best-effort; pushes, `release`/`installers` completions and manual runs also rebuild the site.
 #
-# LIVE DATA: the dashboards are built from the real run logs that installed automations push to the private logs repo
-# <owner>/AutoStation-logs (branch `ingest`). That needs the repository secret LOGGING_TOKEN (a fine-grained PAT, contents
-# read+write on the logs repo only; see docs/LIVE_LOGGING.md). Every 30 minutes and after every release/installer build
-# this workflow ingests the logs, recomputes the compliance signals and republishes. Without the secret the dashboards show
-# an honest "waiting for the first run" state - never demo data.
-# NOTE: GitHub Pages sites are public; run logs contain host names, user hashes and automation events (never secrets).
+# LIVE DATA: needs the repository secret LOGGING_TOKEN (a fine-grained PAT, contents read+write on the logs repo only; see
+# docs/LIVE_LOGGING.md) or the preferred read-only LOGS_READ_TOKEN. Without a secret the dashboards show the waiting state.
+# NOTE: GitHub Pages sites are public; see docs/LIVE_LOGGING.md for exactly what the site shows from the logs.
 on:
   push:
     branches: [main]
@@ -33,26 +36,25 @@ on:
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 concurrency:
   group: pages
   cancel-in-progress: false
 
 jobs:
-  build:
-    timeout-minutes: 20
+  registry:
     if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
+    timeout-minutes: 15
     runs-on: ubuntu-24.04
     environment: production
+    permissions:
+      contents: read
     env:
       GH_TOKEN: ${{ github.token }}
-      LOG_REPO: ${{ vars.AUTOSTATION_LOG_REPO || format('{0}/AutoStation-logs', github.repository_owner) }}
-      # a read-only token is preferred when you create one (LOGS_READ_TOKEN); the installer's write token is the fallback
-      LOGGING_TOKEN: ${{ secrets.LOGS_READ_TOKEN || secrets.LOGGING_TOKEN }}
       # only for a brand-new repo that has never released: lets the site deploy before registry-artifacts exists
       ALLOW_NO_REGISTRY: ${{ vars.AUTOSTATION_ALLOW_NO_REGISTRY }}
+    outputs:
+      has_registry: ${{ steps.registry.outcome == 'success' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -103,7 +105,6 @@ jobs:
         if: ${{ steps.registry.outcome == 'success' }}
         env:
           REGISTRY_SIGNING_SEED: ${{ secrets.REGISTRY_SIGNING_SEED }}
-          SIGN_SEQ: ${{ github.run_number }}
         run: |
           if [ -n "$REGISTRY_SIGNING_SEED" ]; then
             # a re-run of an old workflow run must not re-sign an OLDER manifest with a fresh signed_at (that would defeat rollback protection)
@@ -114,59 +115,126 @@ jobs:
             fi
           fi
           python tools/sign_registry.py --registry-dir registry-out
-      - name: Fetch the live run logs (private logs repo, branch ingest)
-        id: logs
-        run: |
-          if [ -z "$LOGGING_TOKEN" ]; then
-            echo "live=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::LOGGING_TOKEN secret not set - dashboards will show the waiting state (see docs/LIVE_LOGGING.md)"
-            exit 0
-          fi
-          AUTH="$(printf 'x-access-token:%s' "$LOGGING_TOKEN" | base64 -w0)"
-          echo "::add-mask::$AUTH"
-          if git -c "http.extraheader=Authorization: Basic $AUTH" clone --quiet --depth 1 --branch ingest "https://github.com/${LOG_REPO}.git" ../logs 2>/dev/null; then
-            rm -rf ../logs/.git
-            echo "live=true" >> "$GITHUB_OUTPUT"
-            echo "fetched $(find ../logs/ingest -name '*.json' 2>/dev/null | wc -l) log artefact(s) from ${LOG_REPO}"
-          else
-            echo "live=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::${LOG_REPO} has no 'ingest' branch yet (no installed automation has reported) - waiting state"
-          fi
-      - name: Ingest, analyse, diagnose and build the live data
-        id: ingest
-        if: ${{ steps.logs.outputs.live == 'true' }}
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: ${{ steps.registry.outcome == 'success' }}
+        with:
+          name: registry-out
+          path: registry-out
+          retention-days: 1
+
+  telemetry:
+    # Never fails the workflow and never blocks the registry: every step is allowed to fail, and the job result only says whether live
+    # data is available (outputs.live). Hard limit: 10 minutes.
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
+    timeout-minutes: 10
+    runs-on: ubuntu-24.04
+    environment: production
+    permissions:
+      contents: read
+    env:
+      LOG_REPO: ${{ vars.AUTOSTATION_LOG_REPO || format('{0}/AutoStation-logs', github.repository_owner) }}
+      # a read-only token is preferred when you create one (LOGS_READ_TOKEN); the installer's write token is the fallback
+      LOGGING_TOKEN: ${{ secrets.LOGS_READ_TOKEN || secrets.LOGGING_TOKEN }}
+    outputs:
+      live: ${{ steps.final.outputs.live }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - name: Fetch the run logs (private logs repo, the last two monthly branches)
+        id: fetch
         continue-on-error: true
         run: |
-          mkdir -p live
-          cp ../automation-registry/manifest.yaml live/manifest.yaml
-          if ! python -m automation_logging ingest --source dir --from "$GITHUB_WORKSPACE/../logs" --out live/archive > ingest.log 2>&1; then
-            echo "::warning title=live ingest failed::$(tail -c 700 ingest.log | tr '\n' ' ')"
+          if [ -z "$LOGGING_TOKEN" ]; then
+            echo "::notice::no LOGGING_TOKEN or LOGS_READ_TOKEN secret - the dashboards will show the waiting state (see docs/LIVE_LOGGING.md)"
             exit 1
           fi
-          tail -n 30 ingest.log
+          python tools/fetch_logs.py --remote "https://github.com/${LOG_REPO}.git" --out logs-src --months 2 --token-env LOGGING_TOKEN
+      - name: Ingest the logs without deleting anything
+        id: ingest
+        if: ${{ steps.fetch.outcome == 'success' }}
+        continue-on-error: true
         working-directory: components/automation-logging
         env:
           PYTHONPATH: ${{ github.workspace }}/components/wrapper-core
-      - name: Build the site (with the live data)
-        id: site_live
+        run: |
+          mkdir -p live
+          cp ../automation-registry/manifest.yaml live/manifest.yaml
+          rc=0
+          python -m automation_logging ingest --source dir --from "$GITHUB_WORKSPACE/logs-src" --out live/archive > ingest.log 2>&1 || rc=$?
+          tail -n 30 ingest.log
+          if [ "$rc" = "0" ]; then
+            echo "ingest ok"
+          elif [ "$rc" = "3" ]; then
+            # data was deferred or many records were rejected: the site is still built from what was read, flagged as incomplete
+            echo "::warning title=live data is incomplete::ingest reported deferred or rejected records (exit 3); see the ingest step log"
+          else
+            echo "::warning title=live ingest failed::$(tail -c 600 ingest.log | tr '\n' ' ')"
+            exit 1
+          fi
+      - name: Record whether live data is available
+        id: final
+        run: |
+          if [ "${{ steps.ingest.outcome }}" = "success" ]; then echo "live=true" >> "$GITHUB_OUTPUT"; else echo "live=false" >> "$GITHUB_OUTPUT"; fi
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: ${{ steps.ingest.outcome == 'success' }}
+        with:
+          name: live-data
+          path: components/automation-logging/live
+          retention-days: 1
+
+  site:
+    needs: [registry, telemetry]
+    # the telemetry job may fail or be skipped: the site is built whenever the registry job succeeded
+    if: ${{ always() && needs.registry.result == 'success' }}
+    timeout-minutes: 15
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - name: Download the registry
+        if: ${{ needs.registry.outputs.has_registry == 'true' }}
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: registry-out
+          path: registry-out
+      - name: Download the live data
+        id: live
+        if: ${{ needs.telemetry.outputs.live == 'true' }}
         continue-on-error: true
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: live-data
+          path: live-data
+      - name: Build the site
         env:
-          REGISTRY_OUTCOME: ${{ steps.registry.outcome }}
+          HAS_REGISTRY: ${{ needs.registry.outputs.has_registry }}
+          LIVE_OUTCOME: ${{ steps.live.outcome }}
         run: |
-          ARGS="--out site --fetch-installer-sha --live-data components/automation-logging/live"
-          if [ "$REGISTRY_OUTCOME" = "success" ]; then ARGS="$ARGS --registry registry-out"; fi
-          python tools/build_site.py $ARGS
-      - name: Build the site without live data (no logs, or the live-data steps failed - the registry must still deploy)
-        if: ${{ steps.site_live.outcome != 'success' }}
-        env:
-          REGISTRY_OUTCOME: ${{ steps.registry.outcome }}
-        run: |
-          rm -rf site
           ARGS="--out site --fetch-installer-sha"
-          if [ "$REGISTRY_OUTCOME" = "success" ]; then ARGS="$ARGS --registry registry-out"; fi
-          python tools/build_site.py $ARGS
-          if [ "${{ steps.logs.outputs.live }}" = "true" ]; then echo "::warning title=live data skipped::the live-data steps failed; the site was built without them"; fi
+          if [ "$HAS_REGISTRY" = "true" ]; then ARGS="$ARGS --registry registry-out"; fi
+          if [ "$LIVE_OUTCOME" = "success" ]; then ARGS="$ARGS --live-data live-data"; fi
+          if ! python tools/build_site.py $ARGS; then
+            if [ "$LIVE_OUTCOME" = "success" ]; then
+              # a build problem caused by the telemetry data must not stop the registry from deploying: rebuild without it
+              echo "::warning title=live data skipped::the site could not be built with the live data; rebuilding without it"
+              rm -rf site
+              python tools/build_site.py --out site --fetch-installer-sha $( [ "$HAS_REGISTRY" = "true" ] && echo "--registry registry-out" )
+            else
+              exit 1
+            fi
+          fi
       - name: Check the generated site (links, install pages)
         run: python tools/check_site.py site
       - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
@@ -175,9 +243,12 @@ jobs:
           path: site
 
   deploy:
-    needs: build
-    runs-on: ubuntu-latest
+    needs: site
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}

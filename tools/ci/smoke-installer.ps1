@@ -82,6 +82,7 @@ try {
                 $env:AUTOMATION_PARAM_PORTAL_URL = 'http://127.0.0.1:8099/portal.html'
                 $env:AUTOMATION_PARAM_PICKER_HOST = 'localhost:8099'
                 $env:AUTOMATION_PARAM_ALLOWED_HOSTS = '127.0.0.1:8099,localhost:8099'
+                $env:AUTOMATION_PARAM_ACCOUNT = 'demo.user@example.test'   # the automation has no default account: it must be given one
                 $env:AMX_ALLOW_TEST_HOSTS = '1'          # local demo only
                 $env:AUTOMATION_PARAM_HEADLESS = 'true'
                 $env:AUTOMATION_PARAM_MODE = 'playwright'   # the runner may have DevTools policies of its own: the demo must use the real browser path
