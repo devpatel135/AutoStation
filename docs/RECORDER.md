@@ -68,7 +68,7 @@ When a run fails, its **evidence** (screenshot, redacted DOM snapshot, context, 
 
 ## 5. Release
 
-Same as any automation (`docs/GETTING_STARTED.md`): complete the manifest entry, merge to `main`, CI builds the dev-ring package + installer, promote dev → pilot → broad through approved MRs/PRs.
+Same as any automation (`docs/GETTING_STARTED.md`): complete the manifest entry, merge to `main`, CI builds the dev-ring package + installer, dev is automatic; pilot and broad follow automatically after a clean soak (see docs/PIPELINES.md, promote.yml); a person can still promote or roll back with the ops-action workflow.
 
 ## Honest limits
 

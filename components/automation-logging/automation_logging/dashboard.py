@@ -586,9 +586,8 @@ def render(report: dict, runs_latest: list[dict], evidence_html: str = "") -> st
                  .replace("<", "\\u003c")
                  .replace(">", "\\u003e"))
     ev = (evidence_html or
-          '<div class="empty">No failure evidence captured in this window.<br>'
-          'Evidence is collected automatically when a run fails with a browser error '
-          '— screenshots and DOM snapshots will appear here.</div>')
+          '<div class="empty">Failure evidence (screenshots, DOM snapshots) is not shown on this public site.<br>'
+          'It stays in the private logs repository; ask an operator if you need it.</div>')
     return _sub(
         _PAGE_TEMPLATE,
         csp=CSP_META,

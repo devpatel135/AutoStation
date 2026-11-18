@@ -29,10 +29,9 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 
-NAME_RX      = re.compile(r"^automation-[a-z0-9]+(?:-[a-z0-9]+)*$")
-VERSION_RX   = re.compile(r"^\d+\.\d+\.\d+$")
-CLASSIFICATIONS = ("public", "internal", "confidential", "restricted")
-RUNTIMES        = ("python", "transactional", "node")
+sys.path.insert(0, str(HERE))
+import project_fields as pf  # noqa: E402  (validation + safe YAML/template values shared with guided_new, new_automation and the Studio)
+from project_fields import CLASSIFICATIONS, NAME_RX, RUNTIMES, VERSION_RX  # noqa: E402,F401
 
 _REQUIRED = {"name", "description", "owner", "classification"}
 _DEFAULTS: dict[str, object] = {
@@ -49,28 +48,12 @@ class ProjectError(ValueError):
 
 
 def _load_yaml(path: Path) -> dict:
+    """project.yaml is a flat 'key: value' file. It is read by the strict parser in project_fields (never PyYAML), so the result does not
+    depend on what is installed and a value can never smuggle in another key."""
     try:
-        import yaml  # noqa: PLC0415
-        with path.open(encoding="utf-8") as fh:
-            data = yaml.safe_load(fh)
-        if not isinstance(data, dict):
-            raise ProjectError("project.yaml must be a YAML mapping at the top level")
-        return data
-    except ImportError:
-        # stdlib fallback for simple flat key: value files (no nesting needed)
-        data: dict = {}
-        for lineno, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-            line = raw.strip()
-            if not line or line.startswith("#"):
-                continue
-            if ":" not in line:
-                raise ProjectError(f"project.yaml line {lineno}: expected 'key: value'")
-            k, _, v = line.partition(":")
-            k, v = k.strip(), v.strip()
-            if (v.startswith('"') and v.endswith('"')) or (v.startswith("'") and v.endswith("'")):
-                v = v[1:-1]
-            data[k] = v
-        return data
+        return pf.parse_flat_yaml(path.read_text(encoding="utf-8"))
+    except pf.FieldError as exc:
+        raise ProjectError(f"project.yaml: {exc}") from None
 
 
 def load_project(path: Path) -> dict:
@@ -87,20 +70,19 @@ def load_project(path: Path) -> dict:
 
     proj: dict = {**_DEFAULTS, **{k: v for k, v in raw.items() if v is not None}}
 
-    if not NAME_RX.match(str(proj["name"])):
-        raise ProjectError("name must match automation-<lowercase-kebab> (e.g. automation-expense-checker)")
-    if "@" not in str(proj["owner"]):
-        raise ProjectError("owner must be an email address or distribution list")
-    if proj["classification"] not in CLASSIFICATIONS:
-        raise ProjectError(f"classification must be one of {CLASSIFICATIONS}")
-    if proj["runtime"] not in RUNTIMES:
-        raise ProjectError(f"runtime must be one of {RUNTIMES}")
-    if not VERSION_RX.match(str(proj["version"])):
-        raise ProjectError("version must be x.y.z (semver, e.g. 0.1.0)")
     try:
-        proj["timeout_s"] = int(proj["timeout_s"])
-    except (TypeError, ValueError):
-        raise ProjectError("timeout_s must be an integer")
+        proj["name"] = pf.check_name(proj["name"])
+        proj["description"] = pf.check_description(proj["description"])
+        proj["owner"] = pf.check_owner(proj["owner"])
+        proj["owner_team"] = pf.check_team(proj["owner_team"])
+        proj["classification"] = pf.check_classification(proj["classification"])
+        proj["runtime"] = pf.check_runtime(proj["runtime"])
+        proj["version"] = pf.check_version(proj["version"])
+        proj["timeout_s"] = pf.check_timeout(proj["timeout_s"])
+        if "register" in proj:
+            proj["register"] = pf.check_register(proj["register"])
+    except pf.FieldError as exc:
+        raise ProjectError(str(exc)) from None
 
     return proj
 
@@ -118,14 +100,7 @@ def scaffold(proj: dict, out: Path) -> list[Path]:
     if not src.is_dir() or not any(src.rglob("*.tmpl")):
         raise ProjectError(f"no template {runtime!r} found (looked in {src})")
 
-    values = {
-        "name":           proj["name"],
-        "description":    str(proj["description"]).replace('"', "'"),
-        "owner":          proj["owner"],
-        "owner_team":     proj["owner_team"],
-        "classification": proj["classification"],
-        "queue_name":     str(proj["name"])[len("automation-"):],
-    }
+    values = pf.template_values(proj)
     return render_tree(src, out, values)
 
 

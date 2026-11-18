@@ -49,8 +49,8 @@ deterministic checks locally and in CI (HIGH findings fail the build).
 ## C. Governance & ownership
 
 * Every automation has an **owner** (a distribution list, not a person) listed in the manifest; alerts route to them.
-* Pilot promotion requires the dev-ring MR approval plus a passing `assist review`; broad requires N pilot runs without
-  `FAILED`/`HUNG` signals (default 5 consecutive scheduled runs) and an approving MR.
-* The **kill-switch** (`status: paused` or `fleet.paused`) is an MR like any other; approval is the audit trail.
+* Pilot promotion requires the dev-ring PR approval plus a passing `assist review`; broad requires N pilot runs without
+  `FAILED`/`HUNG` signals (default 5 consecutive scheduled runs) and an approving PR.
+* The **kill-switch** (`status: paused` or `fleet.paused`) is an PR like any other; approval is the audit trail.
 * Decommissioning: `registry decommission` after `pause`; the installer's uninstall path pushes the final `decommissioned` event.
 * Support model: alert → owner triage SLA (set per data classification) → fix via CI/CD → promote. High escalation frequency on one automation means redesign it, not more exception machinery.

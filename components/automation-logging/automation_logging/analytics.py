@@ -13,13 +13,16 @@ from pathlib import Path
 
 from .common import (SEVERITY_ORDER, error_fingerprint, fingerprint, iso, parse_iso, percentile, read_json, utcnow,
                      wc_manifest)
-from . import reliability
+from . import public, reliability
 from .validate import MAX_BYTES, check_name_matches_record, normalize_timestamps, validate_record
 
 DEFAULTS = {
     "window_days": 30,        # how much archive history is loaded/aggregated
     "lookback_h": 72,         # run-based signals look at runs this recent
-    "silent_after_h": 36,     # SILENT: host heartbeat older than this
+    "silent_after_h": 36,     # SILENT: host heartbeat older than this (per automation: manifest `silent_after_h`)
+    "silent_weekday_h": 72,   # ... for an automation that only runs on weekdays (weekend maintenance window): Friday -> Monday is 72 h
+    "host_cap": 500,          # hosts examined for SILENT (the most silent first); the rest are summarised
+    "type_cap": 200,          # signals kept per type; the overflow becomes ONE summary signal
     "drift_grace_h": 6,       # VERSION_DRIFT: a run this long after a target change must be on the new version
     "trend_days": 14,
     "min_grace_min": 15,      # MISSED grace = max(min_grace_min, 0.25 * baseline)
@@ -262,6 +265,59 @@ def _sig(type_, severity, automation, host, ring, window, detail, first_seen, la
     return s
 
 
+def _weekend_quiet(entry: dict) -> bool:
+    """True for an automation whose schedule has an all-day maintenance window covering Saturday and Sunday (a weekday-only host)."""
+    for w in ((entry.get("schedule") or {}).get("maintenance_windows") or []):
+        if not isinstance(w, dict) or w.get("start") or w.get("end"):
+            continue
+        days = {str(d).lower()[:3] for d in (w.get("days") or [])}
+        if {"sat", "sun"} <= days:
+            return True
+    return False
+
+
+def silent_threshold_h(entries, cfg: dict) -> float:
+    """How long a host may be quiet before SILENT: the LARGEST per-automation allowance among the automations installed on it
+    (manifest ``silent_after_h`` wins; else 72 h for weekday-only automations; else the fleet default). One function, used by the
+    analytics signal and by the operator console, so the two can never disagree."""
+    best = float(cfg.get("silent_after_h", DEFAULTS["silent_after_h"]))
+    out = None
+    for e in entries:
+        e = e or {}
+        v = e.get("silent_after_h")
+        if isinstance(v, (int, float)) and not isinstance(v, bool) and 1 <= v <= 24 * 60:
+            t = float(v)
+        elif _weekend_quiet(e):
+            t = max(best, float(cfg.get("silent_weekday_h", DEFAULTS["silent_weekday_h"])))
+        else:
+            t = best
+        out = t if out is None else max(out, t)
+    return out if out is not None else best
+
+
+def installed_automations(hb: dict, lifecycle, autos: dict) -> list[str]:
+    """Automations a host still has: its last heartbeat's list minus those decommissioned / uninstalled after that heartbeat. A (forged)
+    uninstall can only hide an automation the manifest actually knows."""
+    hb_t = _ts(hb)
+    installed = dict(((hb.get("versions") or {}).get("automations")) or {})
+    for ev in lifecycle:
+        if ev.get("host") == hb.get("host") and ev.get("event") in ("decommissioned", "uninstalled") and ev.get("automation") in autos and _ts(ev) >= hb_t:
+            installed.pop(ev.get("automation"), None)
+    return sorted(installed)
+
+
+def host_silent(names, autos: dict, last_seen: datetime, now: datetime, cfg: dict) -> tuple[bool, float]:
+    """(is it SILENT, threshold in hours). Calendar-aware: weekday-only hosts get 72 h, a manifest ``silent_after_h`` wins, and a host whose
+    every automation is inside a maintenance window right now is not silent - it is expected to be quiet."""
+    entries = [autos.get(n) or {} for n in names]
+    thr = silent_threshold_h(entries, cfg)
+    if not names:
+        return False, thr
+    if all(wc_manifest.in_maintenance(e.get("schedule"), now) for e in entries):
+        return False, thr
+    return now - last_seen > timedelta(hours=thr), thr
+
+
 def compute_signals(data: Data, manifest: dict, now: datetime, cfg: dict, state: dict) -> tuple[list[dict], dict]:
     autos = manifest.get("automations") or {}
     fleet_paused = bool((manifest.get("fleet") or {}).get("paused"))
@@ -293,13 +349,22 @@ def compute_signals(data: Data, manifest: dict, now: datetime, cfg: dict, state:
         latest[(r["automation"], r.get("host"))].append(r)
 
     errors: list[str] = []
+    gone_at: dict[tuple, datetime] = {}      # (host, automation) -> when it was decommissioned / uninstalled there
+    for ev in data.lifecycle:
+        if ev.get("host") and ev.get("automation") and ev.get("event") in ("decommissioned", "uninstalled"):
+            k = (ev["host"], ev["automation"])
+            gone_at[k] = max(gone_at.get(k, _ts(ev)), _ts(ev))
 
     def _latest_signals(name, host, runs):
         entry = autos.get(name) or {}
         owner = entry.get("owner")
         last = runs[-1]
+        if (host, name) in gone_at and gone_at[(host, name)] >= _ts(last):
+            return                       # decommissioned / uninstalled after its last run: nothing left to alert on
         if _ts(last) < lookback:
-            return
+            # a failure does not heal by getting old: it stays open until a newer success, a pause, a decommission or the automation's removal
+            if not (last["status"] in _FAILED and name in autos and not fleet_paused and entry.get("status", "active") != "paused"):
+                return
         ring = last.get("ring")
         base = ((entry.get("schedule") or {}).get("expected_duration_ms") or {})
         if last["status"] in _FAILED:
@@ -317,7 +382,7 @@ def compute_signals(data: Data, manifest: dict, now: datetime, cfg: dict, state:
                                 f"{n} consecutive failed run(s). {cat}: {(err.get('message') or '')[:200]}",
                                 _ts(trailing[-1]), _ts(last), [r["run_id"] for r in reversed(trailing)], owner,
                                 error_category=cat, error_message=(err.get("message") or "")[:300], error_fp=fp,
-                                synopsis=last.get("synopsis"), consecutive=n))
+                                synopsis=last.get("synopsis"), consecutive=n, public_detail=public.public_detail_allowed(entry)))
         elif last["status"] == "hung" or last.get("hung_detected"):
             killed = last["status"] == "hung"
             err = last.get("error") or {}
@@ -327,7 +392,8 @@ def compute_signals(data: Data, manifest: dict, now: datetime, cfg: dict, state:
                                 _ts(last), _ts(last), [last["run_id"]], owner,
                                 error_category=err.get("category") or "SYSTEM_UNAVAILABLE",
                                 error_message=(err.get("message") or "")[:300],
-                                error_fp=error_fingerprint(err.get("category"), err.get("message")), synopsis=last.get("synopsis")))
+                                error_fp=error_fingerprint(err.get("category"), err.get("message")), synopsis=last.get("synopsis"),
+                                public_detail=public.public_detail_allowed(entry)))
         else:
             if base.get("baseline") and last.get("duration_ms") and last["duration_ms"] > base["baseline"] * float(base.get("warn_threshold", 2.0)):
                 signals.append(_sig("SLOW", "medium", name, host, ring, "slow",
@@ -410,6 +476,7 @@ def compute_signals(data: Data, manifest: dict, now: datetime, cfg: dict, state:
             runs = runs_by_auto.get(name, [])
             run_times = [(_ts(r), r.get("slot")) for r in runs]
             slot_ids = {s for s, _ in exp}
+            declared = {s.get("id") for s in ((entry.get("schedule") or {}).get("slots") or []) if isinstance(s, dict)} or slot_ids
             for i, (slot_id, e) in enumerate(exp):
                 if e < start or e > now or now < e + grace:
                     continue
@@ -420,7 +487,9 @@ def compute_signals(data: Data, manifest: dict, now: datetime, cfg: dict, state:
                 # slot's run, not a late one for this slot
                 end = min(nxt - timedelta(minutes=10), e + max(grace * 4, timedelta(hours=cfg.get("late_window_h", 24))))
                 lo = e - timedelta(minutes=10)
-                ran = any(lo <= t < end and (slot == slot_id or slot not in slot_ids) for t, slot in run_times)
+                # a run counts for THIS slot only when it names it; a run without a slot (or with an unknown one) counts only if the
+                # automation has exactly one slot - otherwise any run would hide a missed 09:00 behind the 14:00
+                ran = any(lo <= t < end and (slot == slot_id or (slot not in declared and len(declared) == 1)) for t, slot in run_times)
                 if not ran:
                     missed_by_auto[name].append((slot_id, e))
         except Exception as exc:  # noqa: BLE001
@@ -447,30 +516,27 @@ def compute_signals(data: Data, manifest: dict, now: datetime, cfg: dict, state:
             t = _ts(r)
             if t > last_run_by_host.get(r["host"], t - timedelta(seconds=1)):
                 last_run_by_host[r["host"]] = t
-    gone_by_host: dict[str, list] = defaultdict(list)
-    for ev in data.lifecycle:
-        # a (forged) uninstall can only hide an automation that this manifest actually knows about
-        if ev.get("host") and ev.get("event") in ("decommissioned", "uninstalled") and ev.get("automation") in autos:
-            gone_by_host[ev["host"]].append(ev)
-    silent_after = timedelta(hours=cfg["silent_after_h"])
-    for host, hb in hb_latest.items():
+    hosts_sorted = sorted(hb_latest.items(), key=lambda kv: max(_ts(kv[1]), last_run_by_host.get(kv[0], _ts(kv[1]))))
+    host_overflow = max(0, len(hosts_sorted) - int(cfg.get("host_cap", 500)))
+    for host, hb in hosts_sorted[: int(cfg.get("host_cap", 500))]:        # the most silent first
         try:
             hb_t = _ts(hb)
-            installed = dict(((hb.get("versions") or {}).get("automations")) or {})
-            for ev in gone_by_host.get(host, []):
-                if _ts(ev) >= hb_t:
-                    installed.pop(ev.get("automation"), None)
+            names = installed_automations(hb, data.lifecycle, autos)
             # latest run activity counts as life too (heartbeat may lag behind a spooled run)
             last_seen = max(hb_t, last_run_by_host.get(host, hb_t))
-            if installed and now - last_seen > silent_after:
-                names = sorted(installed)
+            silent, thr = host_silent(names, autos, last_seen, now, cfg)
+            if silent:
                 owners = sorted({(autos.get(n) or {}).get("owner") for n in names if (autos.get(n) or {}).get("owner")})
-                signals.append(_sig("SILENT", "high", names[0] if len(names) == 1 else None, host, hb.get("ring"), "silent",
+                signals.append(_sig("SILENT", "medium", names[0] if len(names) == 1 else None, host, hb.get("ring"), "silent",
                                     f"No heartbeat from {host} for {int((now - last_seen).total_seconds() // 3600)}h "
-                                    f"(threshold {cfg['silent_after_h']}h); hosts {', '.join(names)}.",
+                                    f"(threshold {thr:g}h); hosts {', '.join(names)}.",
                                     last_seen, now, [], owners[0] if owners else None, automations=names))
         except Exception as exc:  # noqa: BLE001
             errors.append(f"silent-host check: {type(exc).__name__}")
+    if host_overflow:
+        signals.append(_sig("SILENT", "low", None, None, None, "overflow",
+                            f"{host_overflow} further host(s) were not checked for silence (cap {int(cfg.get('host_cap', 500))} hosts per run).",
+                            now, now, [], None, overflow=True, suppressed=host_overflow))
 
     # --- observability signals (error budget, flakiness, regressions, remediation, manual steps, machines)
     try:
@@ -488,7 +554,21 @@ def compute_signals(data: Data, manifest: dict, now: datetime, cfg: dict, state:
     else:
         state.pop("signal_errors", None)
     signals.sort(key=lambda s: (SEVERITY_ORDER[s["severity"]], s["first_seen"]))
-    return signals, state
+    cap = int(cfg.get("type_cap", 200))
+    kept: list[dict] = []
+    per_type: dict[str, int] = defaultdict(int)
+    dropped: dict[str, list] = defaultdict(list)
+    for sg in signals:                                # most severe first, so the cap drops the least important
+        if sg.get("overflow") or per_type[sg["type"]] < cap:
+            per_type[sg["type"]] += 1
+            kept.append(sg)
+        else:
+            dropped[sg["type"]].append(sg)
+    for typ, lost in dropped.items():
+        kept.append(_sig(typ, "low", None, None, None, "cap-overflow",
+                         f"{len(lost)} more {typ} signal(s) were not listed individually (cap {cap} per type per run).",
+                         now, now, [], None, overflow=True, suppressed=len(lost), registered=False))
+    return kept, state
 
 
 # ---------------------------------------------------------------------------------------------- report

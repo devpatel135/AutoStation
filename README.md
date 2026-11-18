@@ -1,8 +1,8 @@
 # AutoStation
 
 An unattended-automation platform for locked-down Windows VDI fleets: a **thin per-user runtime** (Task Scheduler +
-self-heal + logging + LLM seam), a **git-native control plane** (GitLab only — no new server), and **governed rollout**
-(dev → pilot → broad rings, MR approval as the gate, kill-switch, rollback).
+self-heal + logging + LLM seam), a **git-native control plane** (GitHub Pages + Releases + Actions - no new server), and **governed rollout**
+(dev → pilot → broad rings, PR approval as the gate, kill-switch, rollback).
 
 > Design rationale: [`docs/assessment.html`](docs/assessment.html) (open in a browser). Contracts between components:
 > [`docs/SPEC.md`](docs/SPEC.md). Start building automations: [`docs/GETTING_STARTED.md`](docs/GETTING_STARTED.md).
@@ -17,8 +17,8 @@ components/
   execution-framework/   Node. Playwright(+Edge) · CDP · MCP server · site adapters · headless HTTP/cert client ·
                          LLM Pattern 3 (selector self-healing) · Pattern 4 (agent loop) · Node SDK mirroring wrapper-core.
   automation-builder/    CI image (internal containeryard), NSIS installer template + generator, DPAPI/Credential-Manager
-                         scripts, signing, deterministic packaging, versioned Jinja2 prompt library, GitLab CI templates.
-  automation-logging/    Write-only ingest (unique-ref push), analytics, compliance signals (MISSED/SILENT/SLOW/HUNG/…),
+                         scripts, signing, deterministic packaging, versioned Jinja2 prompt library, CI templates (GitHub live; GitLab legacy).
+  automation-logging/    Ingest from the private logs repo (GitHub Contents API; legacy: unique-ref push), analytics, compliance signals (MISSED/SILENT/SLOW/HUNG/…),
                          LLM error diagnosis, alerting (Jira/webhook/email/GitLab), triggers, static dashboard.
   automation-registry/   manifest.yaml + schema + operator CLI (promote/pause/rollback/…) + Pages portal:
                          catalog, installers, fleet admin panel (MR/pipeline generator), governance, compatibility.
@@ -28,7 +28,7 @@ tools/                   new_automation.py scaffolder · test_all.py · e2e_demo
 docs/                    SPEC · AUTOMATION_STANDARD · GOVERNANCE · RUNBOOKS · SECURITY · API reference · getting started
 ```
 
-In production each `components/*` directory is its own GitLab project (each carries its own `.gitlab-ci.yml`;
+The live setup is this one GitHub repository. For a self-hosted GitLab each `components/*` directory can still be its own project (each carries its own `.gitlab-ci.yml`;
 `git subtree split --prefix=components/<name>` gives you the history-preserving split).
 
 ## Download the installer (real `.exe`, no admin, nothing to install first)
@@ -44,7 +44,7 @@ dashboards: [`docs/LIVE_LOGGING.md`](docs/LIVE_LOGGING.md).
 
 Unsigned builds trigger Windows SmartScreen ("More info → Run anyway"); compare the SHA-256 first. Install center with per-automation
 pages: https://devpatel135.github.io/AutoStation/install/ . Troubleshoot any machine: `python -m wrapper_core doctor`.
-Replacing UiPath? Start at [`docs/UIPATH_PARITY.md`](docs/UIPATH_PARITY.md) and [`docs/UIPATH_MIGRATION.md`](docs/UIPATH_MIGRATION.md); `python tools/amx.py help` lists every developer/operator command.
+Coming from UiPath? The activity mapping is in [`docs/ACTIVITIES.md`](docs/ACTIVITIES.md); the old migration kit lives on the `archive/uipath-kit` branch. `python tools/amx.py help` lists every developer/operator command.
 
 ## Quick tour (no installs beyond Python)
 
@@ -63,11 +63,11 @@ dashboard + portal, and runs the notifier automation over the resulting `signals
 ## Architecture in one picture
 
 ```
- ┌──────────── GitLab (control plane, no new server) ────────────┐
- │ registry (Pages): catalog · installers · admin · manifest.yaml │◀── MR approval = governance gate
+ ┌──────────── GitHub (control plane, no new server) ────────────┐
+ │ registry (Pages): catalog · installers · admin · manifest.yaml │◀── PR approval = governance gate
  │ logging (CI): ingest → analytics → LLM diagnosis → alerts → Pages dashboard                   │
  └─────────────▲───────────────────────────────▲─────────────────┘
-               │ read-only token                │ write-only push of unique refs
+               │ signed registry (public)       │ fine-grained PAT, private logs repo
  ┌─────────────┴────────── VDI session (per user, %LOCALAPPDATA%\AUTOMAGIX, no admin) ───────────┐
  │ Task Scheduler + Startup maintenance script → wrapper-core                                    │
  │   self-heal · kill-switch · retry · item telemetry · run synopsis · broker ──▶ internal LLM    │
@@ -79,11 +79,11 @@ dashboard + portal, and runs the notifier automation over the resulting `signals
 
 `.github/workflows/`: **ci.yml** (all Python suites on Windows+Linux, Node syntax + tests, end-to-end walkthrough),
 **installer-dev.yml** (manual: builds an unsigned dev-ring NSIS installer on a Windows runner), **pages-demo.yml** (manual:
-publishes the demo dashboard + portal to GitHub Pages). Production pipelines for GitLab live in each component's `.gitlab-ci.yml`.
+publishes the demo dashboard + portal to GitHub Pages). The live pipelines are described in `docs/PIPELINES.md`; the GitLab pipelines in each component's `.gitlab-ci.yml` are the legacy self-hosted path.
 
 ## Status and honesty
 
 See [`docs/SECURITY.md`](docs/SECURITY.md) (*Known gaps*) and [`docs/VERIFY_IN_YOUR_ENVIRONMENT.md`](docs/VERIFY_IN_YOUR_ENVIRONMENT.md).
 In short: CI exercises the Python platform (Windows + Linux, 3.9/3.12), the Node framework tests, the end-to-end walkthrough, and a real NSIS
-build with a silent install/run/uninstall smoke test on a Windows runner. The Dockerfile, GitLab CI files, code signing, a real browser
+build with a silent install/run/uninstall smoke test on a Windows runner. The Dockerfile, the legacy GitLab CI files, code signing, a real browser
 run and your LLM endpoint still need one verification pass in your environment.

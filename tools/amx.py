@@ -9,8 +9,6 @@
     python tools/amx.py test [--only suite ...]                              every test suite
     python tools/amx.py validate [--manifest path]                           validate the registry manifest
     python tools/amx.py promote|rollback|pause|resume|fleet-pause|... --    registry operator commands (a PR on GitHub)
-    python tools/amx.py inventory <uipath-dir> --out inv/                   scan UiPath projects (migration kit)
-    python tools/amx.py migrate-scaffold|parity|migration-dashboard         migration kit
     python tools/amx.py site --out site [--demo]                            build the Pages site
     python tools/amx.py e2e [--out dir]                                     full offline walkthrough
     python tools/amx.py doctor                                              diagnose this machine
@@ -62,10 +60,6 @@ def main(argv: list[str]) -> int:
         "status": lambda: run([py, "-m", "wrapper_core", "status", *rest]),
         "e2e": lambda: run([py, T / "e2e_demo.py", *rest]),
         "site": lambda: run([py, T / "build_site.py", *rest]),
-        "inventory": lambda: run([py, T / "uipath" / "inventory.py", *rest]),
-        "migrate-scaffold": lambda: run([py, T / "uipath" / "scaffold.py", *rest]),
-        "parity": lambda: run([py, T / "uipath" / "parity.py", *rest]),
-        "migration-dashboard": lambda: run([py, T / "uipath" / "dashboard.py", *rest]),
         "studio":  lambda: run([py, "-m", "automation_studio.server", *rest], STUDIO),
     }
     if cmd in REGISTRY_OPS or cmd == "registry":

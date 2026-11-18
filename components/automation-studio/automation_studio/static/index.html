@@ -329,7 +329,7 @@ button:disabled { opacity: .4; cursor: default }
       <div class="card">
         <div class="goal-label">Output directory</div>
         <div class="scaffold-out-row">
-          <input id="out-dir-input" type="text" value="~/autostation-projects" spellcheck="false">
+          <input id="out-dir-input" type="text" value="" placeholder="subfolder under your AutoStation-projects folder (optional)" spellcheck="false">
           <button class="btn-primary" id="btn-scaffold">Scaffold →</button>
         </div>
         <div style="font-size:11px;color:var(--fg3);font-family:var(--mono)">
@@ -361,6 +361,14 @@ button:disabled { opacity: .4; cursor: default }
 const BASE = window.location.origin;
 const WS_BASE = BASE.replace(/^http/, 'ws');
 
+// The server prints a link ending in #token=<secret>. The fragment never reaches the server or any log; keep the token for this tab only.
+let TOKEN = '';
+try {
+  const m = /[#&]token=([A-Za-z0-9_-]+)/.exec(window.location.hash);
+  if (m) { sessionStorage.setItem('studio_token', m[1]); history.replaceState(null, '', window.location.pathname); }
+  TOKEN = sessionStorage.getItem('studio_token') || (m ? m[1] : '');
+} catch (e) { const m2 = /[#&]token=([A-Za-z0-9_-]+)/.exec(window.location.hash); TOKEN = m2 ? m2[1] : ''; }
+
 // ── Step definitions ────────────────────────────────────────────────────────
 const STEPS = [
   { key: 'goal_refinement',  label: 'Goal',          desc: 'Clarify the goal, name the automation, classify data sensitivity' },
@@ -378,16 +386,17 @@ let contractResult = null;
 
 // ── API helpers ─────────────────────────────────────────────────────────────
 async function api(method, path, body) {
-  const opts = { method, headers: { 'Content-Type': 'application/json' } };
+  const opts = { method, headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + TOKEN } };
   if (body !== undefined) opts.body = JSON.stringify(body);
   const r = await fetch(BASE + path, opts);
+  if (r.status === 401) throw new Error('Not authorised: open the exact link the Studio printed in the terminal (it ends in #token=...)');
   if (!r.ok) throw new Error(`API ${method} ${path} → ${r.status}`);
   return r.json();
 }
 
 function runStepWS(stepKey) {
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket(`${WS_BASE}/ws/${sessionId}/${stepKey}`);
+    const ws = new WebSocket(`${WS_BASE}/ws/${sessionId}/${stepKey}`, ['autostation.v1', 'token.' + TOKEN]);
     ws.onmessage = (e) => {
       const msg = JSON.parse(e.data);
       if (msg.type === 'result') resolve(msg.data);
@@ -713,7 +722,7 @@ $('btn-approve').addEventListener('click', () => {
 });
 
 $('btn-scaffold').addEventListener('click', async () => {
-  const outDir = $('out-dir-input').value.trim() || '~/autostation-projects';
+  const outDir = $('out-dir-input').value.trim();
   const errEl = $('scaffold-err');
   const term = $('scaffold-terminal');
   const btn = $('btn-scaffold');
@@ -726,7 +735,7 @@ $('btn-scaffold').addEventListener('click', async () => {
 
   try {
     const r = await api('POST', `/api/sessions/${sessionId}/scaffold`, {
-      out_dir: outDir, no_verify: true,
+      out_dir: outDir, no_verify: false,
     });
     if (r.success) {
       term.textContent = r.output;

@@ -27,8 +27,9 @@ import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-NAME_RX = re.compile(r"^automation-[a-z0-9]+(?:-[a-z0-9]+)*$")
-CLASSIFICATIONS = ("public", "internal", "confidential", "restricted")
+sys.path.insert(0, str(HERE))
+import project_fields as pf  # noqa: E402  (validation + safe template values, shared with scaffold and the Studio)
+from project_fields import CLASSIFICATIONS, NAME_RX  # noqa: E402,F401
 
 
 def render_tree(src: Path, dst: Path, values: dict) -> list[Path]:
@@ -66,10 +67,13 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--no-verify", action="store_true", help="skip running the generated test")
     a = p.parse_args(argv)
 
-    if not NAME_RX.match(a.name):
-        p.error("name must look like automation-some-name (lowercase, digits, hyphens)")
-    if "@" not in a.owner:
-        p.error("--owner must be an email/distribution list address")
+    try:
+        a.name = pf.check_name(a.name)
+        a.description = pf.check_description(a.description)
+        a.owner = pf.check_owner(a.owner)
+        a.owner_team = pf.check_team(a.owner_team)
+    except pf.FieldError as exc:
+        p.error(str(exc))
     template = a.template or a.runtime or "python"
     src = HERE / "templates" / f"automation-{template}"
     if not src.is_dir() or not any(src.rglob("*.tmpl")):
@@ -78,9 +82,8 @@ def main(argv: list[str] | None = None) -> int:
     if out.exists() and any(out.iterdir()):
         p.error(f"{out} already exists and is not empty")
 
-    values = {"name": a.name, "description": a.description.replace('"', "'"), "owner": a.owner,
-              "owner_team": a.owner_team, "classification": a.classification,
-              "queue_name": a.name[len("automation-"):]}
+    values = pf.template_values({"name": a.name, "description": a.description, "owner": a.owner,
+                                 "owner_team": a.owner_team, "classification": a.classification})
     files = render_tree(src, out, values)
     print(f"created {len(files)} files in {out}")
     for f in files:

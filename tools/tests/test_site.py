@@ -174,12 +174,12 @@ def test_installer_sha_from_file_and_from_the_release(tmp_path, monkeypatch):
 # ---- docs ---------------------------------------------------------------------------------------------------------------------
 def test_docs_tab_has_every_doc_with_nav_search_and_rewritten_links(demo_site):
     site = demo_site[0]
-    stems = {p.stem for p in (ROOT / "docs").glob("*.md")} - {"UIPATH_MIGRATION", "UIPATH_PARITY"}   # the UiPath docs are not published on the site
+    stems = {p.stem for p in (ROOT / "docs").glob("*.md")}
     docs = views(site, "docs")
     for stem in stems:
         assert stem in docs, stem
         assert (site / "docs" / f"{stem}.html").exists(), f"old URL docs/{stem}.html must still redirect"
-    assert "UIPATH_MIGRATION" not in docs and not (site / "migration").exists()
+    assert "UIPATH_MIGRATION" not in docs and not (site / "migration").exists()   # the migration kit lives on archive/uipath-kit only
     assert not [k for k in docs if k.startswith(("components-.", "components-_"))], "cache folders must not become docs"
     assert (site / "docs" / "assessment.html").exists() and "assessment" in docs and "<iframe" in docs["assessment"]
     gs = docs["GETTING_STARTED"]
@@ -664,3 +664,32 @@ def test_fleet_pulls_in_no_external_fonts_and_no_second_theme_handler(demo_site)
     js = (site / "assets" / "views.js").read_text(encoding="utf-8")
     assert js.count("getElementById('theme-toggle')") == 0                                   # one theme handler (the shell's), not two that cancel out
     assert "fonts.googleapis" not in js
+
+
+# ---- public view: nothing private reaches the site --------------------------------------------------------------------------------
+def test_public_site_has_no_raw_hosts_evidence_params_or_tracebacks(tmp_path):
+    from automation_logging import sample
+    data = tmp_path / "live"
+    sample.write(data, None, 3, 7)
+    arch = data / "archive"
+    raw_hosts, markers = set(), set()
+    for f in (arch / "run").glob("*/*/*/*/*.json"):
+        rec = json.loads(f.read_text(encoding="utf-8"))
+        raw_hosts.add(rec["host"])
+        if isinstance(rec.get("error"), dict) and rec["error"].get("message"):
+            markers.add(rec["error"]["message"][:40])
+    ev = arch / "evidence" / "automation-invoice-router" / "2026" / "01" / "01"
+    ev.mkdir(parents=True)
+    (ev / "e.json").write_text(json.dumps({"kind": "evidence", "files": []}), encoding="utf-8")
+    site = tmp_path / "site"
+    build_site.build(site, ROOT, live_data=data)
+    assert check_site.check_site(site) == []
+    blob = "\n".join(p.read_text(encoding="utf-8", errors="replace") for p in site.rglob("*")
+                     if p.is_file() and p.suffix in (".html", ".json", ".prom", ".js", ".txt") and "registry" not in p.relative_to(site).parts[:1]
+                     and "docs" not in p.relative_to(site).parts[:1] and p.name not in ("docs.json", "search-index.json"))
+    for h in raw_hosts:
+        assert h.lower() not in blob.lower(), h
+    assert not list(site.rglob("evidence")) and "machine-" in blob
+    assert "Traceback (most recent call last)" not in blob and '"params": {"' not in blob
+    for m in markers:
+        assert m not in blob, m

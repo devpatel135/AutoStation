@@ -1,3 +1,0 @@
-Name,Folder,MaxRetries,Description
-InvoiceQueue,Shared/Finance,3,SYNTHETIC invoices waiting for validation
-ExceptionsQueue,Shared/Finance,0,SYNTHETIC invoices needing a human

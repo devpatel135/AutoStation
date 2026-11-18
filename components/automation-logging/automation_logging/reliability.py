@@ -41,6 +41,8 @@ REMEDIATION_OUTCOMES = ("fixed", "not_fixed", "skipped", "escalated", "recommend
 DEFAULTS = {
     "slo_target": 0.95,          # share of counted runs that must be ok
     "slo_window_days": 30,
+    "window_days": 30,           # how much history the caller actually loaded: an SLO window can never be longer than this
+    "burn_fast_min_expected": 3,  # the fast-burn window must span at least this many EXPECTED runs (a daily automation gets 72 h, not 24 h)
     "fast_burn": 10.0,           # burn rate over the last 24 h that raises ERROR_BUDGET_BURN (high)
     "slow_burn": 2.0,            # burn rate over the last 7 d (with < 50 % budget left) that raises it (medium)
     "burn_min_runs": 3,          # never alert on fewer runs than this in the window
@@ -135,7 +137,49 @@ def slo_for(entry: dict | None, cfg: dict) -> dict:
     days = _num(s.get("window_days"))
     if days is None or not (1 <= days <= 365):
         days = float(cfg.get("slo_window_days", DEFAULTS["slo_window_days"]))
-    return {"target": round(min(max(target, 0.5), 0.99999), 5), "window_days": int(days)}
+    out = {"target": round(min(max(target, 0.5), 0.99999), 5), "window_days": int(days)}
+    loaded = _num(cfg.get("window_days"))
+    if loaded is not None and loaded >= 1 and days > loaded:   # asking for 90 d of a 30 d archive would silently report a 30 d number as 90 d
+        out["requested_window_days"] = int(days)
+        out["window_days"] = int(loaded)
+    return out
+
+
+def runs_per_day(entry: dict | None, runs=None) -> float | None:
+    """Expected runs per day from the manifest schedule (daily 1, weekly 1/7, hourly 24, every N minutes); else from the observed cadence."""
+    total = 0.0
+    for sl in (((entry or {}).get("schedule") or {}).get("slots") or []):
+        if not isinstance(sl, dict) or sl.get("type") == "poll":
+            continue
+        t = str(sl.get("type") or "daily").lower()
+        mins = _num(sl.get("every_minutes") or sl.get("interval_minutes"))
+        if mins and mins > 0:
+            total += 1440.0 / mins
+        elif t == "hourly":
+            total += 24.0
+        elif t == "weekly":
+            total += max(1, len(sl.get("days") or [1])) / 7.0
+        elif t == "monthly":
+            total += 1 / 30.0
+        else:
+            total += 1.0
+    if total > 0:
+        return total
+    ts = sorted(_t(r) for r in series(runs or []))
+    if len(ts) >= 4:
+        gaps = sorted((b - a).total_seconds() for a, b in zip(ts, ts[1:]) if b > a)
+        if gaps:
+            return 86400.0 / max(60.0, gaps[len(gaps) // 2])
+    return None
+
+
+def fast_window_h(entry: dict | None, runs, c: dict) -> float:
+    """The fast-burn window: 24 h, or longer when the automation runs so rarely that 24 h cannot hold ``burn_fast_min_expected`` runs."""
+    rpd = runs_per_day(entry, runs)
+    if not rpd:
+        return 24.0
+    need = float(c.get("burn_fast_min_expected", 3)) / rpd * 24.0
+    return float(min(max(24.0, round(need)), 24 * 14))
 
 
 # ------------------------------------------------------------------------------------------------------- budget / burn
@@ -185,9 +229,12 @@ def episodes(runs) -> list[dict]:
     return sorted(out, key=lambda e: e["start"])
 
 
-def mttr_mtbf(eps: list[dict]) -> dict:
-    """MTTR / MTBF in seconds (None when there is nothing to average)."""
+def mttr_mtbf(eps: list[dict], now: datetime | None = None) -> dict:
+    """MTTR / MTBF in seconds (None when there is nothing to average). MTTR is the mean over CLOSED episodes (``mttr_n`` of them); an OPEN
+    episode is not averaged in (it has not recovered) but is reported with how long it has been open (``open_for_s``), so one
+    automation that has been down for a week no longer reads as 'MTTR 0'."""
     rec = [(e["end"] - e["start"]).total_seconds() for e in eps if e["end"] is not None]
+    open_for = sorted(((now - e["start"]).total_seconds() for e in eps if e["end"] is None), reverse=True) if now else []
     by: dict = defaultdict(list)
     for e in eps:
         by[(e["automation"], e["host"])].append(e)
@@ -197,8 +244,9 @@ def mttr_mtbf(eps: list[dict]) -> dict:
         for a, b in zip(lst, lst[1:]):
             if a["end"] is not None:
                 gaps.append((b["start"] - a["end"]).total_seconds())
-    return {"episodes": len(eps), "open": sum(1 for e in eps if e["end"] is None), "mttr_s": _round(sum(rec) / len(rec), 1) if rec else None,
-            "mtbf_s": _round(sum(gaps) / len(gaps), 1) if gaps else None}
+    return {"episodes": len(eps), "open": sum(1 for e in eps if e["end"] is None), "closed": len(rec), "mttr_n": len(rec),
+            "mttr_s": _round(sum(rec) / len(rec), 1) if rec else None, "mtbf_s": _round(sum(gaps) / len(gaps), 1) if gaps else None,
+            "open_for_s": _round(open_for[0], 1) if open_for else None}
 
 
 def streaks(runs) -> dict:
@@ -509,10 +557,13 @@ def automation_reliability(name: str, entry: dict | None, runs, now: datetime, c
     fl = flakiness(mine, c["flaky_window"], c["flaky_min_runs"], c["flaky_flips"], c["flaky_score"])
     anomalies = duration_anomalies(mine, c["baseline_n"], c["baseline_min"], c["anomaly_z"], c["anomaly_ratio"])
     budget = error_budget(mine, now, slo["target"], slo["window_days"])
-    fast = burn_rate(mine, now, 24, slo["target"], c["burn_min_runs"])
-    slow = burn_rate(mine, now, 24 * 7, slo["target"], c["burn_min_runs"])
+    fast_h = fast_window_h(entry, mine, c)
+    slow_h = max(24 * 7, fast_h * 2)
+    fast = burn_rate(mine, now, fast_h, slo["target"], c["burn_min_runs"])
+    slow = burn_rate(mine, now, slow_h, slo["target"], c["burn_min_runs"])
     ok_durs = [r["duration_ms"] for r in series(mine) if r.get("status") in OK and _num(r.get("duration_ms")) is not None]
-    out = {"slo": slo, "budget": budget, "burn_fast": fast, "burn_slow": slow, "episodes": mttr_mtbf(eps), "streaks": streaks(mine),
+    out = {"slo": slo, "budget": budget, "burn_fast": fast, "burn_slow": slow, "burn_fast_hours": fast_h, "burn_slow_hours": slow_h,
+           "episodes": mttr_mtbf(eps, now), "streaks": streaks(mine),
            "flakiness": fl, "duration": {"p50": percentile(ok_durs, 50), "p95": percentile(ok_durs, 95), "p99": percentile(ok_durs, 99),
                                           "trend": duration_trend(mine, now), "anomalies": anomalies[-5:]},
            "on_time": on_time(expected, mine, grace, now) if expected is not None and grace is not None else None}
@@ -523,8 +574,9 @@ def fleet_reliability(per_auto: dict, runs, now: datetime) -> dict:
     rs = series(runs)
     n = len(rs)
     f = sum(1 for r in rs if is_fail(r))
-    eps = mttr_mtbf(episodes(runs))
+    eps = mttr_mtbf(episodes(runs), now)
     return {"runs": n, "failed": f, "success_rate": _round((n - f) / n) if n else None, "mttr_s": eps["mttr_s"], "mtbf_s": eps["mtbf_s"],
+            "mttr_n": eps["mttr_n"], "episodes": eps["episodes"], "open_for_s": eps["open_for_s"],
             "open_episodes": eps["open"], "flaky": sorted(a for a, v in per_auto.items() if v["flakiness"]["flaky"]),
             "budget_exhausted": sorted(a for a, v in per_auto.items() if v["budget"]["remaining"] is not None and v["budget"]["remaining"] < 0)}
 
@@ -551,17 +603,19 @@ def extra_signals(data, manifest: dict, now: datetime, cfg: dict, make, expected
         ring = last.get("ring")
         slo = slo_for(entry, c)
         bud = error_budget(mine, now, slo["target"], slo["window_days"])
-        fast = burn_rate(mine, now, 24, slo["target"], c["burn_min_runs"])
-        slow = burn_rate(mine, now, 24 * 7, slo["target"], c["burn_min_runs"])
-        fails24 = [r for r in mine if is_fail(r) and _t(r) >= now - timedelta(hours=24)]
-        fails7 = [r for r in mine if is_fail(r) and _t(r) >= now - timedelta(days=7)]
+        fast_h = fast_window_h(entry, mine, c)
+        slow_h = max(24 * 7, fast_h * 2)
+        fast = burn_rate(mine, now, fast_h, slo["target"], c["burn_min_runs"])
+        slow = burn_rate(mine, now, slow_h, slo["target"], c["burn_min_runs"])
+        fails24 = [r for r in mine if is_fail(r) and _t(r) >= now - timedelta(hours=fast_h)]
+        fails7 = [r for r in mine if is_fail(r) and _t(r) >= now - timedelta(hours=slow_h)]
         window = None
         if fast is not None and fast >= c["fast_burn"] and len(fails24) >= 2:
             window, sev, ev = "fast", "high", fails24
-            why = f"burning the error budget {fast:.1f}x too fast over 24 h"
+            why = f"burning the error budget {fast:.1f}x too fast over {fast_h:g} h"
         elif slow is not None and slow >= c["slow_burn"] and len(fails7) >= 2 and (bud["remaining"] is None or bud["remaining"] < 0.5):
             window, sev, ev = "slow", "medium", fails7
-            why = f"burning the error budget {slow:.1f}x too fast over 7 d"
+            why = f"burning the error budget {slow:.1f}x too fast over {slow_h / 24:g} d"
         elif bud["remaining"] is not None and bud["remaining"] < 0 and bud["failed"] >= 2 and bud["runs"] >= c["burn_min_runs"]:
             window, sev, ev = "exhausted", "medium", [r for r in mine if is_fail(r)][-5:]
             why = "error budget for the window is used up"

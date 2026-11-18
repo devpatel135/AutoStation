@@ -17,9 +17,8 @@ Source of truth for *why*: `docs/assessment.html` (the architecture assessment).
 | `components/automations/*` | One payload per automation | Python / Node | Endpoint |
 | `tools/` | Scaffolder, repo-wide helpers | Python | Dev machine |
 
-In production each directory is its own GitLab project (as in the assessment). The monorepo layout makes
-the platform buildable and testable as one unit; each component carries its own `.gitlab-ci.yml` so it can be
-split out with `git subtree split` without changes.
+The live setup is this one GitHub repository (Pages + Releases + Actions, see `docs/PIPELINES.md`). The original assessment assumed one GitLab project per
+directory; each component still carries a `.gitlab-ci.yml` so it can be split out with `git subtree split` for a self-hosted GitLab (legacy path).
 
 ## 2. Endpoint layout
 
@@ -245,7 +244,7 @@ Common fields: `ts` (ISO-8601 UTC), `event` (string), `data` (object), `sensitiv
 | `phase` | `name` (`self_heal`,`execute`,`log`), `status` |
 
 Redaction: before ANY event content is placed into an LLM prompt, every key named in `sensitive_keys` (and every value of key `sensitive=true` passed to
-`log_event`/`log_item`) is replaced with `"[REDACTED]"`. Sensitive fields are still written to the raw run log (which is access-controlled by GitLab).
+`log_event`/`log_item`) is replaced with `"[REDACTED]"`. Sensitive fields are still written to the raw run log (which sits in the private logs repo, readable only by whoever holds its access; the public site and issues never carry it).
 
 ### 6.2 Run log (`<run_id>.json`)
 
@@ -281,14 +280,20 @@ Redaction: before ANY event content is placed into an LLM prompt, every key name
 
 wrapper-core writes every artefact through a `LogTransport` (`wrapper_core.logging.transport`):
 
-* `git-ssh` (production): the shared key is write-only **by construction** — the endpoint never fetches. For each artefact it creates a throwaway
-  repo, commits one file, and pushes the orphan commit to a **new unique ref** `refs/heads/ingest/<ring>/<kind>/<automation-or-host>/<id>`.
-  GitLab push rules on `automation-logging` allow only `ingest/*` (protected, no force, no delete). Compromise ⇒ attacker can only create junk refs.
-  Artefact kinds: `run`, `heartbeat`, `lifecycle`. Path inside the commit: `<kind>/<name>/<id>.json` (`name` = automation for run/lifecycle, host for heartbeat).
-* `dir` (dev / ring `dev` / tests): writes `<remote>/ingest/<ring>/<kind>/<name>/<id>.json` — same relative layout as git-ssh.
+* `github-api` (production, the live setup): each artefact is ONE JSON file written with the GitHub Contents API to
+  `ingest/<ring>/<kind>/<automation-or-host>/<id>.json` in the **private** logs repo, using a fine-grained personal access token that the connected
+  installer embeds (DPAPI-protected on the endpoint; scoped to that single repo, Contents read **and** write). It is **not** write-only: anyone who
+  extracts the token can read and write that repo. The limits are the token's scope (one private repo), aggregates-only public output (hashed machine
+  ids, no evidence/params/results/free-text errors; see `docs/LIVE_LOGGING.md`), endpoints that pause sending on 401/403, rotation by shipping a new
+  installer, and ingestion that never trusts pushed content (path/content must agree, symlinks skipped, items validated one by one; see
+  `docs/SECURITY.md`). Artefact kinds: `run`, `heartbeat`, `lifecycle`. Path: `<kind>/<name>/<id>.json` (`name` = automation for run/lifecycle, host for heartbeat).
+* `git-ssh` (legacy, for a self-hosted GitLab): the shared key is write-only **by construction** - the endpoint never fetches. For each artefact it
+  creates a throwaway repo, commits one file and pushes the orphan commit to a **new unique ref** `refs/heads/ingest/<ring>/<kind>/<automation-or-host>/<id>`;
+  push rules on the logging project allow only `ingest/*` (protected, no force, no delete), so a compromised key can only create junk refs.
+* `dir` (dev / ring `dev` / tests): writes `<remote>/ingest/<ring>/<kind>/<name>/<id>.json` — same relative layout as the other transports.
 * Failures never fail the run: the artefact is spooled in `spool\` and flushed at the next run/login.
 
-`automation-logging` CI (`ingest`) fetches `ingest/*` refs with its read token, archives each file under `archive/<kind>/<name>/YYYY/MM/DD/<id>.json`
+On the legacy `git-ssh` path the `automation-logging` CI (`ingest`) fetches `ingest/*` refs with its read token, archives each file under `archive/<kind>/<name>/YYYY/MM/DD/<id>.json`
 in the logging repo's `main` (or a workspace dir), then deletes the processed refs. Analytics always operates on a **directory of archived JSON** so it is
 trivially testable.
 

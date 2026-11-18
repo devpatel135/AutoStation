@@ -28,7 +28,7 @@ question: *which assessment item is implemented where?*
 | 7 | Credential hardening | `secrets.py` (DPAPI, Credential Manager), installer `protect-secret.ps1`/`set-credential.ps1`, signing in builder | built; DPAPI/credman tested on Windows; signing logic tested, real signing needs your PKI cert |
 | 8 | Dev ring | `rings: [dev, pilot, broad]`, ring-order validation, ring in transport path/heartbeat, `wrapper_core dev` offline loop | built + tested; dev-specific logging remote is configuration (runbook §7) |
 | 9 | Dynamic config assets | manifest `assets` → `selfheal` → `config/assets.json` → `wrapper.assets()` | built + tested |
-| 10 | Fleet admin panel | `automation-registry` portal `admin.html` (generates MR deep links / commands / `ops-action` pipeline variables — no server) | built + tested (generation + XSS); not exercised against live GitLab |
+| 10 | Fleet admin panel | `automation-registry` portal `admin.html` (generates PR deep links (GitHub mode, the live setup; MR links in the legacy GitLab mode) / commands / `ops-action` workflow inputs — no server) | built + tested (generation + XSS) |
 | 11 | Scaffolding | `tools/new_automation.py` + templates; CI templates in builder | built + tested |
 | 12 | LLM Pattern 1 | `automation-invoice-router` (grounded extraction), `automation-hello-world` | built + tested |
 | 13 | Automation catalog | manifest `catalog:` block → portal storefront/detail pages | built + tested |

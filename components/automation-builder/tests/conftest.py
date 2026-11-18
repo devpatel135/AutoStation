@@ -18,6 +18,17 @@ for p in (ROOT / "scripts", ROOT / "prompts", WRAPPER_CORE):
 # (a Task Scheduler / installer launch has a clean environment, so production is unaffected).
 os.environ.pop("PSModulePath", None)
 
+# hermetic guard (fake schtasks, redirected per-user folders, real AUTOMAGIX/Startup folders must stay untouched): tools/tests/_hermetic.py
+import importlib.util as _ilu  # noqa: E402  (loaded by path: tools/tests must not join sys.path, its test_*.py names would shadow ours)
+
+_spec = _ilu.spec_from_file_location("_amx_hermetic", Path(__file__).resolve().parents[3] / "tools" / "tests" / "_hermetic.py")
+_mod = _ilu.module_from_spec(_spec)
+sys.modules["_amx_hermetic"] = _mod
+_spec.loader.exec_module(_mod)
+hermetic_fixture = _mod.hermetic_fixture
+
+_hermetic = hermetic_fixture()
+
 
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch):

@@ -11,6 +11,17 @@ sys.path.insert(0, str(HERE.parent))                          # automation_loggi
 sys.path.insert(0, str(HERE.parent.parent / "wrapper-core"))  # shared wrapper_core
 sys.path.insert(0, str(HERE))                                 # factories
 
+# hermetic guard (fake schtasks, redirected per-user folders, real AUTOMAGIX/Startup folders must stay untouched): tools/tests/_hermetic.py
+import importlib.util as _ilu  # noqa: E402  (loaded by path: tools/tests must not join sys.path, its test_*.py names would shadow ours)
+
+_spec = _ilu.spec_from_file_location("_amx_hermetic", Path(__file__).resolve().parents[3] / "tools" / "tests" / "_hermetic.py")
+_mod = _ilu.module_from_spec(_spec)
+sys.modules["_amx_hermetic"] = _mod
+_spec.loader.exec_module(_mod)
+hermetic_fixture = _mod.hermetic_fixture
+
+_hermetic = hermetic_fixture()
+
 
 @pytest.fixture(autouse=True)
 def _isolate(tmp_path, monkeypatch):

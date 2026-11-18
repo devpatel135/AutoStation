@@ -2,7 +2,7 @@
 
 > **Update:** GitHub Actions now verifies the Python suites (Windows + Linux, Python 3.9 and 3.12), the Node syntax + tests, the
 > end-to-end walkthrough, and — on a real Windows runner — the NSIS build plus a **silent per-user install -> scheduled task ->
-> first run logged -> uninstall** smoke test (`installer-dev.yml`). What remains for you is what CI cannot reach: your GitLab,
+> first run logged -> uninstall** smoke test (`installer-dev.yml`). What remains for you is what CI cannot reach: a self-hosted GitLab (only if you use the legacy path),
 > your containeryard Docker image, your PKI signing cert, a real browser/Edge run of the Playwright example, your LLM
 > endpoint, and a standard-user (non-admin) VM install. Sections below list those checks.
 
@@ -53,11 +53,14 @@ makensis out/*.nsi                                                              
 python scripts/validate_nsi.py out/*.nsi
 ```
 Good: `makensis` exits 0 with no warnings about unresolved tokens. Then on a **throwaway Windows 10/11 VM, standard user (not admin)**:
-run the installer; confirm — files under `%LOCALAPPDATA%\AUTOMAGIX`; `secrets\logging_key.dpapi` exists and no plaintext key
+run the installer; confirm — files under `%LOCALAPPDATA%\AUTOMAGIX`; `secrets\logging_token.dpapi` (github-api) or `secrets\logging_key.dpapi` (legacy git-ssh) exists and no plaintext secret
 anywhere; `schtasks /Query /TN "AUTOMAGIX\<automation>-<slot>"`; `Startup\AUTOMAGIX-maintain.cmd`; first run logged;
 **uninstall** removes tasks/payload/blob/credentials and ref-counts shared components. Re-run the installer: it must be a no-op.
 
-## 4. Logging repo and the write-only key (15 min)
+## 4. Logging repo and the logging credential (15 min)
+
+> Live setup (GitHub): follow `docs/LIVE_LOGGING.md` - a private logs repo plus a fine-grained PAT (Contents read and write, that repo only; it is **not** write-only).
+> Verify: run a connected installer, run an automation once, and see `ingest/<ring>/run/<automation>/<run_id>.json` appear in the logs repo. The steps below are the legacy self-hosted GitLab `git-ssh` check.
 
 1. Create the `automation-logging` project; add a **deploy key** with write access; set Push Rules to allow only branches matching
    `^ingest/` (see `components/automation-logging/README.md`), protect `ingest/*` (no force-push, no delete).

@@ -24,7 +24,7 @@ from site_common import SiteConfig, esc, guarded, layout, write
 MAX_JOBS = 2000          # newest runs shown on the Jobs page (the page says so)
 MAX_EVENTS = 40          # events kept per run in the detail file
 STR_MAX = 300
-SILENT_AFTER_H = 36      # same default as analytics (silent_after_h)
+SILENT_AFTER_H = 36      # display default only; the SILENT decision itself is analytics.host_silent (calendar-aware, per automation)
 STALE_AFTER_H = 12
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _CTRL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
@@ -235,6 +235,9 @@ def machine_rows(data, manifest: dict, now) -> list[dict]:
         h = _s(r.get("host"), 100)
         if h and (h not in last_run or str(r.get("started_at")) > str(last_run[h].get("started_at"))):
             last_run[h] = r
+    from automation_logging import analytics   # ONE silence rule for the console and the signals
+    autos_m = (manifest or {}).get("automations") or {}
+    lifecycle = getattr(data, "lifecycle", None) or []
     rows = []
     for host in sorted(set(hosts) | set(last_run)):
         hb, run = hosts.get(host), last_run.get(host)
@@ -251,9 +254,19 @@ def machine_rows(data, manifest: dict, now) -> list[dict]:
             if ver and target and str(ver) != str(target):
                 drift.append(f"{_s(a, 80)} {_s(ver, 40)} (ring {ring}: {target})")
         age_h = (now - seen).total_seconds() / 3600 if seen else None
-        fresh = "unknown" if age_h is None else ("ok" if age_h <= STALE_AFTER_H else ("medium" if age_h <= SILENT_AFTER_H else "failing"))
+        silent, thr = False, float(SILENT_AFTER_H)
+        if hb is not None and seen:
+            try:
+                last_run_t = _ts((run or {}).get("started_at"))
+                names = analytics.installed_automations(hb, lifecycle, autos_m)
+                silent, thr = analytics.host_silent(names, autos_m, max(seen, last_run_t or seen), now, analytics.DEFAULTS)
+            except Exception:  # noqa: BLE001 - a malformed heartbeat must not break the page
+                silent = False
+        elif age_h is None:
+            silent = True
+        fresh = "unknown" if age_h is None else ("ok" if age_h <= STALE_AFTER_H else ("failing" if silent else "medium"))
         signals = []
-        if age_h is None or age_h > SILENT_AFTER_H:
+        if silent:
             signals.append("SILENT")
         if drift:
             signals.append("VERSION_DRIFT")
@@ -280,7 +293,7 @@ def build_machines(out: Path, cfg: SiteConfig, data, manifest: dict, now) -> lis
                      (f'{_pill(_s(run.get("status"), 30), _kind_for_status(_s(run.get("status"), 30)))} {esc(_age(_ts(run.get("started_at")), now))}'
                       if run else "-"),
                      "".join(_pill(s, "failing" if s != "VERSION_DRIFT" else "medium") + " " for s in m["signals"]) or _pill("healthy", "ok")])
-    body = (f'<p class="sub">Heartbeat freshness: fresh &le; {STALE_AFTER_H} h, aging &le; {SILENT_AFTER_H} h, silent beyond that. Versions are compared with the '
+    body = (f'<p class="sub">Heartbeat freshness: fresh &le; {STALE_AFTER_H} h, aging until the silence threshold of the host (36 h; 72 h for weekday-only automations; manifest <code>silent_after_h</code> overrides), silent beyond that. Versions are compared with the '
             "manifest target for the machine's ring. Machines appear only after they have reported at least once.</p>" +
             _table(["Machine", "Ring", "Last seen", "Phase", "Installed", "Versions vs ring target", "Last run", "Signals"], rows))
     return [_page("Machines", "machines", body, cfg, out, "machines/index.html")]

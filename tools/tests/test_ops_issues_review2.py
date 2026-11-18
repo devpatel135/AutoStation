@@ -70,8 +70,8 @@ def test_signals_for_unregistered_automations_never_open_issues():
 
 @pytest.mark.parametrize("host", ["evil host\n# x", "<script>", "x" * 200, "a b", ""])
 def test_hostile_hosts_are_dropped_from_signals(host):
-    assert oi.normalize_signal(dict(sig("abc12345"), host=host))["host"] is None
-    assert oi.normalize_signal(dict(sig("abc12345"), host="VDI-01.corp"))["host"] == "VDI-01.corp"
+    assert oi.normalize_signal(dict(sig("abc12345"), host=host))["machine"] is None
+    assert oi.normalize_signal(dict(sig("abc12345"), host="VDI-01.corp"))["machine"].startswith("machine-")
 
 
 def test_open_issue_cap_rolls_the_overflow_into_one_digest_issue():

@@ -137,7 +137,7 @@ def build_reliability(out: Path, cfg: SiteConfig, c: dict, data, now: datetime) 
     tiles = ('<div class="tiles">' + _tile(_pct(fleet["success_rate"]), "Fleet success rate") + _tile(f"{meeting}/{len(per)}", "Automations within error budget")
              + _tile(len(fleet["budget_exhausted"]), "Budgets exhausted", "red" if fleet["budget_exhausted"] else "")
              + _tile(fleet["open_episodes"], "Open failure episodes", "orange" if fleet["open_episodes"] else "")
-             + _tile(_secs(fleet["mttr_s"]), "MTTR (mean time to recover)") + _tile(_secs(fleet["mtbf_s"]), "MTBF (mean time between failures)")
+             + _tile(_secs(fleet["mttr_s"]), f"MTTR (mean over {fleet.get('mttr_n', 0)} closed of {fleet.get('episodes', 0)} episodes" + (f"; longest open {_secs(fleet['open_for_s'])}" if fleet.get("open_for_s") else "") + ")") + _tile(_secs(fleet["mtbf_s"]), "MTBF (mean time between failures)")
              + _tile(len(fleet["flaky"]), "Flaky automations", "yellow" if fleet["flaky"] else "") + "</div>")
     rows = []
     for name in sorted(per):
@@ -148,15 +148,15 @@ def build_reliability(out: Path, cfg: SiteConfig, c: dict, data, now: datetime) 
         rem = b["remaining"]
         rem_cell = "-" if rem is None else _pill_budget(rem)
         p95s = [t["p95"] for t in du["trend"]]
-        rows.append([esc(name), so._pill(state, kind), f"{p['slo']['target'] * 100:.2f}% / {p['slo']['window_days']} d",
+        rows.append([esc(name), so._pill(state, kind), f"{p['slo']['target'] * 100:.2f}% / {p['slo']['window_days']} d" + (f" (asked {p['slo']['requested_window_days']} d; only {p['slo']['window_days']} d loaded)" if p['slo'].get('requested_window_days') else ""),
                      f"{_pct(b['success_rate'])} ({b['failed']}/{b['runs']})", rem_cell,
                      esc("-" if p["burn_fast"] is None else f"{p['burn_fast']:.1f}x") + " / " + esc("-" if p["burn_slow"] is None else f"{p['burn_slow']:.1f}x"),
-                     esc(_secs(ep["mttr_s"])), esc(_secs(ep["mtbf_s"])), f"{st['current_failures']} / {st['max_failures']}",
+                     esc(_secs(ep["mttr_s"]) + f" (n={ep.get('mttr_n', 0)} of {ep.get('episodes', 0)} episodes" + (f"; open {_secs(ep['open_for_s'])}" if ep.get("open_for_s") else "") + ")"), esc(_secs(ep["mtbf_s"])), f"{st['current_failures']} / {st['max_failures']}",
                      so._pill("flaky", "medium") + f" {fl['flips']} flips" if fl["flaky"] else esc("-" if fl["score"] is None else f"score {fl['score']}"),
                      esc(so._dur(du["p50"])), esc(so._dur(du["p95"])), esc(so._dur(du["p99"])),
                      esc("-" if not ot or ot["rate"] is None else f"{ot['rate'] * 100:.0f}% ({ot['on_time']}/{ot['expected']})"),
                      _spark(p95s, kind="ok")])
-    table = so._table(["Automation", "State", "SLO / window", "Success (window)", "Budget left", "Burn 24h / 7d", "MTTR", "MTBF", "Fail streak now / max",
+    table = so._table(["Automation", "State", "SLO / window", "Success (window)", "Budget left", "Burn fast / slow window (24 h / 7 d, longer for rare schedules)", "MTTR", "MTBF", "Fail streak now / max",
                        "Flakiness", "p50", "p95", "p99", "On time", "p95 trend (14 d)"], rows, "No automations yet.")
     an_rows = []
     for name in sorted(per):

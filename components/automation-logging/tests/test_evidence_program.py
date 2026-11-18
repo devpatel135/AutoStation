@@ -131,7 +131,9 @@ def test_no_evidence_no_section(tmp_path):
     data = analytics.load_archive(arch, NOW)
     report, _ = analytics.compute(data, manifest(), NOW)
     dashboard.build_site(report, data, tmp_path / "pub")
-    assert "Failure evidence" not in (tmp_path / "pub" / "index.html").read_text(encoding="utf-8")
+    html = (tmp_path / "pub" / "index.html").read_text(encoding="utf-8")
+    assert "<h2>Failure evidence</h2>" not in html
+    assert "stays in the private logs repository" in html
 
 
 # ---- programme dashboard -------------------------------------------------------------------------------------------

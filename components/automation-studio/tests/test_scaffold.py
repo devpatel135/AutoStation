@@ -240,3 +240,53 @@ def test_scaffold_extra_fields_in_project_yaml_stripped(tmp_path):
 
     if written_content:
         assert "automation_yaml_additions" not in written_content[0]
+
+
+# ── hostile contracts ─────────────────────────────────────────────────────────
+
+def test_contract_cannot_set_register(tmp_path):
+    seen = {}
+
+    def fake_run(cmd, **kw):
+        seen["yaml"] = Path(cmd[2]).read_text(encoding="utf-8")
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    with patch("subprocess.run", side_effect=fake_run):
+        scaffold_from_contract({**MINIMAL_YAML, "register": "../../evil.yaml"}, tmp_path)
+    assert "register" not in seen["yaml"]           # only the explicit register= argument can request registration
+    with patch("subprocess.run", side_effect=fake_run):
+        scaffold_from_contract(MINIMAL_YAML, tmp_path, register="components/automation-registry/manifest.yaml")
+    assert "register: components/automation-registry/manifest.yaml" in seen["yaml"]
+
+
+def test_newline_in_a_field_cannot_add_keys(tmp_path):
+    dest = tmp_path / "project.yaml"
+    with pytest.raises(Exception):
+        _write_project_yaml({**MINIMAL_YAML, "description": "x\nregister: ../evil.yaml"}, dest)
+
+
+def test_description_with_backslashes_and_quotes_round_trips(tmp_path):
+    import project_fields as pf
+    dest = tmp_path / "project.yaml"
+    desc = r'Copy C:\Nightly "files" to D:\x: done # now'
+    _write_project_yaml({**MINIMAL_YAML, "description": desc}, dest)
+    assert pf.parse_flat_yaml(dest.read_text(encoding="utf-8"))["description"] == desc
+
+
+@pytest.mark.parametrize("name", ["../escape", "automation-x/../../y", "C:\evil", "Automation-X", "", "automation-x\ny"])
+def test_hostile_name_never_reaches_a_path(tmp_path, name):
+    out = tmp_path / "out"
+    out.mkdir()
+    with patch("subprocess.run") as run:
+        result = scaffold_from_contract({**MINIMAL_YAML, "name": name}, out)
+    assert result.success is False
+    assert "invalid contract" in result.error
+    run.assert_not_called()
+    assert list(out.iterdir()) == []
+
+
+def test_verification_is_on_by_default(tmp_path):
+    ok = MagicMock(returncode=0, stdout="", stderr="")
+    with patch("subprocess.run", return_value=ok) as run:
+        scaffold_from_contract(MINIMAL_YAML, tmp_path)
+    assert "--no-verify" not in run.call_args[0][0]

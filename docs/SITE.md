@@ -101,7 +101,7 @@ in light and dark.
 * **Four tabs, one page per tab.** Sub-views are sections or panels that open in place, never another row of tabs.
 * **Plain language first.** Section titles and headline sentences use everyday words (Problems, Runs, Machines); internal signal names (SILENT, MISSED ...) appear only in detail panels.
 * **Escape everything.** Names, descriptions, owners, links, log text and evidence are HTML-escaped when the views are built; browser-side code only uses `textContent` / `setAttribute`.
-  Stored HTML evidence is never rendered. Tests inject script payloads into every manifest field and fail if any raw payload reaches a view or page.
+  Stored HTML evidence is never rendered, and is not published at all: the site is built from a sanitized copy of the archive (hashed machine ids, no evidence / params / results / free-text errors / tracebacks; see docs/LIVE_LOGGING.md) and `build_site.py` aborts if a raw host name or an evidence folder reaches the output. Tests inject script payloads into every manifest field and fail if any raw payload reaches a view or page.
 * **Strict CSP, no inline scripts.** The shell allows same-origin scripts plus the one theme bootstrap by SHA-256 (never `'unsafe-inline'` for scripts); views contain no executable
   script or inline event handler (`check_site.py` fails the build otherwise); the assessment document keeps its own hash-based CSP and loads nothing from outside.
 * **Nothing external.** No CDN, no web fonts (system fonts), no third-party scripts; the only `https://` links are anchors (GitHub, docs).
@@ -119,7 +119,7 @@ in light and dark.
   `runs-detail.json` is fetched same-origin (the page CSP allows `connect-src 'self'`).
 * Queue and approval events are optional: automations that never emit `queue_stats` / `approval_*` simply leave those blocks empty; the how-to for deciding an approval
   (`wrapper_core approvals ...`) is shown anyway.
-* The UiPath migration page is not part of the site; the migration kit under `tools/uipath/` and `docs/UIPATH_*.md` stay in the repository.
+* There is no UiPath migration page: the migration kit (inventory, scaffold, parity, dashboard) was removed from `dev`/`main` and is kept on the `archive/uipath-kit` branch.
 
 ## Hardening notes
 

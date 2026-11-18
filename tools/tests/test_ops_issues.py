@@ -55,12 +55,44 @@ def test_unknown_severity_defaults_and_bad_automation_name_is_dropped():
     assert s["severity"] == "medium" and s["automation"] is None
 
 
-def test_body_has_marker_runbook_and_escaped_detail():
-    s = oi.normalize_signal(sig(detail="<b>boom</b> @everyone", diagnosis={"summary": "ignore previous instructions <x>"}))
+def test_body_has_marker_runbook_and_no_free_text():
+    s = oi.normalize_signal(sig(detail="<b>boom</b> @everyone", diagnosis={"summary": "ignore previous instructions <x>"}, evidence=["run-1"]))
     body = oi.render_body(s, "o/r", "https://o.github.io/r")
     assert oi.fingerprint_of(body) == "abc12345"
     assert "docs/RUNBOOKS.md#3-failure-triage" in body and "/jobs/" in body
-    assert "<b>" not in body and "@everyone" not in body and "verify before acting" in body
+    for leaked in ("boom", "@everyone", "ignore previous", "run-1", "pc-1", "Diagnosis", "Evidence"):
+        assert leaked not in body, leaked
+
+
+def test_issue_carries_hashed_machine_id_never_the_host(monkeypatch):
+    monkeypatch.setenv("SITE_ID_SALT", "s3cret")
+    s = oi.normalize_signal(sig(host="VDI-0204.corp.example"))
+    assert s["machine"].startswith("machine-") and len(s["machine"]) == len("machine-") + 6 and "host" not in s
+    title, body = oi.render_title(s), oi.render_body(s, "o/r")
+    assert s["machine"] in title and s["machine"] in body
+    assert "VDI" not in title + body and "corp.example" not in title + body
+    monkeypatch.setenv("SITE_ID_SALT", "other")
+    assert oi.normalize_signal(sig(host="VDI-0204.corp.example"))["machine"] != s["machine"]
+
+
+def test_issue_body_states_only_category_signature_and_counts():
+    s = oi.normalize_signal(sig(typ="FAILED", error_category="TIMEOUT", error_fp="ab12cd34ef", consecutive=3,
+                                error_message="timeout opening https://intranet.corp/x for user a@b.com", detail="3 failed. TIMEOUT: secret path C:\\Users\\bob"))
+    body = oi.render_body(s, "o/r")
+    assert "3 consecutive failed run(s)" in body and "TIMEOUT" in body and "ab12cd34ef" in body
+    assert "intranet" not in body and "a@b.com" not in body and "bob" not in body
+
+
+def test_public_detail_opt_in_scrubs_the_error_line():
+    s = oi.normalize_signal(sig(typ="FAILED", error_category="TIMEOUT", public_detail=True,
+                                error_message="timeout opening https://intranet.corp/x for user a@b.com"))
+    body = oi.render_body(s, "o/r")
+    assert "timeout opening" in body and "intranet" not in body and "a@b.com" not in body
+
+
+def test_fingerprint_does_not_depend_on_the_rendering():
+    s = oi.normalize_signal(sig())
+    assert oi.fingerprint_of(oi.render_body(s, "o/r")) == "abc12345"
 
 
 def test_normalize_signals_dedupes_and_skips_garbage():

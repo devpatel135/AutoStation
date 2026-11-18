@@ -1,7 +1,7 @@
 $name:
-  description: "$description"
-  owner: "$owner"
-  owner_team: "$owner_team"
+  description: $description_yaml
+  owner: $owner_yaml
+  owner_team: $owner_team_yaml
   systems: [TBD]
   data_classification: $classification
   llm_allowed_classification: internal
@@ -24,7 +24,7 @@ $name:
     escalate_after_retries: true
   notify_on_complete: false
   catalog:
-    summary: "$description"
+    summary: $description_yaml
     systems: [TBD]
-    owner_team: "$owner_team"
+    owner_team: $owner_team_yaml
     tags: [transactional]

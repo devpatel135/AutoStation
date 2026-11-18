@@ -2,11 +2,12 @@
 
 Log ingestion, analytics, compliance signals, LLM diagnosis, alerting and the fleet dashboard for AUTOSTATION.
 Implements `docs/SPEC.md` §6 (artefacts), §7 (transport & ingestion), §11 (signals), §12 (triggers).
-Runs in GitLab CI only; there is no server. Python 3.9+, stdlib only, plus `wrapper_core` (shared `miniyaml`, `llm`,
+Runs in CI only (the live setup uses the GitHub workflows `site.yml` / `health.yml`; the GitLab jobs below are the legacy self-hosted path); there is no server. Python 3.9+, stdlib only, plus `wrapper_core` (shared `miniyaml`, `llm`,
 `redact`, `manifest`, `mockllm`).
 
 ```
-endpoint ──push new ref──▶ logging repo  refs/heads/ingest/<ring>/<kind>/<name>/<id>      (write-only key)
+endpoint ──push new ref──▶ logging repo  refs/heads/ingest/<ring>/<kind>/<name>/<id>      (legacy git-ssh path, write-only key)
+(live setup: github-api transport = one file per artefact under ingest/ via the Contents API, fine-grained PAT, read+write - see docs/LIVE_LOGGING.md)
                               │ ingest job (Maintainer token): fetch ingest/*, archive, then delete refs
                               ▼
                        `archive` branch   archive/<kind>/<name>/YYYY/MM/DD/<id>.json  +  state/*.json
@@ -16,7 +17,10 @@ endpoint ──push new ref──▶ logging repo  refs/heads/ingest/<ring>/<kin
    pages   ─ public/index.html · data.json · signals.json · runs-latest.json · triggers.json
 ```
 
-## The write-only SSH key (how it is actually write-only)
+## Legacy git-ssh path: the write-only SSH key
+
+> The live setup does NOT use this: it writes through the GitHub Contents API with a fine-grained PAT that can read and write the private logs repo
+> (`docs/LIVE_LOGGING.md`, `docs/SECURITY.md`). The section below applies only to a self-hosted GitLab running the `git-ssh` transport.
 
 Git has no "write-only" permission: any key that can push can also fetch. The design therefore removes the *need* to read and
 limits what a push can do. The endpoint never fetches; for each artefact it creates a throw-away repo with one commit and pushes it

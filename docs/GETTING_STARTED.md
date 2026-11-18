@@ -70,17 +70,17 @@ Examples to copy from: `components/automations/` — `automation-hello-world` (e
 ## 5. Register and release
 
 1. Complete `manifest-entry.yaml` (owner, systems, classification, realistic `expected_duration_ms`, `error_handling`, `catalog`).
-2. Merge to `main`: CI lints, tests, packages, builds a **dev-ring** installer and opens the registry MR (dev ring only).
+2. Merge to `main`: CI lints, tests, packages, builds a **dev-ring** installer and opens the registry PR (dev ring only).
 3. Install the dev-ring installer on a test VDI; it assembles only what is missing, registers the schedule, runs once.
-4. Promote: `python -m registry promote <name> --to pilot` → MR → approve. After the pilot soak: `--to broad`.
-5. Something wrong? `python -m registry pause <name> --reason "..."` (MR) halts it fleet-wide on every machine's next run, or `rollback`.
+4. Promote: `python -m registry promote <name> --to pilot` → PR → approve. After the pilot soak: `--to broad`.
+5. Something wrong? `python -m registry pause <name> --reason "..."` (PR) halts it fleet-wide on every machine's next run, or `rollback`.
 
 ## Cheat sheet
 
 | I want to… | Do |
 |---|---|
-| Stop one automation everywhere | `registry pause <name> --reason …` (MR) |
-| Stop everything | `registry fleet-pause --reason …` (MR) |
+| Stop one automation everywhere | `registry pause <name> --reason …` (PR) |
+| Stop everything | `registry fleet-pause --reason …` (PR) |
 | Run it now, once | `registry trigger-add <name> --slot poll --param k=v` |
 | See what ran | Dashboard (logging Pages) → automation card → synopsis + events |
 | Different input per day | `params:` per schedule slot in the manifest → `wrapper.param("date_range")` |

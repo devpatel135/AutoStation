@@ -127,11 +127,13 @@ def test_jobs_script_is_a_static_asset_that_never_uses_dangerous_sinks(tmp_path)
 
 # ---- machines ----------------------------------------------------------------------------------------------------------------
 def test_machine_freshness_drift_and_signals():
-    old_hb = hb("OLD", ts=(NOW - timedelta(hours=50)).strftime("%Y-%m-%dT%H:%M:%SZ"))
+    old_hb = hb("OLD", ts=(NOW - timedelta(hours=80)).strftime("%Y-%m-%dT%H:%M:%SZ"))   # weekday-only automation: silent only beyond 72 h
+    weekend_hb = hb("WEEKEND", ts=(NOW - timedelta(hours=50)).strftime("%Y-%m-%dT%H:%M:%SZ"))
     drift = hb("DRIFT", versions={"wrapper-core": "0.3.0", "execution-framework": "0.4.0", "automations": {"auto-a": "1.0.0"}})
     good = hb("GOOD", ts=(NOW - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ"), versions={"wrapper-core": "0.4.0", "execution-framework": "0.4.0", "automations": {"auto-a": "1.1.0"}})
     failed = run("rf", host="GOOD", status="failed")
-    rows = {m["host"]: m for m in site_ops.machine_rows(analytics.Data([failed], [old_hb, drift, good], [], []), MANIFEST, NOW)}
+    rows = {m["host"]: m for m in site_ops.machine_rows(analytics.Data([failed], [old_hb, weekend_hb, drift, good], [], []), MANIFEST, NOW)}
+    assert "SILENT" not in rows["WEEKEND"]["signals"]
     assert "SILENT" in rows["OLD"]["signals"] and rows["OLD"]["fresh"] == "failing"
     assert "VERSION_DRIFT" in rows["DRIFT"]["signals"] and any("wrapper-core 0.3.0" in d for d in rows["DRIFT"]["drift"])
     assert rows["GOOD"]["signals"] == ["LAST_RUN_FAILED"] and rows["GOOD"]["drift"] == []

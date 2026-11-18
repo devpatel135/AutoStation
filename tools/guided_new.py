@@ -27,6 +27,8 @@ import tempfile
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+import project_fields as pf  # noqa: E402  (validation + safe YAML emitter shared with scaffold and the Studio)
 
 CLASSIFICATIONS = ("public", "internal", "confidential", "restricted")
 RUNTIMES = ("python", "transactional", "node")
@@ -41,16 +43,13 @@ def _run(argv: list, cwd: Path | None = None) -> int:
 
 def _write_yaml(path: Path, name: str, goal: str, owner: str, owner_team: str,
                 classification: str, runtime: str, version: str) -> None:
-    path.write_text(
-        f"name: {name}\n"
-        f"description: {goal}\n"
-        f"owner: {owner}\n"
-        f"owner_team: {owner_team}\n"
-        f"classification: {classification}\n"
-        f"runtime: {runtime}\n"
-        f"version: {version}\n",
-        encoding="utf-8",
-    )
+    """Write project.yaml from VALIDATED fields with the safe emitter: a goal containing ':', '#', quotes, backslashes or a newline can no
+    longer break the file or add keys."""
+    proj = {"name": pf.check_name(name), "description": pf.check_description(goal), "owner": pf.check_owner(owner),
+            "owner_team": pf.check_team(owner_team), "classification": pf.check_classification(classification),
+            "runtime": pf.check_runtime(runtime), "version": pf.check_version(version)}
+    path.write_text(pf.emit_flat_yaml(proj, order=("name", "description", "owner", "owner_team", "classification", "runtime", "version")),
+                    encoding="utf-8")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -72,6 +71,11 @@ def main(argv: list[str] | None = None) -> int:
     a = p.parse_args(argv)
 
     name = a.name if a.name.startswith("automation-") else f"automation-{a.name}"
+    try:  # reject bad input before anything is created on disk
+        pf.check_name(name), pf.check_description(a.goal), pf.check_owner(a.owner), pf.check_team(a.owner_team), pf.check_version(a.version)
+    except pf.FieldError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
     out = Path(a.out or name).resolve()
 
     if out.exists() and any(out.iterdir()):

@@ -41,7 +41,6 @@ REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 
 DEMO_PROGRAM_YAML = """currency: USD
 hourly_cost: 55
-uipath: {license_cost_per_robot_per_year: 12000, robots_retired: 4, orchestrator_cost_per_year: 30000}
 llm_cost_per_1k_calls: 0
 """
 
@@ -127,6 +126,18 @@ def build(out: Path, repo: Path = ROOT, *, registry: Path | None = None, manifes
         manifest_path = Path(manifest) if manifest else repo / "components" / "automation-registry" / "manifest.yaml"
         cfg.notes.append("no --registry given: install pages use the source manifest (hashes may be placeholders; run tools/build_registry.py)")
     m = reg_store.load_manifest(manifest_path)
+
+    # ---- PUBLIC VIEW: every page below is built from a sanitized COPY of the archive (hashed machine ids, no evidence / params /
+    # results / free-text errors). Nothing in the public site ever reads the raw archive. See automation_logging/public.py.
+    raw_hosts: list[str] = []
+    if archive:
+        from automation_logging import public
+        pub_manifest = reg_store.load_manifest(data_manifest) if data_manifest else m
+        pub_archive = tmp_root / "public-archive"
+        pstats = public.sanitize_archive(archive, pub_archive, pub_manifest, public.site_salt(repo_name))
+        raw_hosts = pstats.pop("raw_hosts", [])
+        archive = pub_archive
+        cfg.notes.append(f"public view: {pstats['copied']} record(s) published as aggregates; {pstats['evidence_withheld']} evidence file(s) stay in the private logs repository")
 
     sc.write_assets(out)
     pages: list[str] = ["index.html"]
@@ -223,6 +234,12 @@ def build(out: Path, repo: Path = ROOT, *, registry: Path | None = None, manifes
               "docs": docs_info["docs"], "pages": sorted(set(pages)), "notes": cfg.notes, "dashboard": dash_info.get("stages", {})}
     write(out, "status.json", json.dumps(status, indent=2, sort_keys=True) + "\n")
     shutil.rmtree(tmp_root, ignore_errors=True)
+    if raw_hosts:   # defence in depth: whatever a builder did, a raw host name or an evidence folder must not be in the output
+        from automation_logging import public
+        leaks = public.find_leaks(out, raw_hosts)
+        if leaks:
+            shutil.rmtree(out, ignore_errors=True)
+            raise SystemExit("error: the public site would leak private telemetry; the build was discarded:\n  " + "\n  ".join(leaks[:20]))
     return status
 
 

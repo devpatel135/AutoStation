@@ -38,6 +38,7 @@ TYPE_RE = re.compile(r"^[A-Z][A-Z0-9_]{1,31}$")
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 MARKER_RE = re.compile(r"<!-- autostation-signal:([A-Za-z0-9][A-Za-z0-9_.-]{5,63}) -->")
 HOST_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
+CATEGORY_RE = re.compile(r"^[A-Z][A-Z0-9_]{1,40}$")
 ZW = chr(0x200B)                       # zero-width space: breaks auto-linking without changing what a human reads
 CLEARING_LABEL = "signal-clearing"     # set when a signal is first seen clear; the issue closes only if it is STILL clear next run
 WONTFIX_LABEL = "wontfix"              # a maintainer's 'do not reopen / do not re-raise'
@@ -98,15 +99,23 @@ def normalize_signal(raw: Any) -> Optional[Dict[str, Any]]:
         sev = "medium"
     auto = raw.get("automation")
     auto = auto if isinstance(auto, str) and NAME_RE.match(auto) else None
-    ev = raw.get("evidence")
-    evidence = [sanitize(e, 160) for e in (ev if isinstance(ev, list) else [])[:10]]
-    diag = raw.get("diagnosis")
+    # PUBLIC issues: no raw host, no free-text detail / diagnosis / evidence ids. Only type, automation, severity, ring, counts, times,
+    # a hashed machine id, the error category + signature and (opt-in per automation, already scrubbed upstream) one error line.
+    host = raw["host"] if isinstance(raw.get("host"), str) and HOST_RE.match(raw["host"]) else None
+    cat = raw.get("error_category")
+    cat = cat if isinstance(cat, str) and CATEGORY_RE.match(cat) else None
+    efp = raw.get("error_fp")
+    efp = efp if isinstance(efp, str) and re.fullmatch(r"[A-Za-z0-9_.-]{4,64}", efp) else None
+    cons = raw.get("consecutive")
+    cons = cons if isinstance(cons, int) and not isinstance(cons, bool) and 0 < cons < 100000 else None
+    pub_detail = raw.get("public_detail") is True
     return {"id": fp, "type": typ, "severity": sev, "automation": auto,
-            "host": (raw["host"] if isinstance(raw.get("host"), str) and HOST_RE.match(raw["host"]) else None),
+            "machine": _machine(host),
             "registered": raw.get("registered") is not False, "ring": sanitize(raw.get("ring"), 20) or None,
-            "detail": sanitize(raw.get("detail"), 400), "first_seen": sanitize(raw.get("first_seen"), 40),
-            "last_seen": sanitize(raw.get("last_seen"), 40), "evidence": [e for e in evidence if e],
-            "diagnosis": sanitize(diag.get("summary") if isinstance(diag, dict) else diag, 600) if diag else "",
+            "detail": "", "first_seen": sanitize(raw.get("first_seen"), 40),
+            "last_seen": sanitize(raw.get("last_seen"), 40), "evidence": [], "diagnosis": "",
+            "error_category": cat, "error_sig": efp, "consecutive": cons,
+            "error_line": (_scrub(raw.get("error_message"), 160) if pub_detail and raw.get("error_message") else ""),
             "owner": sanitize(raw.get("owner") if not isinstance(raw.get("owner"), list) else ", ".join(map(str, raw["owner"][:5])), 120)}
 
 
@@ -125,9 +134,46 @@ def fingerprint_of(body: Any) -> Optional[str]:
     return m.group(1) if m else None
 
 
+def _machine(host: Optional[str]) -> Optional[str]:
+    """The public label of a machine (``machine-<6 hex>``): same function and salt (SITE_ID_SALT) as the public site, so issue and site agree."""
+    if not host:
+        return None
+    return _public().machine_id(host, _public().site_salt(os.environ.get("GITHUB_REPOSITORY")))
+
+
+def _scrub(text: Any, limit: int) -> str:
+    return sanitize(_public().scrub_text(text, limit), limit)
+
+
+def _public():
+    try:
+        from automation_logging import public
+    except ImportError:
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "components" / "automation-logging"))
+        from automation_logging import public
+    return public
+
+
+def saw_lines(sig: Dict[str, Any]) -> List[str]:
+    """The only facts an issue states about a signal: counts, category, signature. Never free text (unless the signal is a manual one
+    raised by our own workflows, or the automation opted in with catalog.public_detail)."""
+    out: List[str] = []
+    if sig.get("consecutive"):
+        out.append(f"- {sig['consecutive']} consecutive failed run(s)")
+    if sig.get("error_category"):
+        out.append(f"- error category `{sig['error_category']}`: {_public().category_label(sig['error_category'])}")
+    if sig.get("error_sig"):
+        out.append(f"- error signature `{sig['error_sig']}`")
+    if sig.get("error_line"):
+        out.append(f"- error (shared by this automation's owners): {sig['error_line']}")
+    if sig.get("manual") and sig.get("detail"):
+        out.append(sig["detail"])
+    return out
+
+
 def render_title(sig: Dict[str, Any]) -> str:
-    who = sig.get("automation") or sig.get("host") or "fleet"
-    return f"[{sig['type']}] {sanitize(who, 60, markup=False)}" + (f" on {sanitize(sig['host'], 40, markup=False)}" if sig.get("automation") and sig.get("host") else "")
+    who = sig.get("automation") or sig.get("machine") or "fleet"
+    return f"[{sig['type']}] {sanitize(who, 60, markup=False)}" + (f" on {sanitize(sig['machine'], 40, markup=False)}" if sig.get("automation") and sig.get("machine") else "")
 
 
 def render_body(sig: Dict[str, Any], repo: str = "", site_url: str = "") -> str:
@@ -136,14 +182,11 @@ def render_body(sig: Dict[str, Any], repo: str = "", site_url: str = "") -> str:
     lines = [f"<!-- autostation-signal:{sig['id']} -->",
              f"**{sig['type']}** ({sig['severity']}) - opened automatically by the health workflow. Closes itself when the signal clears.",
              "", "| | |", "|---|---|",
-             f"| Automation | {sig.get('automation') or '-'} |", f"| Host | {sig.get('host') or '-'} |",
+             f"| Automation | {sig.get('automation') or '-'} |", f"| Machine | {sig.get('machine') or '-'} |",
              f"| Ring | {sig.get('ring') or '-'} |", f"| First seen | {sig.get('first_seen') or '-'} |",
              f"| Last seen | {sig.get('last_seen') or '-'} |", f"| Owner | {sig.get('owner') or '-'} |", "",
-             "### What the platform saw", sig.get("detail") or "(no detail)"]
-    if sig.get("diagnosis"):
-        lines += ["", "### Diagnosis (model output over unauthenticated telemetry - verify before acting)", sig["diagnosis"]]
-    if sig.get("evidence"):
-        lines += ["", "### Evidence"] + [f"- `{e}`" for e in sig["evidence"]]
+             "### What the platform saw"] + (saw_lines(sig) or ["(see the site view; run detail stays in the private logs repository)"])
+    lines += ["", "Operators: the full detail (messages, evidence, machine name) is in the private logs repository; this public issue carries aggregates only."]
     if sig.get("run_url") and RUN_URL_RE.match(sig["run_url"]):
         lines += ["", f"Failing run: {sig['run_url']}"]
     lines += ["", "### What to do", f"Follow the runbook: [{runbook.split('#')[0]}]({base}{runbook})"]
@@ -293,6 +336,8 @@ def manual_signal(fp: str, typ: str, severity: str, title: str, detail: str, aut
     if sig is None:
         raise ValueError("invalid signal id/type")
     sig["title"] = sanitize(title, 120, markup=False)
+    sig["manual"] = True
+    sig["detail"] = sanitize(detail, 400)     # raised by our own workflows (canary), not by telemetry
     if run_url:
         if not RUN_URL_RE.match(run_url):
             raise ValueError("run url must be https://github.com/<owner>/<repo>/actions/runs/<id>")
@@ -378,9 +423,9 @@ class GitHub:
 
 def digest_signal(sigs: List[Dict[str, Any]], total: int) -> Dict[str, Any]:
     """ONE issue that stands in for every signal that could not get its own issue because the open-issue cap was reached."""
-    lines = [f"- [{x['severity']}] {x['type']} {sanitize(x.get('automation') or x.get('host') or 'fleet', 60)}" for x in sigs]
+    lines = [f"- [{x['severity']}] {x['type']} {sanitize(x.get('automation') or x.get('machine') or 'fleet', 60)}" for x in sigs]
     more = f" (showing {len(sigs)} of {total})" if total > len(sigs) else ""
-    return {"id": DIGEST_FP, "type": "DIGEST", "severity": "high", "automation": None, "host": None, "ring": None, "registered": True,
+    return {"id": DIGEST_FP, "type": "DIGEST", "severity": "high", "automation": None, "machine": None, "manual": True, "ring": None, "registered": True,
             "detail": f"{total} further signal(s) are open but the cap on open ops-signal issues was reached{more}: " + " ".join(lines)[:380],
             "first_seen": "", "last_seen": "", "evidence": [], "diagnosis": "", "owner": "",
             "title": f"[DIGEST] {total} more ops signals than the open-issue cap"}
@@ -402,7 +447,8 @@ def apply(gh: GitHub, actions: List[Dict[str, Any]], site_url: str = "", dry_run
                 gh.ensure_labels(labels_for(a["sig"]))
                 gh.create(a["sig"], site_url)
             elif op == "comment":
-                gh.comment(a["number"], f"Still happening (last seen {a['sig'].get('last_seen') or 'now'}).\n\n{a['sig'].get('detail') or ''}")
+                extra = "\n".join(saw_lines(a["sig"]))
+                gh.comment(a["number"], f"Still happening (last seen {a['sig'].get('last_seen') or 'now'}).\n\n{extra}".rstrip())
             elif op == "reopen":
                 gh.set_state(a["number"], "open")
                 gh.comment(a["number"], "The signal is back - reopening.")
