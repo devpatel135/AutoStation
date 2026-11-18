@@ -1,10 +1,16 @@
 name: release
 
-# Continuous delivery of the registry that every installed machine self-heals from.
-# On every push to main that touches a component/automation: test -> bundle the Node runtime into the execution-framework ->
-# package everything (deterministic zips) -> publish NEW immutable zips to the append-only `registry-artifacts` branch ->
-# regenerate manifest.yaml with the new versions in EVERY ring (auto-promote) and commit it to main -> the `site` workflow
-# republishes https://<owner>.github.io/<repo>/registry/ . Machines pick the new version up on their next run / sign-in.
+# Continuous delivery of the registry that every installed machine self-heals from, in three jobs so that NOTHING is published before it
+# has been proven on Windows (where every endpoint runs):
+#   build     ubuntu: test -> bundle the Node runtime into the execution-framework -> package everything (deterministic zips) -> regenerate the
+#             manifest in the working tree. NEW versions enter ring dev ONLY (build_registry.py --auto-promote); promote.yml moves them to
+#             pilot and broad after a health-gated soak. Nothing is pushed here: the result (new zips + a manifest patch) is handed on.
+#   windows   windows-2025: the platform tests, and the UPGRADE SMOKE (tools/ci/upgrade-smoke.ps1): install the previous released installer,
+#             serve the NEW registry locally, run the scheduled path, assert the new versions / selftest / logs, then assert that a broken
+#             wrapper-core is rejected by bin\apply-pending.cmd while the old copy keeps working. A red job stops the release.
+#   publish   ubuntu: publish NEW immutable zips to the append-only `registry-artifacts` branch, tag the released commit rel-<sha7>, and
+#             commit the manifest to main LAST (rebase + retry). Every step after the manifest is non-fatal: a failing summary or upload must
+#             never turn the run red, because the `site` workflow only refreshes after a SUCCESSFUL release (workflow_run).
 # A released version is immutable: change code => bump `version` (automation.yaml) or VERSION (components), or this fails loudly.
 on:
   push:
@@ -14,9 +20,12 @@ on:
       - "components/wrapper-core/**"
       - "components/execution-framework/**"
       - "components/automation-registry/**"
+      - "!components/automation-registry/rollout-state.json"
       - "tools/build_registry.py"
       - "tools/build_framework_bundle.py"
-      - ".github/workflows/release.yml"
+      - "tools/ci/**"
+      # .github/workflows/release.yml is deliberately NOT a trigger: Dependabot bumps of the pinned actions edit this file and must not cost a
+      # full release run; a change to the workflow itself is checked by ci.yml (check_workflows, actionlint) and exercised by the next release
   workflow_dispatch:
     inputs:
       bootstrap:
@@ -32,14 +41,18 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  registry:
+  build:
     if: ${{ github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-24.04      # pinned: -latest moves under us (Ubuntu 26 migration); the release must not change with the image
     timeout-minutes: 30
     permissions:
-      contents: write
+      contents: read
     env:
-      BOOTSTRAP_INPUT: ${{ inputs.bootstrap }}   # the write token is given only to the steps that push, never to the test run
+      BOOTSTRAP_INPUT: ${{ inputs.bootstrap }}
+    outputs:
+      new: ${{ steps.build.outputs.new }}
+      changed: ${{ steps.build.outputs.changed }}
+      exists: ${{ steps.artifacts.outputs.exists }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -85,25 +98,99 @@ jobs:
               exit 1
               ;;
           esac
-      - name: Build the registry (immutability rules enforced; new versions go to every ring)
+      - name: Build the registry (immutability rules enforced; new versions enter ring dev only)
         id: build
         run: |
           BOOT=""
           if [ "$BOOTSTRAP_INPUT" = "true" ] || [ "${{ steps.artifacts.outputs.exists }}" = "false" ]; then BOOT="--bootstrap"; fi
           python tools/build_registry.py --out registry-out --artifacts-dir ../ra --new-dir new-artifacts \
             --write-manifest components/automation-registry/manifest.yaml --auto-promote $BOOT
+      - name: Hand the result to the next jobs (new zips + the manifest change as a patch)
+        run: |
+          mkdir -p handoff
+          if [ -d new-artifacts/artifacts ]; then cp -r new-artifacts handoff/new-artifacts; fi
+          git diff -- components/automation-registry > handoff/manifest.patch
+          ls -R handoff | head -50
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: registry-out
+          path: registry-out
+          retention-days: 7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-handoff
+          path: handoff
+          retention-days: 7
+
+  windows:
+    # Where every endpoint runs. Gates the release: publish needs this job.
+    needs: build
+    runs-on: windows-2025       # pinned: the upgrade smoke installs a real installer, the image must not change under it
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    env:
+      AUTOMATION: automation-certification-site
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-ci.txt
+      - run: python -m pip install -c requirements-ci.txt pytest pydantic jinja2
+      - name: Platform tests on Windows
+        run: python tools/test_all.py
+      - name: Download the registry this release would publish
+        if: ${{ needs.build.outputs.new != '0' }}
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: registry-out
+          path: registry-out
+      - name: Upgrade smoke - previous installer, new registry, scheduled path, rollback of a broken wrapper-core
+        if: ${{ needs.build.outputs.new != '0' }}
+        shell: pwsh
+        run: ./tools/ci/upgrade-smoke.ps1 -Automation $env:AUTOMATION -RegistryOut registry-out
+
+  publish:
+    needs: [build, windows]
+    if: ${{ needs.build.outputs.new != '0' || needs.build.outputs.changed == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write         # the write token is given only to the steps that push
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Download what the build job produced
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-handoff
+          path: handoff
       - name: Publish new packages to registry-artifacts (append-only)
-        if: ${{ steps.build.outputs.new != '0' }}
+        if: ${{ needs.build.outputs.new != '0' }}
         env:
           GH_TOKEN: ${{ github.token }}
+          ARTIFACTS_EXIST: ${{ needs.build.outputs.exists }}
         run: |
           URL="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          if [ "$ARTIFACTS_EXIST" = "true" ]; then
+            git clone --quiet --depth 1 --branch registry-artifacts "$URL" ../ra
+          else
+            mkdir ../ra
+          fi
           cd ../ra
           if [ ! -d .git ]; then git init -q -b registry-artifacts; git remote add origin "$URL"; fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           mkdir -p artifacts
-          cp -r "$GITHUB_WORKSPACE/new-artifacts/artifacts/." artifacts/
+          cp -r "$GITHUB_WORKSPACE/handoff/new-artifacts/artifacts/." artifacts/
           if [ ! -f README.md ]; then
             printf '# registry-artifacts\n\nAppend-only store of released package zips. Never edit or delete files here; released versions are immutable.\n' > README.md
           fi
@@ -115,8 +202,29 @@ jobs:
           fi
           git commit -q -m "release ${GITHUB_SHA::7}: $(git diff --cached --name-only | wc -l) package file(s)" || true
           git push origin HEAD:registry-artifacts
-      - name: Commit the regenerated manifest to main (all rings follow main)
-        if: ${{ steps.build.outputs.changed == 'true' }}
+      - name: Tag the released commit rel-sha7 (non-fatal, tags are only ever created and never moved)
+        if: ${{ needs.build.outputs.new != '0' }}
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          AUTH="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          echo "::add-mask::$AUTH"
+          TAG="rel-${GITHUB_SHA::7}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # exit 0 = the tag exists, exit 2 = it is absent, anything else is a transient failure (the step is non-fatal: skip and say so)
+          rc=0
+          git ls-remote --exit-code --tags "https://github.com/${GITHUB_REPOSITORY}.git" "refs/tags/${TAG}" >/dev/null 2>&1 || rc=$?
+          case "$rc" in
+            0) echo "tag ${TAG} already exists: nothing to do"; exit 0 ;;
+            2) ;;
+            *) echo "::warning::could not read the tags (exit ${rc}); not tagging this release"; exit 0 ;;
+          esac
+          git tag -a "$TAG" "$GITHUB_SHA" -m "registry release ${GITHUB_SHA::7}"
+          git -c "http.extraheader=Authorization: Basic $AUTH" push origin "refs/tags/${TAG}"
+      - name: Commit the regenerated manifest to main (last step; new versions in ring dev, promote.yml carries them up)
+        if: ${{ needs.build.outputs.changed == 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -124,9 +232,14 @@ jobs:
           echo "::add-mask::$AUTH"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add components/automation-registry/manifest.yaml components/automation-registry/history 2>/dev/null || git add components/automation-registry/manifest.yaml
-          git commit -q -m "registry: release ${GITHUB_SHA::7} to all rings [skip ci]" || { echo "nothing to commit"; exit 0; }
-          # another writer (an ops-action merge, a human push) may have moved main while this run was building: rebase and retry
+          # main may have moved since the build (an ops-action merge, a human push, promote.yml): apply the build's manifest change onto it
+          if ! git apply --3way handoff/manifest.patch; then
+            echo "::error title=manifest not committed::the manifest change from the build conflicts with newer edits on main; the artifacts are published, re-run this workflow"
+            exit 1
+          fi
+          git add components/automation-registry/manifest.yaml
+          git commit -q -m "registry: release ${GITHUB_SHA::7} to ring dev [skip ci]" || { echo "nothing to commit"; exit 0; }
+          # another writer may move main again while this runs: rebase and retry
           for attempt in 1 2 3 4 5; do
             git -c "http.extraheader=Authorization: Basic $AUTH" pull --rebase --quiet origin main
             if git -c "http.extraheader=Authorization: Basic $AUTH" push origin HEAD:main; then exit 0; fi
@@ -137,15 +250,16 @@ jobs:
           exit 1
       - name: Summary
         if: ${{ always() }}
+        continue-on-error: true
+        env:
+          NEW: ${{ needs.build.outputs.new }}
+          CHANGED: ${{ needs.build.outputs.changed }}
         run: |
           {
             echo "### Registry release"
             echo
-            echo "- new packages: ${{ steps.build.outputs.new }}"
-            echo "- manifest changed: ${{ steps.build.outputs.changed }}"
+            echo "- new packages: ${NEW}"
+            echo "- manifest changed: ${CHANGED}"
+            echo "- tag: rel-${GITHUB_SHA::7}"
+            echo "- new versions are in ring dev only; the promote workflow moves them to pilot and broad"
           } >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: registry-out
-          path: registry-out
-          retention-days: 7

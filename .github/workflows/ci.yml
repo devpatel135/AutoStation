@@ -29,6 +29,21 @@ jobs:
           cache-dependency-path: requirements-ci.txt
       - run: python -m pip install -c requirements-ci.txt pyyaml
       - run: python tools/check_workflows.py
+      - name: actionlint (workflow syntax, expression and context types) - pinned binary, checksum verified before it is unpacked
+        env:
+          ACTIONLINT_VERSION: "1.7.12"
+          # sha256 of actionlint_1.7.12_linux_amd64.tar.gz (the release's own checksum, re-computed independently when this was pinned).
+          # A bump is deliberate: pin-freshness.yml does not touch it; update the version AND this digest together.
+          ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+        run: |
+          mkdir -p "$RUNNER_TEMP/actionlint"
+          cd "$RUNNER_TEMP/actionlint"
+          curl -fsSL --retry 3 -o actionlint.tar.gz "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          echo "${ACTIONLINT_SHA256}  actionlint.tar.gz" | sha256sum --check --strict
+          tar -xzf actionlint.tar.gz actionlint
+          cd "$GITHUB_WORKSPACE"
+          # shellcheck and pyflakes are off: tools/check_workflows.py owns the repo's own script rules; this step is for syntax and expression typing
+          "$RUNNER_TEMP/actionlint/actionlint" -shellcheck= -pyflakes= -color
       - run: python tools/bump_version.py --check
       - run: python tools/pin_actions.py --check
       - run: python tools/check_secrets.py

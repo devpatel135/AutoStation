@@ -12,7 +12,7 @@ name: pipeline-alert
 # It never runs code from a pull request: workflow_run on main only, the default branch is checked out.
 on:
   workflow_run:
-    workflows: [release, site, installers, ci, canary]
+    workflows: [release, site, installers, ci, canary, promote, backup-registry]
     types: [completed]
     branches: [main]
   schedule:
@@ -52,7 +52,7 @@ jobs:
       - name: Raise or resolve the issue for this workflow
         run: |
           case "$WORKFLOW" in
-            release|site|installers|ci|canary) ;;
+            release|site|installers|ci|canary|promote|backup-registry) ;;
             *) echo "::error::unexpected workflow name"; exit 1 ;;
           esac
           if [ "$CONCLUSION" = "failure" ]; then

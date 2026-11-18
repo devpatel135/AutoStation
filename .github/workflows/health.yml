@@ -89,6 +89,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
           DATA_COMPLETE: ${{ steps.analyze.outputs.complete }}
+          # the same salt as the site, so a machine has the same label in issues and on the site
+          SITE_ID_SALT: ${{ secrets.SITE_ID_SALT }}
         run: |
           OK=""
           if [ "$DATA_COMPLETE" = "true" ]; then OK="--live-data-ok"; fi

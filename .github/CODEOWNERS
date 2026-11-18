@@ -61,3 +61,22 @@
 /tools/fetch_mingit.py                               @devpatel135
 /components/automation-logging/automation_logging/validate.py   @devpatel135
 /components/automation-logging/automation_logging/ingest.py     @devpatel135
+
+# the studio (generates what developers ship), the templates it and the scaffolders stamp out, and the analytics that decide what alerts and
+# what gets promoted: a bug here reaches every new automation or silences an alarm
+/tools/templates/                                    @devpatel135
+/components/automation-studio/                       @devpatel135
+/components/automation-logging/automation_logging/analytics.py    @devpatel135
+/components/automation-logging/automation_logging/reliability.py  @devpatel135
+/components/automation-logging/automation_logging/dashboard.py    @devpatel135
+/components/automation-logging/automation_logging/alerting.py     @devpatel135
+/components/wrapper-core/wrapper_core/scheduler.py   @devpatel135
+
+# the staged-rollout gate, the post-deploy verification and the pin checks decide what reaches machines and whether anyone is told
+/tools/promote_gate.py                               @devpatel135
+/tools/verify_live.py                                @devpatel135
+/tools/pin_freshness.py                              @devpatel135
+/components/automation-registry/rollout-state.json   @devpatel135
+
+# TODO(owner): a second code owner is needed before "Require review from Code Owners" can protect anything (a sole owner cannot approve their own
+# pull request). Add the second handle or a team (for example @your-org/platform-approvers) after each path above; no handle is invented here.

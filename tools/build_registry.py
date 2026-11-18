@@ -10,14 +10,19 @@ What it does (see docs/PIPELINES.md):
    into deterministic zips using ``automation-builder/scripts/package.py``.
 2. Compares them with the zips already published on the append-only ``registry-artifacts`` branch (``--artifacts-dir``).
    Released versions are IMMUTABLE: same version + different content => FAIL ("bump the version"). New version => added.
-3. Regenerates the manifest for NEW versions through the registry ops: a new version enters ring ``dev`` only. Promotion to
-   pilot/broad is a human decision made in a pull request (``registry promote`` / the admin panel) - never done here.
+3. Regenerates the manifest for NEW versions through the registry ops: a new version enters ring ``dev`` ONLY (also with
+   ``--auto-promote``). It moves to pilot and then broad through ``promote.yml`` (tools/promote_gate.py: a soak time plus a clean
+   health report) or by an operator (``registry promote`` / the admin panel / ops-action) - never in this tool.
 4. Validates (``registry validate --artifacts``, placeholders NOT allowed) and writes a publishable registry directory:
    ``manifest.yaml``, ``triggers.json``, ``index.json``, ``artifacts/<components|automations>/<name>-<version>.zip``.
 
 ``--bootstrap`` is the first-run mode: it seeds a complete, valid manifest from the repository (keeping the catalog metadata
 of the starter manifest, replacing placeholder hashes with real ones, and putting each automation's current version in every
-ring so the install pages work immediately). After that, only dev-ring additions happen automatically.
+ring so the install pages work immediately). After that, only dev-ring additions happen here.
+
+``--publish-only`` (used by the site workflow) publishes the manifest from main plus the zips it references, keeping the newest
+``--keep-versions`` versions of each package plus every version a ring points at (older versions stay in the manifest on main and
+on the artifacts branch, but are not copied to Pages) and failing when the published zips exceed ``--max-mb`` (Pages has a 1 GB cap).
 
 Zips are compared by *content* (names + decompressed bytes), not by zip bytes, so a different zlib on a developer machine can
 never be mistaken for a changed release.
@@ -251,22 +256,26 @@ def build(repo: Path, manifest_path: Path, out: Path, artifacts_dir: Path | None
                     else:
                         vs[s.version] = {**vs[s.version], **{k: v for k, v in rec.items() if k == "requires"}}
                 else:
+                    had_rings = any((entry.get("rings") or {}).values())
                     res = ops.add_version(m, s.name, s.version, rec, kind=s.kind)
-                    added.append(f"{s.name} {s.version} -> dev")
                     _ = res
-                    if auto_promote:
-                        # continuous delivery for a small fleet: every ring follows main (pilot, then broad)
-                        for ring in ("pilot", "broad"):
-                            ops.promote(m, s.name, ring, s.version)
-                        added.append(f"{s.name} {s.version} -> pilot, broad (auto-promote)")
+                    # staged rollout: a new version is in dev ONLY. promote.yml (health-gated soak) moves it to pilot, then broad.
+                    if had_rings or not auto_promote:
+                        added.append(f"{s.name} {s.version} -> dev")
+                    else:
+                        # the very first release of a package has nothing older to stage from, and a manifest needs a version in every ring
+                        entry["rings"] = {r: s.version for r in RINGS}
+                        added.append(f"{s.name} {s.version} -> dev, pilot, broad (first release of this package)")
             except OpError as exc:
                 errors.append(f"{s.name} {s.version}: {exc}")
 
     # a freshly registered automation starts paused ("awaiting first release"); once a build has put a version into the
-    # rings (bootstrap / auto-promote) it is live. Operators' own pauses (any other reason) are never touched.
+    # rings (bootstrap / auto-promote) it is live (a first release enters dev; promote.yml carries it up). Operators' own pauses (any
+    # other reason) are never touched.
     if bootstrap or auto_promote:
         for aname, a_entry in (m.get("automations") or {}).items():
-            if (a_entry or {}).get("status") == "paused" and str(a_entry.get("paused_reason", "")).startswith("awaiting first release")                     and (a_entry.get("rings") or {}).get("broad"):
+            if (a_entry or {}).get("status") == "paused" and str(a_entry.get("paused_reason", "")).startswith("awaiting first release") \
+                    and (a_entry.get("rings") or {}).get("dev"):
                 a_entry["status"], a_entry["paused_reason"] = "active", ""
                 added.append(f"{aname} activated (first release)")
 
@@ -290,7 +299,41 @@ def build(repo: Path, manifest_path: Path, out: Path, artifacts_dir: Path | None
     return result
 
 
-def publish_only(manifest_path: Path, out: Path, artifacts_dir: Path | None) -> dict:
+DEFAULT_KEEP_VERSIONS = 5
+DEFAULT_MAX_MB = 400.0
+
+
+def _version_key(text: str):
+    parts = []
+    for piece in str(text).replace("-", ".").split("."):
+        parts.append((0, int(piece)) if piece.isdigit() else (-1, 0))
+    return tuple(parts)
+
+
+def prune_versions(m: dict, keep: int) -> list[str]:
+    """Drop from ``m`` (a COPY of the manifest) every version record that is neither a ring target nor among the newest ``keep``.
+
+    Returns the dropped ``name version`` labels. ``keep <= 0`` disables pruning. The manifest on main is never changed: this only
+    decides which zips the Pages site carries (rollback to a pruned version is a ring change on main, which makes it a ring target again).
+    """
+    dropped: list[str] = []
+    if keep <= 0:
+        return dropped
+    for kind in ("components", "automations"):
+        for name, entry in (m.get(kind) or {}).items():
+            entry = entry or {}
+            versions = entry.get("versions") or {}
+            protected = {str(v) for v in (entry.get("rings") or {}).values() if v}
+            newest = sorted(versions, key=_version_key, reverse=True)[:keep]
+            for ver in list(versions):
+                if str(ver) not in protected and ver not in newest:
+                    del versions[ver]
+                    dropped.append(f"{name} {ver}")
+    return dropped
+
+
+def publish_only(manifest_path: Path, out: Path, artifacts_dir: Path | None, keep_versions: int = DEFAULT_KEEP_VERSIONS,
+                 max_mb: float = DEFAULT_MAX_MB) -> dict:
     """Publish exactly what was released: the manifest from main plus the zips it references from the artifacts branch.
 
     Nothing is packaged and no source tree is compared, so a source change that breaks the immutability rule (an unbumped version)
@@ -299,6 +342,7 @@ def publish_only(manifest_path: Path, out: Path, artifacts_dir: Path | None) -> 
     """
     manifest_path, out = Path(manifest_path), Path(out)
     m = copy.deepcopy(store.load_manifest(manifest_path))
+    pruned = prune_versions(m, keep_versions)
     errors: list[str] = []
     if out.exists():
         shutil.rmtree(out)
@@ -328,6 +372,10 @@ def publish_only(manifest_path: Path, out: Path, artifacts_dir: Path | None) -> 
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, dest)
         copied.append(rel)
+    total_mb = sum((out / r).stat().st_size for r in copied) / 1048576
+    if max_mb and total_mb > max_mb:
+        errors.append(f"the published zips total {total_mb:.0f} MB, over the {max_mb:.0f} MB budget (GitHub Pages is capped at 1 GB): "
+                      "lower --keep-versions or shrink the packages")
     report = checks.validate_all(m, allow_placeholders=False, artifacts_dir=out)
     errors += [f"manifest: {e}" for e in report.errors]
     store.save_triggers(out / "triggers.json", store.load_triggers(manifest_path.parent / store.TRIGGERS_FILE))
@@ -337,7 +385,7 @@ def publish_only(manifest_path: Path, out: Path, artifacts_dir: Path | None) -> 
              "automations": {n: {"rings": (a or {}).get("rings") or {}, "status": (a or {}).get("status"), "versions": sorted(((a or {}).get("versions") or {}))}
                              for n, a in (m.get("automations") or {}).items()}}
     store.atomic_write(out / "index.json", json.dumps(index, indent=2, sort_keys=True) + "\n")
-    result = {"ok": not errors, "errors": errors, "published": copied, "mode": "publish-only"}
+    result = {"ok": not errors, "errors": errors, "published": copied, "mode": "publish-only", "pruned": pruned, "size_mb": round(total_mb, 1)}
     store.atomic_write(out / "build-summary.json", json.dumps(result, indent=2) + "\n")
     return result
 
@@ -352,25 +400,31 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--write-manifest", default=None, help="write the regenerated manifest back to this path (when changed and valid)")
     ap.add_argument("--bootstrap", action="store_true")
     ap.add_argument("--bootstrap-rings", choices=["all", "dev"], default="all")
-    ap.add_argument("--auto-promote", action="store_true", help="new versions go to dev, pilot AND broad immediately (no promotion PRs)")
+    ap.add_argument("--auto-promote", action="store_true",
+                    help="register new versions automatically (they enter the dev ring ONLY; promote.yml or an operator moves them up) and activate first releases")
     ap.add_argument("--default-owner", default="automation-platform@example.com")
     ap.add_argument("--github-output", default=os.environ.get("GITHUB_OUTPUT"), help="append changed=true/false, new=N to this file (GitHub Actions)")
     ap.add_argument("--publish-only", action="store_true",
                     help="publish the manifest from main + the zips it references (verifying their sha256); no packaging, no source comparison. Used by the site workflow")
+    ap.add_argument("--keep-versions", type=int, default=DEFAULT_KEEP_VERSIONS,
+                    help="publish-only: keep the newest N versions of each package plus every ring target (0 = all)")
+    ap.add_argument("--max-mb", type=float, default=DEFAULT_MAX_MB, help="publish-only: fail when the published zips exceed this size (0 = no limit)")
     ap.add_argument("--check", action="store_true",
                     help="pull-request gate: report-only; fail if released content changed without a version bump (names the file to bump); needs no Node/npm bundle")
     a = ap.parse_args(argv)
     manifest = Path(a.manifest) if a.manifest else Path(a.repo) / "components" / "automation-registry" / "manifest.yaml"
     if a.publish_only:
-        res = publish_only(manifest, Path(a.out), Path(a.artifacts_dir) if a.artifacts_dir else None)
+        res = publish_only(manifest, Path(a.out), Path(a.artifacts_dir) if a.artifacts_dir else None, a.keep_versions, a.max_mb)
         for rel in res["published"]:
             print("published", rel)
+        for label in res["pruned"]:
+            print("not published (older than the newest", a.keep_versions, "and not a ring target):", label)
         for line in res["errors"]:
             print("ERROR  ", line, file=sys.stderr)
         if a.github_output:
             with open(a.github_output, "a", encoding="utf-8") as fh:
                 fh.write(f"ok={'true' if res['ok'] else 'false'}\n")
-        print(f"registry published as released in {a.out}: {len(res['published'])} artifact(s)")
+        print(f"registry published as released in {a.out}: {len(res['published'])} artifact(s), {res['size_mb']} MB")
         return 0 if res["ok"] else 1
     if a.check:
         with tempfile.TemporaryDirectory(prefix="amx-check-") as tmp:

@@ -1,0 +1,76 @@
+name: backup-registry
+
+# registry-artifacts is the only copy of every released package (append-only, one repository). This workflow keeps a second copy:
+#   - with the repository secret BACKUP_TOKEN (a fine-grained token with contents write on <owner>/AutoStation-backup, or the repository
+#     named by the variable AUTOSTATION_BACKUP_REPO): the branch is pushed there (fast-forward only, never forced);
+#   - without it: a verified `git bundle` of the branch is uploaded as a workflow artifact kept for 90 days (restore with git clone <bundle>).
+# Runs weekly, after every successful release, and on demand. A failed backup raises the normal pipeline alert (pipe-backup-registry).
+on:
+  schedule:
+    - cron: "17 3 * * 0"
+  workflow_run:
+    workflows: [release]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: backup-registry
+  cancel-in-progress: false
+
+jobs:
+  backup:
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-24.04
+    environment: production
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    env:
+      BACKUP_REPO: ${{ vars.AUTOSTATION_BACKUP_REPO || format('{0}/AutoStation-backup', github.repository_owner) }}
+      BACKUP_TOKEN: ${{ secrets.BACKUP_TOKEN }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Clone the full history of registry-artifacts
+        run: |
+          URL="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          rc=0
+          git ls-remote --exit-code --heads "$URL" registry-artifacts >/dev/null 2>&1 || rc=$?
+          case "$rc" in
+            0) git clone --quiet --branch registry-artifacts "$URL" ra ;;
+            2) echo "::notice::registry-artifacts does not exist yet: nothing to back up"; echo "NOTHING=1" >> "$GITHUB_ENV"; exit 0 ;;
+            *) echo "::error title=cannot read the repository::git ls-remote failed (exit ${rc})"; exit 1 ;;
+          esac
+          git -C ra log --oneline | head -5
+          echo "files: $(git -C ra ls-files | wc -l)"
+      - name: Push to the backup repository (only when BACKUP_TOKEN exists)
+        id: push
+        if: ${{ env.NOTHING != '1' }}
+        run: |
+          if [ -z "$BACKUP_TOKEN" ]; then
+            echo "pushed=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=no BACKUP_TOKEN::the backup goes into a workflow artifact (90 days) instead of ${BACKUP_REPO}; create the secret BACKUP_TOKEN to mirror it"
+            exit 0
+          fi
+          AUTH="$(printf 'x-access-token:%s' "$BACKUP_TOKEN" | base64 -w0)"
+          echo "::add-mask::$AUTH"
+          cd ra
+          # fast-forward only: a diverged backup is an alarm, never overwritten
+          git -c "http.extraheader=Authorization: Basic $AUTH" push "https://github.com/${BACKUP_REPO}.git" refs/heads/registry-artifacts:refs/heads/registry-artifacts
+          echo "pushed=true" >> "$GITHUB_OUTPUT"
+      - name: Bundle the branch (fallback when there is no backup repository)
+        id: bundle
+        if: ${{ env.NOTHING != '1' && steps.push.outputs.pushed != 'true' }}
+        run: |
+          git -C ra bundle create "$GITHUB_WORKSPACE/registry-artifacts.bundle" registry-artifacts
+          git -C ra bundle verify "$GITHUB_WORKSPACE/registry-artifacts.bundle"
+          ls -l registry-artifacts.bundle
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: ${{ env.NOTHING != '1' && steps.push.outputs.pushed != 'true' }}
+        with:
+          name: registry-artifacts-bundle
+          path: registry-artifacts.bundle
+          retention-days: 90

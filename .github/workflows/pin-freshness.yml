@@ -1,0 +1,38 @@
+name: pin-freshness
+
+# Everything bundled into the installers is pinned (Node, the embedded Python, MinGit, playwright-core, tzdata), so nothing updates by itself and a
+# runtime can reach end of life unnoticed. Once a month (and on demand) tools/pin_freshness.py compares the pins with nodejs.org, python.org,
+# GitHub releases, the npm registry and PyPI, writes a table to the run summary and opens ONE ops issue (pin-freshness) that lists what is
+# outdated or past end of life, for example Node 20 and its end-of-life date. The issue closes itself when everything is current again.
+# It never changes a pin: bumping a pin is a deliberate change (a framework or wrapper-core release, then a canary run).
+on:
+  schedule:
+    - cron: "41 6 3 * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pin-freshness
+  cancel-in-progress: false
+
+jobs:
+  freshness:
+    if: ${{ github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - name: Compare the pins with upstream and raise one ops issue
+        run: python tools/pin_freshness.py --summary "$GITHUB_STEP_SUMMARY" --raise-issue

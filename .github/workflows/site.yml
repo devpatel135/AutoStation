@@ -53,6 +53,10 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       # only for a brand-new repo that has never released: lets the site deploy before registry-artifacts exists
       ALLOW_NO_REGISTRY: ${{ vars.AUTOSTATION_ALLOW_NO_REGISTRY }}
+      # Pages is capped at 1 GB: only the zips the manifest references are published (the newest KEEP versions of each package plus every
+      # ring target) and the job fails above the size budget instead of failing the deployment later
+      PAGES_MAX_MB: ${{ vars.AUTOSTATION_PAGES_MAX_MB || '400' }}
+      KEEP_VERSIONS: ${{ vars.AUTOSTATION_KEEP_VERSIONS || '5' }}
     outputs:
       has_registry: ${{ steps.registry.outcome == 'success' }}
     steps:
@@ -92,7 +96,7 @@ jobs:
       - name: Publish the registry exactly as released (manifest from main + the zips it references, sha256 verified)
         id: registry
         if: ${{ steps.artifacts.outputs.exists == 'true' }}
-        run: python tools/build_registry.py --publish-only --out registry-out --artifacts-dir ../ra
+        run: python tools/build_registry.py --publish-only --out registry-out --artifacts-dir ../ra --max-mb "$PAGES_MAX_MB" --keep-versions "$KEEP_VERSIONS"
       - name: Overlay on-demand triggers (branch 'triggers', written by ops-action)
         if: ${{ steps.registry.outcome == 'success' }}
         run: |
@@ -221,6 +225,8 @@ jobs:
         env:
           HAS_REGISTRY: ${{ needs.registry.outputs.has_registry }}
           LIVE_OUTCOME: ${{ steps.live.outcome }}
+          # salt for the hashed machine labels on the public site (optional: without it a public per-repo constant is used)
+          SITE_ID_SALT: ${{ secrets.SITE_ID_SALT }}
         run: |
           ARGS="--out site --fetch-installer-sha"
           if [ "$HAS_REGISTRY" = "true" ]; then ARGS="$ARGS --registry registry-out"; fi
@@ -252,6 +258,49 @@ jobs:
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
+    outputs:
+      page_url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - id: deployment
         uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
+
+  verify:
+    # What machines download is what the registry job built: re-fetch the LIVE manifest and signature, verify the Ed25519 signature with the
+    # pinned public key (the code an endpoint runs), check that seq did not go backwards and that every referenced zip answers and matches its
+    # sha256. A failure raises the ops issue pipe-site-verify (resolved by the next good run); a missing pinned key is a notice, not a failure.
+    needs: [registry, deploy]
+    if: ${{ always() && needs.deploy.result == 'success' && needs.registry.outputs.has_registry == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
+      AUTOSTATION_REGISTRY_PUBKEY: ${{ vars.AUTOSTATION_REGISTRY_PUBKEY }}
+      PAGE_URL: ${{ needs.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - name: Download the registry that was deployed
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: registry-out
+          path: registry-out
+      - name: Restore the last verified seq
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: verify-state
+          key: verify-seq-${{ github.run_id }}
+          restore-keys: verify-seq-
+      - name: Verify the live registry
+        run: |
+          if [ -z "$PAGE_URL" ]; then
+            echo "::error title=no page url::the deploy job did not report the Pages URL"
+            exit 1
+          fi
+          python tools/verify_live.py --base "${PAGE_URL%/}/registry/" --expect-dir registry-out --seq-file verify-state/seq.json --raise-issue

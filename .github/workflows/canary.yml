@@ -47,6 +47,15 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
+      - name: Verify the LIVE registry (pinned-key signature, seq, every zip answers and matches its sha256)
+        # raises the ops issue pipe-site-verify itself; a missing pinned key AUTOSTATION_REGISTRY_PUBKEY is a notice. It must not turn the
+        # installer canary red (a registry problem has its own issue), hence continue-on-error.
+        continue-on-error: true
+        shell: bash
+        env:
+          AUTOSTATION_REGISTRY_PUBKEY: ${{ vars.AUTOSTATION_REGISTRY_PUBKEY }}
+          REGISTRY_BASE: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/registry/
+        run: python tools/verify_live.py --base "$REGISTRY_BASE" --attempts 3 --wait 10 --raise-issue
       - name: Download the published installer and its checksum
         shell: pwsh
         run: |

@@ -229,7 +229,7 @@ def test_first_release_activates_a_new_automation_but_never_clears_an_operator_p
     m = miniyaml.loads(manifest.read_text(encoding="utf-8"))
     a = m["automations"]["automation-certification-site"]
     ver = miniyaml.loads((repo / "components" / "automations" / "automation-certification-site" / "automation.yaml").read_text(encoding="utf-8"))["version"]
-    assert a["status"] == "active" and a["rings"] == {"dev": ver, "pilot": ver, "broad": ver}
+    assert a["status"] == "active" and a["rings"] == {"dev": ver, "pilot": ver, "broad": ver}   # the first release of a package has nothing to stage from
 
 
 # ---- publish-only (the site workflow) and --check (the pull-request gate) --------------------------------------------------------
@@ -303,3 +303,63 @@ def test_check_ignores_the_node_bundle_that_ci_cannot_rebuild_without_network(re
     assert br.main(["--repo", str(repo), "--artifacts-dir", str(first), "--check"]) == 0   # ...and must not look like a changed release
     (fw / "lib" / "a.js").write_text("exports.a = 2;\n")                                 # but a real framework source change is caught
     assert br.main(["--repo", str(repo), "--artifacts-dir", str(first), "--check"]) == 1
+
+
+# ---- staged rollout and the Pages size guard -----------------------------------------------------------------------------------------
+def test_auto_promote_puts_a_new_version_in_dev_only(repo, tmp_path):
+    first = released(repo, tmp_path)
+    (repo / "components" / "automations" / "automation-x" / "automation.yaml").write_text(
+        """name: automation-x
+version: 1.1.0
+runtime: python
+entrypoint: main.py
+requires: {wrapper_core: ">=0.1.0,<1.0.0", execution_framework: ">=0.1.0,<1.0.0"}
+""")
+    res = run(repo, tmp_path / "second", artifacts_dir=first, auto_promote=True)
+    assert res["ok"], res["errors"]
+    rings = manifest_of(tmp_path / "second")["automations"]["automation-x"]["rings"]
+    assert rings == {"dev": "1.1.0", "pilot": "1.0.0", "broad": "1.0.0"}
+
+
+def test_prune_versions_keeps_ring_targets_and_the_newest_n():
+    m = {"components": {"c": {"rings": {"dev": "5", "pilot": "2", "broad": "1"},
+                              "versions": {str(i): {"url": f"artifacts/components/c-{i}.zip", "sha256": "0" * 64} for i in range(1, 8)}}},
+         "automations": {}}
+    dropped = br.prune_versions(m, 2)
+    kept = set(m["components"]["c"]["versions"])
+    assert kept == {"1", "2", "5", "6", "7"}                      # ring targets 1, 2, 5 + the newest two (6, 7)
+    assert sorted(dropped) == ["c 3", "c 4"]
+    assert br.prune_versions(m, 0) == []                          # 0 = keep everything
+
+
+def test_version_ordering_is_numeric_not_lexical():
+    assert sorted(["1.10.0", "1.2.0", "1.9.1"], key=br._version_key) == ["1.2.0", "1.9.1", "1.10.0"]
+
+
+def test_publish_only_prunes_old_zips_but_not_the_manifest_on_main(repo, tmp_path):
+    first = released(repo, tmp_path)
+    manifest = repo / "components" / "automation-registry" / "manifest.yaml"
+    m = miniyaml.loads(manifest.read_text(encoding="utf-8"))
+    entry = m["automations"]["automation-x"]
+    rec = entry["versions"]["1.0.0"]
+    for v in ("0.8.0", "0.9.0"):                                   # two older released versions that no ring points at
+        src = first / "artifacts" / "automations" / "automation-x-1.0.0.zip"
+        dst = first / "artifacts" / "automations" / f"automation-x-{v}.zip"
+        shutil.copy2(src, dst)
+        entry["versions"][v] = {**rec, "url": f"artifacts/automations/automation-x-{v}.zip"}
+    entry["rings"] = {"dev": "1.0.0", "pilot": "1.0.0", "broad": "1.0.0"}
+    manifest.write_text(br.store.dump_manifest(m), encoding="utf-8")
+    res = br.publish_only(manifest, tmp_path / "pub", first, keep_versions=1)
+    assert res["ok"], res["errors"]
+    assert "automation-x 0.8.0" in res["pruned"] and "automation-x 0.9.0" in res["pruned"]
+    assert not (tmp_path / "pub" / "artifacts" / "automations" / "automation-x-0.8.0.zip").exists()
+    assert "0.8.0" in miniyaml.loads(manifest.read_text(encoding="utf-8"))["automations"]["automation-x"]["versions"]   # main keeps the history
+    assert "0.8.0" not in manifest_of(tmp_path / "pub")["automations"]["automation-x"]["versions"]
+
+
+def test_publish_only_fails_over_the_size_budget(repo, tmp_path):
+    first = released(repo, tmp_path)
+    manifest = repo / "components" / "automation-registry" / "manifest.yaml"
+    res = br.publish_only(manifest, tmp_path / "pub", first, max_mb=0.0001)
+    assert not res["ok"] and any("budget" in e for e in res["errors"])
+    assert br.publish_only(manifest, tmp_path / "pub2", first, max_mb=0)["ok"]       # 0 = no limit

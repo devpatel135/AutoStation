@@ -1,5 +1,8 @@
 version: 2
 # Monthly and grouped so it stays a single low-noise PR per ecosystem.
+# Workflow-file bumps (the github-actions ecosystem) edit .github/workflows/*.yml only; release.yml does not list itself as a trigger path, so
+# merging them does not start a registry release. A pip bump under components/wrapper-core or automation-logging DOES change a released
+# package and needs the usual version bump (tools/bump_version.py) before it can merge: the version-gate job in ci.yml says so.
 # npm is deliberately absent: the framework pins playwright-core exactly (Edge/CDP compatibility), its checked-in .npmrc points at an
 # internal mirror placeholder that Dependabot cannot reach, and no lockfile is committed. security.yml audits the npm dependency weekly instead.
 updates:
@@ -43,3 +46,23 @@ updates:
         patterns: ["*"]
     commit-message:
       prefix: "deps(builder)"
+  - package-ecosystem: pip
+    directory: "/components/automation-logging"
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 1
+    groups:
+      python:
+        patterns: ["*"]
+    commit-message:
+      prefix: "deps(logging)"
+  - package-ecosystem: pip
+    directory: "/components/automation-studio"
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 1
+    groups:
+      python:
+        patterns: ["*"]
+    commit-message:
+      prefix: "deps(studio)"
